@@ -28,7 +28,9 @@ pip install "epa-agent[ollama]"   # Ollama uses httpx, already a core dep
 pip install "epa-agent[mcp]"
 
 # Development
-pip install "epa-agent[anthropic,mcp,dev]"
+pip install -e .
+
+#pip install "epa-agent[anthropic,mcp,dev]"
 ```
 
 ## Quick start
