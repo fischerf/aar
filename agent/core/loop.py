@@ -5,14 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import AsyncIterator
 
 from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
     StopReason,
-    ToolCall,
 )
 from agent.core.session import Session
 from agent.core.state import AgentState
@@ -28,6 +26,7 @@ async def run_loop(
     tool_executor: ToolExecutor,
     config: AgentConfig,
     on_event=None,
+    cancel_event: asyncio.Event | None = None,
 ) -> Session:
     """Run the agent loop until completion, max steps, or timeout.
 
@@ -37,6 +36,7 @@ async def run_loop(
         tool_executor: Executor for tool calls.
         config: Agent configuration.
         on_event: Optional callback called with each new event.
+        cancel_event: Optional asyncio.Event; set it to request cooperative cancellation.
 
     Returns:
         The updated session.
@@ -45,102 +45,110 @@ async def run_loop(
     start_time = time.monotonic()
     done = False
 
-    while not done and session.step_count < config.max_steps:
-        # Timeout check
-        elapsed = time.monotonic() - start_time
-        if elapsed > config.timeout:
-            session.state = AgentState.ERROR
-            err = ErrorEvent(
-                message=f"Agent timed out after {config.timeout}s",
-                recoverable=False,
+    _log = logger.getChild("loop")
+    _extra = {"session_id": session.session_id, "trace_id": session.trace_id}
+
+    try:
+        while not done and session.step_count < config.max_steps:
+            # Cooperative cancellation
+            if cancel_event is not None and cancel_event.is_set():
+                session.state = AgentState.CANCELLED
+                _emit(session, on_event, ErrorEvent(message="Agent cancelled", recoverable=False))
+                return session
+
+            # Timeout check
+            elapsed = time.monotonic() - start_time
+            if elapsed > config.timeout:
+                session.state = AgentState.ERROR
+                _emit(session, on_event, ErrorEvent(
+                    message=f"Agent timed out after {config.timeout}s",
+                    recoverable=False,
+                ))
+                return session
+
+            session.increment_step()
+            messages = session.to_messages()
+            tool_schemas = tool_executor.registry.to_provider_schemas() or None
+
+            # Provider call — timed
+            t_provider = time.monotonic()
+            try:
+                response: ProviderResponse = await provider.complete(
+                    messages=messages,
+                    tools=tool_schemas,
+                    system=config.system_prompt,
+                )
+            except Exception as e:
+                _log.exception(
+                    "Provider error at step %d", session.step_count, extra=_extra
+                )
+                session.state = AgentState.ERROR
+                _emit(session, on_event, ErrorEvent(
+                    message=f"Provider error: {e}", recoverable=False
+                ))
+                return session
+
+            provider_ms = (time.monotonic() - t_provider) * 1000
+
+            # Stamp provider timing and record metadata
+            if response.meta:
+                response.meta.duration_ms = provider_ms
+                _emit(session, on_event, response.meta)
+
+            # Record reasoning blocks
+            for rb in response.reasoning:
+                _emit(session, on_event, rb)
+
+            _log.info(
+                "step=%d provider_ms=%.0f tool_calls=%d",
+                session.step_count,
+                provider_ms,
+                len(response.tool_calls),
+                extra=_extra,
             )
-            session.append(err)
-            if on_event:
-                on_event(err)
-            break
 
-        session.increment_step()
+            # Handle tool calls
+            if response.tool_calls:
+                _emit(session, on_event, AssistantMessage(
+                    content=response.content, stop_reason=StopReason.TOOL_USE
+                ))
+                for tc in response.tool_calls:
+                    _emit(session, on_event, tc)
 
-        # Build messages and tool schemas
-        messages = session.to_messages()
-        tool_schemas = tool_executor.registry.to_provider_schemas() or None
+                session.state = AgentState.WAITING_FOR_TOOL
+                results = await tool_executor.execute(response.tool_calls)
+                for tr in results:
+                    _emit(session, on_event, tr)
+                session.state = AgentState.RUNNING
+                continue
 
-        try:
-            response: ProviderResponse = await provider.complete(
-                messages=messages,
-                tools=tool_schemas,
-                system=config.system_prompt,
-            )
-        except Exception as e:
-            logger.exception("Provider error at step %d", session.step_count)
-            err = ErrorEvent(message=f"Provider error: {e}", recoverable=False)
-            session.append(err)
-            session.state = AgentState.ERROR
-            if on_event:
-                on_event(err)
-            break
+            # Final assistant message
+            stop = _parse_stop(response.stop_reason)
+            _emit(session, on_event, AssistantMessage(content=response.content, stop_reason=stop))
+            if stop in {StopReason.END_TURN, StopReason.MAX_TOKENS}:
+                done = True
 
-        # Record provider metadata
-        if response.meta:
-            session.append(response.meta)
-            if on_event:
-                on_event(response.meta)
+        if session.step_count >= config.max_steps and not done:
+            _emit(session, on_event, ErrorEvent(
+                message=f"Reached max steps ({config.max_steps})", recoverable=False
+            ))
 
-        # Record reasoning blocks
-        for rb in response.reasoning:
-            session.append(rb)
-            if on_event:
-                on_event(rb)
+        if session.state == AgentState.RUNNING:
+            session.state = AgentState.COMPLETED
 
-        # Handle tool calls
-        if response.tool_calls:
-            # Record the assistant message (may have text + tool calls)
-            assistant_msg = AssistantMessage(
-                content=response.content,
-                stop_reason=StopReason.TOOL_USE,
-            )
-            session.append(assistant_msg)
-            if on_event:
-                on_event(assistant_msg)
-
-            for tc in response.tool_calls:
-                session.append(tc)
-                if on_event:
-                    on_event(tc)
-
-            # Execute tools
-            session.state = AgentState.WAITING_FOR_TOOL
-            results = await tool_executor.execute(response.tool_calls)
-            for tr in results:
-                session.append(tr)
-                if on_event:
-                    on_event(tr)
-
-            session.state = AgentState.RUNNING
-            continue
-
-        # No tool calls — record the final assistant message
-        stop = _parse_stop(response.stop_reason)
-        assistant_msg = AssistantMessage(content=response.content, stop_reason=stop)
-        session.append(assistant_msg)
-        if on_event:
-            on_event(assistant_msg)
-
-        if stop in {StopReason.END_TURN, StopReason.MAX_TOKENS}:
-            done = True
-
-    if session.step_count >= config.max_steps and not done:
-        err = ErrorEvent(message=f"Reached max steps ({config.max_steps})", recoverable=False)
-        session.append(err)
-        if on_event:
-            on_event(err)
-
-    if done:
-        session.state = AgentState.COMPLETED
-    elif session.state == AgentState.RUNNING:
-        session.state = AgentState.COMPLETED
+    except asyncio.CancelledError:
+        session.state = AgentState.CANCELLED
+        _emit(session, on_event, ErrorEvent(message="Agent cancelled", recoverable=False))
+        raise
 
     return session
+
+
+def _emit(session: Session, on_event, event) -> None:
+    """Append an event to the session and fire the callback."""
+    session.append(event)
+    if on_event:
+        on_event(event)
 
 
 def _parse_stop(reason: str) -> StopReason:

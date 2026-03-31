@@ -300,3 +300,120 @@ async def test_loop_fires_event_callback(mock_provider, tool_registry, default_c
     assert EventType.ASSISTANT_MESSAGE in types
     assert EventType.TOOL_CALL in types
     assert EventType.TOOL_RESULT in types
+
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loop_respects_cancel_event(mock_provider, tool_registry, default_config):
+    """Setting cancel_event before the loop starts should cancel immediately."""
+    mock_provider.enqueue_text("Should not be reached")
+
+    session = Session()
+    session.add_user_message("Run forever")
+
+    cancel_event = asyncio.Event()
+    cancel_event.set()  # already set before the loop starts
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, default_config, cancel_event=cancel_event)
+
+    assert result.state == AgentState.CANCELLED
+    errors = [e for e in result.events if isinstance(e, ErrorEvent)]
+    assert any("cancelled" in e.message.lower() for e in errors)
+    # Provider should never have been called
+    assert len(mock_provider.call_history) == 0
+
+
+@pytest.mark.asyncio
+async def test_loop_cancel_event_mid_run(tool_registry, default_config):
+    """Setting cancel_event between steps should stop the loop cleanly."""
+    cancel_event = asyncio.Event()
+
+    class CancellingProvider(MockProvider):
+        async def complete(self, messages, tools=None, system=""):
+            # Cancel after the first call
+            cancel_event.set()
+            return await super().complete(messages, tools, system)
+
+    provider = CancellingProvider()
+    # First step: tool call so the loop continues; cancel fires, second step is skipped
+    provider.enqueue_tool_call("echo", {"message": "hi"}, "tc_1")
+    provider.enqueue_text("Should not be reached")
+
+    session = Session()
+    session.add_user_message("Go")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(
+        session, provider, executor, default_config, cancel_event=cancel_event
+    )
+
+    assert result.state == AgentState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_loop_handles_asyncio_cancelled_error(tool_registry, default_config):
+    """asyncio task cancellation should set state to CANCELLED and re-raise."""
+    class SlowProvider(MockProvider):
+        async def complete(self, messages, tools=None, system=""):
+            await asyncio.sleep(10)  # will be cancelled here
+            return await super().complete(messages, tools, system)
+
+    provider = SlowProvider()
+    provider.enqueue_text("unreachable")
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+
+    task = asyncio.create_task(run_loop(session, provider, executor, default_config))
+    await asyncio.sleep(0.01)  # let the task start
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert session.state == AgentState.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# Observability — timing fields
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provider_meta_has_duration(mock_provider, tool_registry, default_config):
+    """ProviderMeta events should carry a non-negative duration_ms after the loop."""
+    mock_provider.enqueue_text("Hi")
+
+    session = Session()
+    session.add_user_message("Hello")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, default_config)
+
+    metas = [e for e in result.events if isinstance(e, ProviderMeta)]
+    assert len(metas) == 1
+    assert metas[0].duration_ms >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_tool_result_has_duration(mock_provider, tool_registry, default_config):
+    """ToolResult events should carry a non-negative duration_ms."""
+    mock_provider.enqueue_tool_call("echo", {"message": "ping"}, "tc_1")
+    mock_provider.enqueue_text("Done")
+
+    session = Session()
+    session.add_user_message("Call echo")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, default_config)
+
+    tool_results = [e for e in result.events if isinstance(e, ToolResult)]
+    assert len(tool_results) == 1
+    assert tool_results[0].duration_ms >= 0.0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from typing import Any
 
 from agent.core.config import SafetyConfig, ToolConfig
@@ -94,6 +95,7 @@ class ToolExecutor:
                 )
 
         # --- Execute ---
+        t_start = time.monotonic()
         try:
             if inspect.iscoroutinefunction(spec.handler):
                 output = await asyncio.wait_for(
@@ -112,6 +114,7 @@ class ToolExecutor:
                 tool_call_id=tc.tool_call_id,
                 tool_name=tc.tool_name,
                 output=output_str,
+                duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except asyncio.TimeoutError:
             return ToolResult(
@@ -119,6 +122,7 @@ class ToolExecutor:
                 tool_name=tc.tool_name,
                 output=f"Error: tool '{tc.tool_name}' timed out after {self.tool_config.command_timeout}s",
                 is_error=True,
+                duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except Exception as e:
             logger.exception("Tool execution error: %s", tc.tool_name)
@@ -127,6 +131,7 @@ class ToolExecutor:
                 tool_name=tc.tool_name,
                 output=f"Error: {type(e).__name__}: {e}",
                 is_error=True,
+                duration_ms=(time.monotonic() - t_start) * 1000,
             )
 
 

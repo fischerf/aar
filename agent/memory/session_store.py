@@ -27,11 +27,11 @@ class SessionStore:
         """Save a session to a JSONL file. Each line is one event."""
         path = self._session_path(session.session_id)
 
-        # Write header line with session metadata
         header = {
             "_meta": True,
             "session_id": session.session_id,
             "run_id": session.run_id,
+            "trace_id": session.trace_id,
             "state": session.state.value,
             "step_count": session.step_count,
             "metadata": session.metadata,
@@ -55,7 +55,7 @@ class SessionStore:
         header: dict[str, Any] = {}
 
         with open(path, encoding="utf-8") as f:
-            for line_num, line in enumerate(f):
+            for line in f:
                 line = line.strip()
                 if not line:
                     continue
@@ -70,6 +70,7 @@ class SessionStore:
         session = Session(
             session_id=header.get("session_id", session_id),
             run_id=header.get("run_id", ""),
+            trace_id=header.get("trace_id", ""),
             state=AgentState(header.get("state", "idle")),
             step_count=header.get("step_count", 0),
             metadata=header.get("metadata", {}),
@@ -77,6 +78,23 @@ class SessionStore:
         )
 
         logger.info("Loaded session %s with %d events", session_id, len(events))
+        return session
+
+    def compact(self, session_id: str, max_events: int = 200) -> Session:
+        """Truncate a session to its most recent *max_events* events and rewrite the file.
+
+        Compaction keeps the session file from growing without bound in long-running
+        or resumed conversations. The compacted session is saved back to disk and
+        returned. Callers are responsible for re-injecting any system context that
+        may have been pruned (e.g. via the system_prompt in AgentConfig).
+        """
+        session = self.load(session_id)
+        if len(session.events) > max_events:
+            session.events = session.events[-max_events:]
+            logger.info(
+                "Compacted session %s to %d events", session_id, len(session.events)
+            )
+        self.save(session)
         return session
 
     def list_sessions(self) -> list[str]:

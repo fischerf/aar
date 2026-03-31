@@ -66,6 +66,7 @@ class ToolResult(Event):
     tool_name: str = ""
     output: str = ""
     is_error: bool = False
+    duration_ms: float = 0.0
 
 
 class ReasoningBlock(Event):
@@ -79,6 +80,7 @@ class ProviderMeta(Event):
     model: str = ""
     usage: dict[str, int] = Field(default_factory=dict)
     request_id: str = ""
+    duration_ms: float = 0.0
 
 
 class ErrorEvent(Event):

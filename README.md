@@ -4,12 +4,14 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 ## Design goals
 
-- **Thin core loop** — the main execution path is ~80 lines and readable at a glance
+- **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
 - **Provider-agnostic** — swap between Anthropic, OpenAI, and Ollama without changing agent code
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
-- **Persistent sessions** — every run is saved as JSONL and resumable
+- **Persistent sessions** — every run is saved as JSONL and resumable; long sessions can be compacted
+- **Observable** — every provider call and tool execution is timed; sessions carry a `trace_id`
+- **Cancellable** — cooperative (`asyncio.Event`) and hard (`CancelledError`) cancellation built in
 
 ## Installation
 
@@ -249,7 +251,7 @@ executor = ToolExecutor(
 
 ## Sessions and persistence
 
-Sessions are automatically saved as JSONL files. Every event (messages, tool calls, results, metadata) is persisted.
+Sessions are automatically saved as JSONL files. Every event (messages, tool calls, results, metadata) is persisted. Each session carries a `session_id`, a `run_id` (refreshed on resume), and a `trace_id` (stable for the lifetime of the session object).
 
 ```python
 from agent import Agent
@@ -262,6 +264,7 @@ store = SessionStore(".agent/sessions")
 session = await agent.run("Write a Python script that sorts a CSV")
 store.save(session)
 print(session.session_id)  # e.g. "a3f1b2c4d5e6f7a8"
+print(session.trace_id)    # stable identifier for logging / tracing
 
 # Resume later
 session = store.load("a3f1b2c4d5e6f7a8")
@@ -269,6 +272,9 @@ session = await agent.run("Now add error handling", session=session)
 
 # List all sessions
 print(store.list_sessions())
+
+# Compact a long session to its most recent 200 events
+store.compact("a3f1b2c4d5e6f7a8", max_events=200)
 ```
 
 ## Event model
@@ -291,6 +297,50 @@ session = await agent.run("Do something")
 ```
 
 Event types: `user_message`, `assistant_message`, `tool_call`, `tool_result`, `reasoning`, `provider_meta`, `error`, `session`.
+
+Timing fields are populated automatically by the runtime:
+- `ProviderMeta.duration_ms` — wall time for the provider API call
+- `ToolResult.duration_ms` — wall time for tool execution
+
+## Cancellation
+
+Pass an `asyncio.Event` to stop the loop cooperatively between steps:
+
+```python
+import asyncio
+from agent.core.loop import run_loop
+
+cancel = asyncio.Event()
+
+# Cancel from another coroutine or thread
+asyncio.get_event_loop().call_later(5.0, cancel.set)
+
+session = await run_loop(session, provider, executor, config, cancel_event=cancel)
+# session.state == AgentState.CANCELLED
+```
+
+Hard cancellation via `asyncio` task cancellation also works — the loop catches `CancelledError`, sets state to `CANCELLED`, and re-raises.
+
+## Observability
+
+Aggregate timing and token usage from any session:
+
+```python
+from agent.extensions.observability import session_metrics
+
+m = session_metrics(session)
+print(f"steps={m.total_steps}")
+print(f"tokens={m.total_tokens}  (in={m.total_input_tokens} out={m.total_output_tokens})")
+print(f"provider_ms={m.total_provider_duration_ms:.0f}")
+print(f"tool_ms={m.total_tool_duration_ms:.0f}  calls={m.total_tool_calls}")
+print(f"errors={m.total_errors}")
+
+# Per-step breakdown
+for step in m.steps:
+    print(f"  step {step.step}: provider={step.provider_duration_ms:.0f}ms  tools={step.total_tool_duration_ms:.0f}ms")
+```
+
+`session_metrics()` reads all events once; it does not require a live provider or executor.
 
 ## Web API
 
@@ -354,7 +404,9 @@ agent/
 │   ├── permissions.py   # PermissionManager (approval gates)
 │   └── sandbox.py       # LocalSandbox, SubprocessSandbox
 ├── memory/
-│   └── session_store.py # JSONL persistence
+│   └── session_store.py # JSONL persistence + compaction
+├── extensions/
+│   └── observability.py # session_metrics() — timing, tokens, errors
 └── transports/
     ├── cli.py           # Typer CLI (chat, run, tui, serve, …)
     ├── tui.py           # Rich TUI
@@ -366,12 +418,15 @@ The core loop:
 
 ```python
 while not done and step < max_steps:
+    if cancel_event and cancel_event.is_set(): break   # cooperative cancel
     if elapsed > timeout: break
 
+    t = time.monotonic()
     response = await provider.complete(messages, tools, system)
+    response.meta.duration_ms = (time.monotonic() - t) * 1000  # provider timing
 
     if response.tool_calls:
-        results = await tool_executor.execute(response.tool_calls)
+        results = await tool_executor.execute(response.tool_calls)  # tool timing inside
         session.append(results)
         continue
 
@@ -387,15 +442,16 @@ pip install "epa-agent[dev]"
 pytest tests/ -v
 ```
 
-The test suite (139 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
+The test suite (186 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
 
-- Loop termination, max steps, timeout, provider errors
-- Session persistence, resumption, message conversion
-- Event serialization round-trips for all event types
+- Loop termination, max steps, timeout, cancellation (`asyncio.Event` + `CancelledError`), provider errors
+- Session persistence, resumption, compaction, `trace_id` round-trip, message conversion
+- Event serialization round-trips for all event types, including `duration_ms` fields
 - Provider normalization for Anthropic, OpenAI, and Ollama (mocked)
-- Tool registry, schema inference, execution (sync/async, timeout, truncation)
+- Tool registry, schema inference, execution (sync/async, timeout, truncation, timing)
 - Safety policy (command deny-list, path restrictions, read-only mode, approval gates)
 - Sandbox execution and timeout
+- `session_metrics()` aggregation (timing, tokens, errors, per-step breakdown)
 
 ### Live testing against real providers
 
@@ -421,42 +477,37 @@ agent run "Reply with the word PONG." --provider ollama --model llama3.2
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-agent run "Reply with the word PONG." --provider anthropic --model claude-haiku-4-5-20251001
+pytest tests/test_providers.py -m live --live -k Anthropic -v
 ```
 
-To run as a pytest live test, mark your test with `@pytest.mark.live` and use `ProviderConfig(name="anthropic", model="...")` — the `--live` flag will include it automatically.
+Uses `claude-haiku-4-5-20251001` by default (cheapest model). Covers plain text, tool calls, stop-reason normalization, and provider meta. Quick smoke-test via CLI:
+
+```bash
+agent run "Reply with the word PONG." --provider anthropic --model claude-haiku-4-5-20251001
+```
 
 #### OpenAI (or any OpenAI-compatible endpoint)
 
 ```bash
 export OPENAI_API_KEY=sk-...
-agent run "Reply with the word PONG." --provider openai --model gpt-4o-mini
+pytest tests/test_providers.py -m live --live -k OpenAI -v
 ```
 
-For Azure or other compatible APIs, pass `base_url` in code:
-
-```python
-from agent import AgentConfig, ProviderConfig
-
-config = AgentConfig(provider=ProviderConfig(
-    name="openai",
-    model="gpt-4o-mini",
-    api_key="...",
-    base_url="https://your-endpoint.openai.azure.com/",
-))
-```
+Uses `gpt-4o-mini` by default. Compatible endpoints (Azure, Together, etc.) can be tested by setting `base_url` in `ProviderConfig`.
 
 #### Running all live tests together
 
 ```bash
-# All providers that have live test classes
+# All providers (Anthropic + OpenAI + Ollama CLI tests)
 pytest tests/ -m live --live -v
 
-# Just a specific provider file
-pytest tests/test_cli.py -m live --live -v
+# Single provider
+pytest tests/test_providers.py -m live --live -k Anthropic -v
+pytest tests/test_providers.py -m live --live -k OpenAI -v
+pytest tests/test_cli.py -m live --live -v           # Ollama
 ```
 
-Any test without a live API key will fail with an authentication error rather than being skipped — set only the keys for the providers you want to exercise.
+Tests for providers whose API key is not set will fail with an authentication error rather than being skipped — only export keys for the providers you want to exercise.
 
 ## Requirements
 

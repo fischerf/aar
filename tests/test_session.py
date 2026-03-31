@@ -31,9 +31,15 @@ class TestSessionBasics:
         s = Session()
         assert s.session_id
         assert s.run_id
+        assert s.trace_id
         assert s.state == AgentState.IDLE
         assert s.step_count == 0
         assert s.events == []
+
+    def test_session_ids_are_unique(self):
+        s1, s2 = Session(), Session()
+        assert s1.session_id != s2.session_id
+        assert s1.trace_id != s2.trace_id
 
     def test_add_user_message(self):
         s = Session()
@@ -218,9 +224,39 @@ class TestSessionPersistence:
         header = json.loads(lines[0])
         assert header["_meta"] is True
         assert header["session_id"] == s.session_id
+        assert header["trace_id"] == s.trace_id
 
         event = json.loads(lines[1])
         assert event["type"] == "user_message"
+
+    def test_save_and_load_preserves_trace_id(self, tmp_dir: Path):
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("hi")
+        store.save(s)
+
+        loaded = store.load(s.session_id)
+        assert loaded.trace_id == s.trace_id
+
+    def test_compact_truncates_old_events(self, tmp_dir: Path):
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for i in range(10):
+            s.add_user_message(f"msg {i}")
+        store.save(s)
+
+        compacted = store.compact(s.session_id, max_events=5)
+        assert len(compacted.events) == 5
+        assert compacted.events[0].content == "msg 5"  # oldest 5 pruned
+
+    def test_compact_no_op_when_under_limit(self, tmp_dir: Path):
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("only one")
+        store.save(s)
+
+        compacted = store.compact(s.session_id, max_events=100)
+        assert len(compacted.events) == 1
 
 
 # ---------------------------------------------------------------------------

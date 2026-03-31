@@ -24,6 +24,7 @@ class Session(BaseModel):
 
     session_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:16])
     run_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    trace_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     state: AgentState = AgentState.IDLE
     events: list[Event] = Field(default_factory=list)
     step_count: int = 0

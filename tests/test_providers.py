@@ -8,6 +8,10 @@ Tests that each provider adapter correctly normalizes:
 - malformed tool outputs
 
 These use mocked HTTP responses, not live API calls.
+
+Live tests (skipped by default) exercise the real APIs:
+    pytest tests/test_providers.py -m live --live
+Requires ANTHROPIC_API_KEY and/or OPENAI_API_KEY in the environment.
 """
 
 from __future__ import annotations
@@ -481,3 +485,129 @@ class TestOllamaMessageConversion:
         result = _convert_tools(tools)
         assert result[0]["type"] == "function"
         assert result[0]["function"]["name"] == "bash"
+
+
+# ---------------------------------------------------------------------------
+# Live provider tests — skipped unless --live is passed
+# ---------------------------------------------------------------------------
+
+_PING_PROMPT = "Reply with exactly the word PONG and nothing else."
+
+_ECHO_TOOL = {
+    "name": "echo",
+    "description": "Echo a message back",
+    "input_schema": {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+    },
+}
+
+
+@pytest.mark.live
+class TestLiveAnthropic:
+    """Integration tests against the real Anthropic Messages API.
+
+    Requires:
+        export ANTHROPIC_API_KEY=sk-ant-...
+
+    Run with:
+        pytest tests/test_providers.py -m live --live -k Anthropic
+    """
+
+    def _provider(self):
+        import os
+        from agent.providers.anthropic import AnthropicProvider
+        return AnthropicProvider(ProviderConfig(
+            name="anthropic",
+            model="claude-haiku-4-5-20251001",
+            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        ))
+
+    @pytest.mark.asyncio
+    async def test_plain_text_response(self):
+        provider = self._provider()
+        result = await provider.complete([{"role": "user", "content": _PING_PROMPT}])
+        assert result.content.strip()
+        assert result.stop_reason
+        assert result.meta is not None
+        assert result.meta.usage.get("input_tokens", 0) > 0
+
+    @pytest.mark.asyncio
+    async def test_tool_call_response(self):
+        provider = self._provider()
+        result = await provider.complete(
+            messages=[{"role": "user", "content": "Call echo with message='hello'"}],
+            tools=[_ECHO_TOOL],
+        )
+        # The model should request a tool call
+        assert len(result.tool_calls) > 0
+        assert result.tool_calls[0].tool_name == "echo"
+
+    @pytest.mark.asyncio
+    async def test_stop_reasons_normalized(self):
+        provider = self._provider()
+        result = await provider.complete([{"role": "user", "content": _PING_PROMPT}])
+        assert result.stop_reason in {"end_turn", "max_tokens", "tool_use"}
+
+    @pytest.mark.asyncio
+    async def test_provider_meta_populated(self):
+        provider = self._provider()
+        result = await provider.complete([{"role": "user", "content": _PING_PROMPT}])
+        assert result.meta is not None
+        assert result.meta.provider == "anthropic"
+        assert result.meta.model
+
+
+@pytest.mark.live
+class TestLiveOpenAI:
+    """Integration tests against the real OpenAI Chat Completions API.
+
+    Requires:
+        export OPENAI_API_KEY=sk-...
+
+    Run with:
+        pytest tests/test_providers.py -m live --live -k OpenAI
+    """
+
+    def _provider(self):
+        import os
+        from agent.providers.openai import OpenAIProvider
+        return OpenAIProvider(ProviderConfig(
+            name="openai",
+            model="gpt-4o-mini",
+            api_key=os.environ.get("OPENAI_API_KEY", ""),
+        ))
+
+    @pytest.mark.asyncio
+    async def test_plain_text_response(self):
+        provider = self._provider()
+        result = await provider.complete([{"role": "user", "content": _PING_PROMPT}])
+        assert result.content.strip()
+        assert result.stop_reason
+        assert result.meta is not None
+        assert result.meta.usage.get("input_tokens", 0) > 0
+
+    @pytest.mark.asyncio
+    async def test_tool_call_response(self):
+        provider = self._provider()
+        result = await provider.complete(
+            messages=[{"role": "user", "content": "Call echo with message='hello'"}],
+            tools=[_ECHO_TOOL],
+        )
+        assert len(result.tool_calls) > 0
+        assert result.tool_calls[0].tool_name == "echo"
+
+    @pytest.mark.asyncio
+    async def test_stop_reasons_normalized(self):
+        provider = self._provider()
+        result = await provider.complete([{"role": "user", "content": _PING_PROMPT}])
+        assert result.stop_reason in {"end_turn", "max_tokens", "tool_use", "stop"}
+
+    @pytest.mark.asyncio
+    async def test_provider_meta_populated(self):
+        provider = self._provider()
+        result = await provider.complete([{"role": "user", "content": _PING_PROMPT}])
+        assert result.meta is not None
+        assert result.meta.provider == "openai"
+        assert result.meta.model
