@@ -397,6 +397,67 @@ The test suite (139 tests) runs entirely without live API calls using a `MockPro
 - Safety policy (command deny-list, path restrictions, read-only mode, approval gates)
 - Sandbox execution and timeout
 
+### Live testing against real providers
+
+Live tests hit actual provider APIs and are skipped by default. Pass `--live` to enable them.
+
+#### Ollama (local, no API key required)
+
+```bash
+# Pull a model first
+ollama pull qwen3.5:9b
+
+# Run the live CLI tests
+pytest tests/test_cli.py -m live --live -v
+```
+
+The live test class (`TestLiveOllama`) uses `qwen3.5:9b` by default. To use a different model, edit the `MODEL` constant in `tests/test_cli.py` or run a one-off check via the CLI:
+
+```bash
+agent run "Reply with the word PONG." --provider ollama --model llama3.2
+```
+
+#### Anthropic
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+agent run "Reply with the word PONG." --provider anthropic --model claude-haiku-4-5-20251001
+```
+
+To run as a pytest live test, mark your test with `@pytest.mark.live` and use `ProviderConfig(name="anthropic", model="...")` — the `--live` flag will include it automatically.
+
+#### OpenAI (or any OpenAI-compatible endpoint)
+
+```bash
+export OPENAI_API_KEY=sk-...
+agent run "Reply with the word PONG." --provider openai --model gpt-4o-mini
+```
+
+For Azure or other compatible APIs, pass `base_url` in code:
+
+```python
+from agent import AgentConfig, ProviderConfig
+
+config = AgentConfig(provider=ProviderConfig(
+    name="openai",
+    model="gpt-4o-mini",
+    api_key="...",
+    base_url="https://your-endpoint.openai.azure.com/",
+))
+```
+
+#### Running all live tests together
+
+```bash
+# All providers that have live test classes
+pytest tests/ -m live --live -v
+
+# Just a specific provider file
+pytest tests/test_cli.py -m live --live -v
+```
+
+Any test without a live API key will fail with an authentication error rather than being skipped — set only the keys for the providers you want to exercise.
+
 ## Requirements
 
 - Python 3.11+
