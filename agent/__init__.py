@@ -1,4 +1,4 @@
-"""EPA — Extensible Python Agent framework."""
+"""Aar — Adaptive Action & Reasoning Agent framework."""
 
 from agent.core.agent import Agent
 from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "epa-agent"
+name = "aar-agent"
 version = "0.1.0"
-description = "A lean, extensible Python agent framework"
+description = "Aar — Adaptive Action & Reasoning Agent framework"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",

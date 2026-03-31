@@ -12,7 +12,7 @@ Transports supported:
 
 Installation::
 
-    pip install "epa-agent[mcp]"   # pulls in the official `mcp` SDK
+    pip install "aar-agent[mcp]"   # pulls in the official `mcp` SDK
 
 Usage::
 
@@ -126,13 +126,9 @@ class MCPClient:
 
         from mcp import ClientSession
 
-        self._session = await self._exit_stack.enter_async_context(
-            ClientSession(read, write)
-        )
+        self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
         await self._session.initialize()
-        logger.info(
-            "Connected to MCP server %r (%s)", self.config.name, self.config.transport
-        )
+        logger.info("Connected to MCP server %r (%s)", self.config.name, self.config.transport)
         return self
 
     async def __aexit__(self, *args: Any) -> None:
@@ -179,9 +175,7 @@ class MCPClient:
         specs = []
         for tool in response.tools:
             local_name = (
-                f"{self.config.name}__{tool.name}"
-                if self.config.prefix_tools
-                else tool.name
+                f"{self.config.name}__{tool.name}" if self.config.prefix_tools else tool.name
             )
             spec = ToolSpec(
                 name=local_name,
@@ -191,9 +185,7 @@ class MCPClient:
                 handler=_make_tool_handler(self, tool.name),
             )
             specs.append(spec)
-            logger.debug(
-                "Discovered MCP tool %r from server %r", local_name, self.config.name
-            )
+            logger.debug("Discovered MCP tool %r from server %r", local_name, self.config.name)
         return specs
 
     async def call_tool(self, mcp_tool_name: str, arguments: dict[str, Any]) -> str:
@@ -204,9 +196,7 @@ class MCPClient:
 
     def _assert_connected(self) -> None:
         if self._session is None:
-            raise RuntimeError(
-                "MCPClient is not connected. Use it as an async context manager."
-            )
+            raise RuntimeError("MCPClient is not connected. Use it as an async context manager.")
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +289,7 @@ def _require_mcp() -> None:
     except ImportError as exc:
         raise ImportError(
             "The 'mcp' package is required for MCP support. "
-            "Install it with: pip install 'epa-agent[mcp]'"
+            "Install it with: pip install 'aar-agent[mcp]'"
         ) from exc
 
 
@@ -333,15 +323,9 @@ def _content_to_str(content: list[Any]) -> str:
             if hasattr(resource, "text"):
                 parts.append(resource.text)
             elif hasattr(resource, "blob"):
-                parts.append(
-                    f"[blob resource: {getattr(resource, 'uri', 'unknown')}]"
-                )
+                parts.append(f"[blob resource: {getattr(resource, 'uri', 'unknown')}]")
             else:
-                dumped = (
-                    resource.model_dump()
-                    if hasattr(resource, "model_dump")
-                    else str(resource)
-                )
+                dumped = resource.model_dump() if hasattr(resource, "model_dump") else str(resource)
                 parts.append(json.dumps(dumped))
         else:
             parts.append(str(block))

@@ -1,6 +1,6 @@
-# EPA — Extensible Python Agent
+# Aar — Adaptive Action & Reasoning Agent
 
-A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
+A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports. **Aar** stands for *Adaptive Action & Reasoning*.
 
 ## Design goals
 
@@ -17,20 +17,20 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 ```bash
 # Core only (no LLM provider)
-pip install epa-agent
+pip install aar-agent
 
 # With a specific provider
-pip install "epa-agent[anthropic]"
-pip install "epa-agent[openai]"
-pip install "epa-agent[ollama]"   # Ollama uses httpx, already a core dep
+pip install "aar-agent[anthropic]"
+pip install "aar-agent[openai]"
+pip install "aar-agent[ollama]"   # Ollama uses httpx, already a core dep
 
 # With MCP support
-pip install "epa-agent[mcp]"
+pip install "aar-agent[mcp]"
 
 # Development
 pip install -e .
 
-#pip install "epa-agent[anthropic,mcp,dev]"
+#pip install "aar-agent[anthropic,mcp,dev]"
 ```
 
 ## Quick start
@@ -349,10 +349,10 @@ for step in m.steps:
 
 ## MCP (Model Context Protocol)
 
-EPA can act as an **MCP host** — connecting to one or more external MCP servers and exposing their tools as native agent tools. The core loop sees them identically to built-in tools.
+Aar can act as an **MCP host** — connecting to one or more external MCP servers and exposing their tools as native agent tools. The core loop sees them identically to built-in tools.
 
 ```bash
-pip install "epa-agent[mcp]"
+pip install "aar-agent[mcp]"
 ```
 
 ### Connect to a local stdio server
@@ -421,7 +421,7 @@ Without `prefix_tools`, a collision raises `ValueError` immediately so it is nev
 
 ### MCP content types
 
-MCP tool results can contain mixed content. EPA serializes all blocks to a plain string for the LLM:
+MCP tool results can contain mixed content. Aar serializes all blocks to a plain string for the LLM:
 
 | MCP block type | Serialized as |
 |---|---|
@@ -527,7 +527,7 @@ while not done and step < max_steps:
 ## Testing
 
 ```bash
-pip install "epa-agent[dev]"
+pip install "aar-agent[dev]"
 pytest tests/ -v
 ```
 

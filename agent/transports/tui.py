@@ -76,9 +76,7 @@ class TUIRenderer:
             title = f"[bold {style}]Result: {event.tool_name}[/]"
             if event.is_error:
                 title += " [red]ERROR[/]"
-            self.console.print(
-                Panel(output, title=title, border_style=style, padding=(0, 2))
-            )
+            self.console.print(Panel(output, title=title, border_style=style, padding=(0, 2)))
 
         elif isinstance(event, ReasoningBlock) and event.content:
             text = event.content
@@ -132,7 +130,7 @@ class TUIRenderer:
     def render_welcome(self) -> None:
         self.console.print(
             Panel(
-                "[bold]EPA Agent TUI[/]\n\n"
+                "[bold]Aar Agent TUI[/]\n\n"
                 "Type your message and press Enter.\n"
                 "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] [bold]/clear[/]",
                 border_style="blue",
@@ -186,7 +184,9 @@ async def run_tui(config: AgentConfig | None = None, agent: Agent | None = None)
             elif stripped.lower() == "/tools":
                 for spec in agent.registry.list_tools():
                     effects = ", ".join(e.value for e in spec.side_effects)
-                    renderer.console.print(f"  [bold]{spec.name}[/]  [dim]({effects})[/]  {spec.description}")
+                    renderer.console.print(
+                        f"  [bold]{spec.name}[/]  [dim]({effects})[/]  {spec.description}"
+                    )
                 continue
             elif stripped.lower() == "/clear":
                 renderer.console.clear()
@@ -195,9 +195,7 @@ async def run_tui(config: AgentConfig | None = None, agent: Agent | None = None)
                 continue
 
             # Run the agent
-            renderer.console.print(
-                Text("  Working...", style="dim italic")
-            )
+            renderer.console.print(Text("  Working...", style="dim italic"))
             session = await agent.run(stripped, session)
             store.save(session)
 

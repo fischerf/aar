@@ -19,7 +19,7 @@ class OpenAIProvider(Provider):
             import openai
         except ImportError:
             raise ImportError(
-                "The 'openai' package is required. Install with: pip install epa-agent[openai]"
+                "The 'openai' package is required. Install with: pip install aar-agent[openai]"
             )
         kwargs: dict[str, Any] = {}
         if config.api_key:
@@ -132,16 +132,16 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                 tool_results = [b for b in content if b.get("type") == "tool_result"]
                 if tool_results:
                     for tr in tool_results:
-                        api_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tr["tool_use_id"],
-                            "content": tr.get("content", ""),
-                        })
+                        api_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tr["tool_use_id"],
+                                "content": tr.get("content", ""),
+                            }
+                        )
                 else:
                     # Plain text blocks
-                    text = " ".join(
-                        b.get("text", "") for b in content if b.get("type") == "text"
-                    )
+                    text = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
                     api_messages.append({"role": "user", "content": text})
 
     return api_messages
@@ -156,14 +156,16 @@ def _convert_assistant_blocks(blocks: list[dict[str, Any]]) -> dict[str, Any]:
         if block.get("type") == "text":
             text_parts.append(block["text"])
         elif block.get("type") == "tool_use":
-            tool_calls.append({
-                "id": block["id"],
-                "type": "function",
-                "function": {
-                    "name": block["name"],
-                    "arguments": json.dumps(block.get("input", {})),
-                },
-            })
+            tool_calls.append(
+                {
+                    "id": block["id"],
+                    "type": "function",
+                    "function": {
+                        "name": block["name"],
+                        "arguments": json.dumps(block.get("input", {})),
+                    },
+                }
+            )
 
     msg: dict[str, Any] = {"role": "assistant"}
     msg["content"] = " ".join(text_parts) if text_parts else None
@@ -176,14 +178,16 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic tool schemas to OpenAI function-calling format."""
     openai_tools = []
     for tool in tools:
-        openai_tools.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
-            },
-        })
+        openai_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+        )
     return openai_tools
 
 

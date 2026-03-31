@@ -18,7 +18,7 @@ class AnthropicProvider(Provider):
             import anthropic
         except ImportError:
             raise ImportError(
-                "The 'anthropic' package is required. Install with: pip install epa-agent[anthropic]"
+                "The 'anthropic' package is required. Install with: pip install aar-agent[anthropic]"
             )
         self._client = anthropic.AsyncAnthropic(
             api_key=config.api_key or None,
