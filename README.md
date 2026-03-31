@@ -60,7 +60,7 @@ installed package — no `pip install` step needed between changes.
 To verify the install:
 
 ```bash
-agent --help          # CLI entry-point should be on your PATH
+aar --help          # CLI entry-point should be on your PATH
 pytest tests/ -v      # run the full test suite (214 tests, no API keys required)
 ```
 
@@ -72,29 +72,29 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 
 ```bash
 # Interactive chat
-agent chat
+aar chat
 
 # Chat with a specific provider/model
-agent chat --provider openai --model gpt-4o
-agent chat --provider ollama --model llama3
+aar chat --provider openai --model gpt-4o
+aar chat --provider ollama --model llama3
 
 # Run a one-shot task
-agent run "Refactor main.py to use async/await"
+aar run "Refactor main.py to use async/await"
 
 # Resume a previous session
-agent resume <session-id>
+aar resume <session-id>
 
 # List saved sessions
-agent sessions
+aar sessions
 
 # List available tools
-agent tools
+aar tools
 
 # Launch the rich TUI
-agent tui
+aar tui
 
 # Start the HTTP/SSE web server
-agent serve --host 0.0.0.0 --port 8080
+aar serve --host 0.0.0.0 --port 8080
 ```
 
 or programmatic:
@@ -394,19 +394,19 @@ The fastest way to attach MCP servers to any command is `--mcp-config`:
 
 ```bash
 # Interactive chat with a filesystem server
-agent chat --mcp-config mcp.json
+aar chat --mcp-config mcp.json
 
 # One-shot task
-agent run "List the Python files in /tmp" --mcp-config mcp.json
+aar run "List the Python files in /tmp" --mcp-config mcp.json
 
 # Resume a session and keep the same MCP tools available
-agent resume <session-id> --mcp-config mcp.json
+aar resume <session-id> --mcp-config mcp.json
 
 # See all registered tools (built-ins + MCP)
-agent tools --mcp-config mcp.json
+aar tools --mcp-config mcp.json
 
 # Rich TUI with MCP tools
-agent tui --mcp-config mcp.json
+aar tui --mcp-config mcp.json
 ```
 
 `--mcp-config` is supported by `chat`, `run`, `resume`, `tools`, and `tui`. The bridge is opened before the first prompt and closed after the last response.
@@ -615,7 +615,7 @@ asyncio.run(main())
 
 ```bash
 pip install uvicorn
-agent serve --port 8080
+aar serve --port 8080
 ```
 
 | Endpoint | Method | Description |
@@ -741,7 +741,7 @@ pytest tests/test_cli.py -m live --live -v
 The live test class (`TestLiveOllama`) uses `qwen3.5:9b` by default. To use a different model, edit the `MODEL` constant in `tests/test_cli.py` or run a one-off check via the CLI:
 
 ```bash
-agent run "Reply with the word PONG." --provider ollama --model llama3.2
+aar run "Reply with the word PONG." --provider ollama --model llama3.2
 ```
 
 #### Anthropic
@@ -754,7 +754,7 @@ pytest tests/test_providers.py -m live --live -k Anthropic -v
 Uses `claude-haiku-4-5-20251001` by default (cheapest model). Covers plain text, tool calls, stop-reason normalization, and provider meta. Quick smoke-test via CLI:
 
 ```bash
-agent run "Reply with the word PONG." --provider anthropic --model claude-haiku-4-5-20251001
+aar run "Reply with the word PONG." --provider anthropic --model claude-haiku-4-5-20251001
 ```
 
 #### OpenAI (or any OpenAI-compatible endpoint)

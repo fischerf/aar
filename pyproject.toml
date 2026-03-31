@@ -26,7 +26,7 @@ dev = [
 ]
 
 [project.scripts]
-agent = "agent.transports.cli:app"
+aar = "agent.transports.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]
