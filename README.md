@@ -97,6 +97,22 @@ aar tui
 aar serve --host 0.0.0.0 --port 8080
 ```
 
+### Verbose mode
+
+Pass `--verbose` (or `-v`) to `chat`, `run`, `resume`, or `tui` to enable richer
+operation feedback:
+
+- **Side-effect badge** before each tool name — `[read]`, `[write]`, `[exec]`, `[net]`, `[ext]`
+- **Path highlighting** — file paths in tool arguments are shown in blue
+- **Timing** — execution duration is appended to each result panel title (e.g. `Result: edit_file 42ms`)
+
+```bash
+aar chat --verbose
+aar run "refactor src/main.py" --verbose
+aar tui --verbose
+aar tui --verbose --mcp-config tools/mcp_servers.json --provider ollama --model qwen3.5:9b
+```
+
 or programmatic:
 
 ```python

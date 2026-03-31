@@ -53,39 +53,70 @@ def _build_config(
     )
 
 
-def _event_handler(event: Event) -> None:
-    """Pretty-print events to the console."""
-    if isinstance(event, AssistantMessage) and event.content:
-        console.print()
-        console.print(Markdown(event.content))
-    elif isinstance(event, ToolCall):
-        console.print(
-            f"\n[bold yellow]Tool:[/] {event.tool_name}",
-            highlight=False,
-        )
-        if event.arguments:
-            for k, v in event.arguments.items():
-                val = str(v)
-                if len(val) > 200:
-                    val = val[:200] + "..."
-                console.print(f"  [dim]{k}:[/] {val}", highlight=False)
-    elif isinstance(event, ToolResult):
-        style = "red" if event.is_error else "green"
-        output = event.output
-        if len(output) > 500:
-            output = output[:500] + "\n... (truncated)"
-        console.print(Panel(output, title=f"Result: {event.tool_name}", border_style=style))
-    elif isinstance(event, ReasoningBlock) and event.content:
-        console.print(f"\n[dim italic]{event.content[:300]}[/]")
-    elif isinstance(event, ErrorEvent):
-        console.print(f"\n[bold red]Error:[/] {event.message}")
-    elif isinstance(event, ProviderMeta):
-        tokens = event.usage
-        if tokens:
-            console.print(
-                f"[dim]({tokens.get('input_tokens', 0)}in / {tokens.get('output_tokens', 0)}out)[/]",
-                justify="right",
-            )
+_SIDE_EFFECT_BADGES = {
+    "read": "[dim cyan][read][/]",
+    "write": "[yellow][write][/]",
+    "execute": "[red][exec][/]",
+    "network": "[blue][net][/]",
+    "external": "[magenta][ext][/]",
+}
+
+
+def _side_effect_badge(side_effects: list[str]) -> str:
+    parts = [_SIDE_EFFECT_BADGES[e] for e in side_effects if e in _SIDE_EFFECT_BADGES]
+    return " ".join(parts)
+
+
+def _looks_like_path(s: str) -> bool:
+    return len(s) < 120 and ("/" in s or "\\" in s)
+
+
+def _make_event_handler(verbose: bool = False):
+    """Return an event handler callback, optionally with richer feedback."""
+
+    def _handler(event: Event) -> None:
+        if isinstance(event, AssistantMessage) and event.content:
+            console.print()
+            console.print(Markdown(event.content))
+        elif isinstance(event, ToolCall):
+            if verbose:
+                badge = _side_effect_badge(event.data.get("side_effects", []))
+                prefix = f"{badge} " if badge else ""
+                console.print(f"\n{prefix}[bold yellow]{event.tool_name}[/]", highlight=False)
+            else:
+                console.print(f"\n[bold yellow]Tool:[/] {event.tool_name}", highlight=False)
+            if event.arguments:
+                for k, v in event.arguments.items():
+                    val = str(v)
+                    if len(val) > 200:
+                        val = val[:200] + "..."
+                    if verbose and _looks_like_path(val):
+                        console.print(f"  [dim]{k}:[/] [bold blue]{val}[/]", highlight=False)
+                    else:
+                        console.print(f"  [dim]{k}:[/] {val}", highlight=False)
+        elif isinstance(event, ToolResult):
+            style = "red" if event.is_error else "green"
+            output = event.output
+            if len(output) > 500:
+                output = output[:500] + "\n... (truncated)"
+            if verbose and event.duration_ms > 0:
+                duration = f" [dim]{event.duration_ms:.0f}ms[/]"
+            else:
+                duration = ""
+            console.print(Panel(output, title=f"Result: {event.tool_name}{duration}", border_style=style))
+        elif isinstance(event, ReasoningBlock) and event.content:
+            console.print(f"\n[dim italic]{event.content[:300]}[/]")
+        elif isinstance(event, ErrorEvent):
+            console.print(f"\n[bold red]Error:[/] {event.message}")
+        elif isinstance(event, ProviderMeta):
+            tokens = event.usage
+            if tokens:
+                console.print(
+                    f"[dim]({tokens.get('input_tokens', 0)}in / {tokens.get('output_tokens', 0)}out)[/]",
+                    justify="right",
+                )
+
+    return _handler
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +164,10 @@ async def _async_chat_loop(
     agent: Agent,
     config: AgentConfig,
     session_id: str | None = None,
+    verbose: bool = False,
 ) -> None:
     """Interactive chat loop — fully async so the MCP bridge stays open."""
-    agent.on_event(_event_handler)
+    agent.on_event(_make_event_handler(verbose))
     store = SessionStore(config.session_dir)
     session: Session | None = None
 
@@ -188,12 +220,13 @@ def chat(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
 ) -> None:
     """Start an interactive chat session."""
     config = _build_config(model=model, provider=provider, max_steps=max_steps)
     asyncio.run(
         _run_with_mcp(
-            lambda agent: _async_chat_loop(agent, config, session_id),
+            lambda agent: _async_chat_loop(agent, config, session_id, verbose),
             config,
             mcp_config,
         )
@@ -209,12 +242,13 @@ def run(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(model=model, provider=provider, max_steps=max_steps)
 
     async def _do(agent: Agent) -> None:
-        agent.on_event(_event_handler)
+        agent.on_event(_make_event_handler(verbose))
         session = await agent.run(task)
         store = SessionStore(config.session_dir)
         store.save(session)
@@ -229,12 +263,13 @@ def resume(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
 ) -> None:
     """Resume a saved session."""
     config = _build_config()
     asyncio.run(
         _run_with_mcp(
-            lambda agent: _async_chat_loop(agent, config, session_id),
+            lambda agent: _async_chat_loop(agent, config, session_id, verbose),
             config,
             mcp_config,
         )
@@ -278,6 +313,7 @@ def tui(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
 ) -> None:
     """Launch the rich TUI interface."""
     from agent.transports.tui import run_tui
@@ -285,7 +321,7 @@ def tui(
     config = _build_config(model=model, provider=provider, max_steps=max_steps)
     asyncio.run(
         _run_with_mcp(
-            lambda agent: run_tui(config, agent=agent),
+            lambda agent: run_tui(config, agent=agent, verbose=verbose),
             config,
             mcp_config,
         )

@@ -113,6 +113,9 @@ async def run_loop(
                     content=response.content, stop_reason=StopReason.TOOL_USE
                 ))
                 for tc in response.tool_calls:
+                    spec = tool_executor.registry.get(tc.tool_name)
+                    if spec:
+                        tc.data["side_effects"] = [e.value for e in spec.side_effects]
                     _emit(session, on_event, tc)
 
                 session.state = AgentState.WAITING_FOR_TOOL

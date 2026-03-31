@@ -34,8 +34,9 @@ from agent.memory.session_store import SessionStore
 class TUIRenderer:
     """Renders agent events into a rich terminal display."""
 
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(self, console: Console | None = None, verbose: bool = False) -> None:
         self.console = console or Console()
+        self._verbose = verbose
         self._tool_calls: list[ToolCall] = []
         self._tool_results: list[ToolResult] = []
         self._usage_total: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
@@ -57,14 +58,15 @@ class TUIRenderer:
         elif isinstance(event, ToolCall):
             self._tool_calls.append(event)
             self._step_count += 1
-            args_display = _format_args(event.arguments)
+            args_display = _format_args(event.arguments, verbose=self._verbose)
+            if self._verbose:
+                badge = _side_effect_badge(event.data.get("side_effects", []))
+                badge_prefix = f"{badge} " if badge else ""
+                title = f"{badge_prefix}[bold yellow]{event.tool_name}[/] [dim](step {self._step_count})[/]"
+            else:
+                title = f"[bold yellow]Tool: {event.tool_name}[/] [dim](step {self._step_count})[/]"
             self.console.print(
-                Panel(
-                    args_display,
-                    title=f"[bold yellow]Tool: {event.tool_name}[/] [dim](step {self._step_count})[/]",
-                    border_style="yellow",
-                    padding=(0, 2),
-                )
+                Panel(args_display, title=title, border_style="yellow", padding=(0, 2))
             )
 
         elif isinstance(event, ToolResult):
@@ -73,7 +75,11 @@ class TUIRenderer:
             output = event.output
             if len(output) > 1000:
                 output = output[:1000] + "\n... (truncated)"
-            title = f"[bold {style}]Result: {event.tool_name}[/]"
+            if self._verbose and event.duration_ms > 0:
+                duration = f" [dim]{event.duration_ms:.0f}ms[/]"
+            else:
+                duration = ""
+            title = f"[bold {style}]Result: {event.tool_name}[/]{duration}"
             if event.is_error:
                 title += " [red]ERROR[/]"
             self.console.print(Panel(output, title=title, border_style=style, padding=(0, 2)))
@@ -139,17 +145,42 @@ class TUIRenderer:
         )
 
 
-def _format_args(arguments: dict[str, Any]) -> str:
+_SIDE_EFFECT_BADGES = {
+    "read": "[dim cyan][read][/]",
+    "write": "[yellow][write][/]",
+    "execute": "[red][exec][/]",
+    "network": "[blue][net][/]",
+    "external": "[magenta][ext][/]",
+}
+
+
+def _side_effect_badge(side_effects: list[str]) -> str:
+    parts = [_SIDE_EFFECT_BADGES[e] for e in side_effects if e in _SIDE_EFFECT_BADGES]
+    return " ".join(parts)
+
+
+def _looks_like_path(s: str) -> bool:
+    return len(s) < 120 and ("/" in s or "\\" in s)
+
+
+def _format_args(arguments: dict[str, Any], verbose: bool = False) -> str:
     lines = []
     for k, v in arguments.items():
         val = str(v)
         if len(val) > 300:
             val = val[:300] + "..."
-        lines.append(f"[bold]{k}:[/] {val}")
+        if verbose and _looks_like_path(val):
+            lines.append(f"[bold]{k}:[/] [bold blue]{val}[/]")
+        else:
+            lines.append(f"[bold]{k}:[/] {val}")
     return "\n".join(lines) if lines else "(no arguments)"
 
 
-async def run_tui(config: AgentConfig | None = None, agent: Agent | None = None) -> None:
+async def run_tui(
+    config: AgentConfig | None = None,
+    agent: Agent | None = None,
+    verbose: bool = False,
+) -> None:
     """Launch the TUI interactive loop.
 
     If *agent* is provided it is used as-is (e.g. with MCP tools already
@@ -157,7 +188,7 @@ async def run_tui(config: AgentConfig | None = None, agent: Agent | None = None)
     """
     config = config or AgentConfig()
     agent = agent or Agent(config=config)
-    renderer = TUIRenderer()
+    renderer = TUIRenderer(verbose=verbose)
     store = SessionStore(config.session_dir)
     session: Session | None = None
 
