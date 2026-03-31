@@ -24,8 +24,11 @@ pip install "epa-agent[anthropic]"
 pip install "epa-agent[openai]"
 pip install "epa-agent[ollama]"   # Ollama uses httpx, already a core dep
 
+# With MCP support
+pip install "epa-agent[mcp]"
+
 # Development
-pip install "epa-agent[anthropic,dev]"
+pip install "epa-agent[anthropic,mcp,dev]"
 ```
 
 ## Quick start
@@ -342,6 +345,89 @@ for step in m.steps:
 
 `session_metrics()` reads all events once; it does not require a live provider or executor.
 
+## MCP (Model Context Protocol)
+
+EPA can act as an **MCP host** — connecting to one or more external MCP servers and exposing their tools as native agent tools. The core loop sees them identically to built-in tools.
+
+```bash
+pip install "epa-agent[mcp]"
+```
+
+### Connect to a local stdio server
+
+```python
+import asyncio
+from agent import Agent, AgentConfig, ProviderConfig
+from agent.extensions.mcp import MCPBridge, MCPServerConfig
+from agent.tools.registry import ToolRegistry
+from agent.tools.execution import ToolExecutor
+from agent.core.config import ToolConfig, SafetyConfig
+
+servers = [
+    MCPServerConfig(
+        name="fs",
+        transport="stdio",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    ),
+]
+
+async def main():
+    registry = ToolRegistry()
+
+    async with MCPBridge(servers) as bridge:
+        n = await bridge.register_all(registry)
+        print(f"Registered {n} MCP tools: {registry.names()}")
+
+        executor = ToolExecutor(registry, ToolConfig(), SafetyConfig())
+        config = AgentConfig(provider=ProviderConfig(name="anthropic", model="claude-haiku-4-5-20251001"))
+        agent = Agent(config=config, tool_executor=executor)
+        session = await agent.run("List files in /tmp")
+        print(session.state)
+
+asyncio.run(main())
+```
+
+### Connect to a remote HTTP server
+
+```python
+MCPServerConfig(
+    name="myapi",
+    transport="http",
+    url="https://myserver.example.com/mcp",
+    headers={"Authorization": "Bearer sk-..."},
+)
+```
+
+### Avoid name collisions across servers
+
+If two servers expose tools with the same name, use `prefix_tools=True` to namespace them:
+
+```python
+MCPServerConfig(name="github", transport="stdio", command="uvx", args=["mcp-server-github"], prefix_tools=True)
+# registers tools as "github__create_issue", "github__list_prs", etc.
+```
+
+Without `prefix_tools`, a collision raises `ValueError` immediately so it is never silently ignored.
+
+### Supported MCP transports
+
+| Transport | How it works | When to use |
+|---|---|---|
+| `stdio` | Spawns a local subprocess, communicates via stdin/stdout | Local tools (filesystem, git, databases) |
+| `http` | HTTP POST + optional SSE (Streamable HTTP) | Remote or shared servers |
+
+### MCP content types
+
+MCP tool results can contain mixed content. EPA serializes all blocks to a plain string for the LLM:
+
+| MCP block type | Serialized as |
+|---|---|
+| `TextContent` | The text value |
+| `ImageContent` | `[image: mime/type]` |
+| `EmbeddedResource` (text) | The text value |
+| `EmbeddedResource` (blob) | `[blob resource: uri]` |
+
 ## Web API
 
 ```bash
@@ -406,6 +492,7 @@ agent/
 ├── memory/
 │   └── session_store.py # JSONL persistence + compaction
 ├── extensions/
+│   ├── mcp.py           # MCPBridge — connect MCP servers, register tools
 │   └── observability.py # session_metrics() — timing, tokens, errors
 └── transports/
     ├── cli.py           # Typer CLI (chat, run, tui, serve, …)
@@ -442,7 +529,7 @@ pip install "epa-agent[dev]"
 pytest tests/ -v
 ```
 
-The test suite (186 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
+The test suite (214 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
 
 - Loop termination, max steps, timeout, cancellation (`asyncio.Event` + `CancelledError`), provider errors
 - Session persistence, resumption, compaction, `trace_id` round-trip, message conversion
@@ -452,6 +539,7 @@ The test suite (186 tests) runs entirely without live API calls using a `MockPro
 - Safety policy (command deny-list, path restrictions, read-only mode, approval gates)
 - Sandbox execution and timeout
 - `session_metrics()` aggregation (timing, tokens, errors, per-step breakdown)
+- MCP bridge: tool discovery, handler dispatch, content serialization, name collision detection, stdio/http transports (all mocked — no real MCP server required)
 
 ### Live testing against real providers
 

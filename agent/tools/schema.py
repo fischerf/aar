@@ -14,6 +14,7 @@ class SideEffect(str, Enum):
     WRITE = "write"
     EXECUTE = "execute"
     NETWORK = "network"
+    EXTERNAL = "external"   # tool executes via an external MCP server
 
 
 class ToolSpec(BaseModel):
