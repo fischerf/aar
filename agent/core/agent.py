@@ -65,14 +65,17 @@ class Agent:
         fs_tools = {"read_file", "write_file", "edit_file", "list_directory"}
         shell_tools = {"bash"}
 
+        # Track pre-existing tools (e.g. MCP) so we don't prune them
+        pre_existing = set(self.registry.names())
+
         if enabled & fs_tools:
             register_filesystem_tools(self.registry)
         if enabled & shell_tools:
             register_shell_tools(self.registry)
 
-        # Remove any tools that weren't explicitly enabled
-        all_registered = set(self.registry.names())
-        for name in all_registered - enabled:
+        # Only prune builtins we just added that weren't explicitly enabled
+        newly_added = set(self.registry.names()) - pre_existing
+        for name in newly_added - enabled:
             if name in self.registry._tools:
                 del self.registry._tools[name]
 

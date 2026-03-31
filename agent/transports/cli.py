@@ -6,7 +6,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -88,17 +88,54 @@ def _event_handler(event: Event) -> None:
             )
 
 
-def _run_chat_loop(
-    session_id: Optional[str] = None,
-    model: str = _DEFAULT_MODEL,
-    provider: str = _DEFAULT_PROVIDER,
-    max_steps: int = _DEFAULT_MAX_STEPS,
-) -> None:
-    """Shared implementation for chat and resume — accepts plain Python types."""
-    config = _build_config(model=model, provider=provider, max_steps=max_steps)
-    agent = Agent(config=config)
-    agent.on_event(_event_handler)
+# ---------------------------------------------------------------------------
+# MCP-aware agent creation
+# ---------------------------------------------------------------------------
 
+
+async def _run_with_mcp(
+    coro_factory: Any,
+    config: AgentConfig,
+    mcp_config_path: str | None = None,
+) -> Any:
+    """Run an async operation with optional MCP bridge lifecycle management.
+
+    If *mcp_config_path* is provided, opens an :class:`MCPBridge`, registers
+    all discovered tools into a shared :class:`ToolRegistry`, creates an
+    :class:`Agent` with that registry, and calls ``coro_factory(agent)``.
+    The bridge stays alive until the coroutine completes.
+
+    Without *mcp_config_path* this simply creates a plain ``Agent`` and
+    delegates to the coroutine factory.
+    """
+    if mcp_config_path:
+        from agent.extensions.mcp import MCPBridge, load_mcp_config
+        from agent.tools.registry import ToolRegistry
+
+        servers = load_mcp_config(mcp_config_path)
+        registry = ToolRegistry()
+        async with MCPBridge(servers) as bridge:
+            count = await bridge.register_all(registry)
+            console.print(f"[dim]Registered {count} MCP tool(s)[/]")
+            agent = Agent(config=config, registry=registry)
+            return await coro_factory(agent)
+    else:
+        agent = Agent(config=config)
+        return await coro_factory(agent)
+
+
+# ---------------------------------------------------------------------------
+# Async chat loop (keeps MCP bridge alive across turns)
+# ---------------------------------------------------------------------------
+
+
+async def _async_chat_loop(
+    agent: Agent,
+    config: AgentConfig,
+    session_id: str | None = None,
+) -> None:
+    """Interactive chat loop — fully async so the MCP bridge stays open."""
+    agent.on_event(_event_handler)
     store = SessionStore(config.session_dir)
     session: Session | None = None
 
@@ -115,7 +152,7 @@ def _run_chat_loop(
     try:
         while True:
             try:
-                user_input = console.input("[bold blue]> [/]")
+                user_input = await asyncio.to_thread(console.input, "[bold blue]> [/]")
             except EOFError:
                 break
 
@@ -124,7 +161,7 @@ def _run_chat_loop(
             if user_input.strip().lower() in {"/quit", "/exit", "/q"}:
                 break
 
-            session = asyncio.run(agent.run(user_input, session))
+            session = await agent.run(user_input, session)
             store.save(session)
 
     except KeyboardInterrupt:
@@ -135,42 +172,61 @@ def _run_chat_loop(
         console.print(f"[dim]Session saved: {session.session_id}[/]")
 
 
+# ---------------------------------------------------------------------------
+# CLI commands
+# ---------------------------------------------------------------------------
+
+
 @app.command()
 def chat(
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m", help="Model to use"),
     provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p", help="Provider name"),
     max_steps: int = typer.Option(_DEFAULT_MAX_STEPS, "--max-steps", help="Maximum agent loop steps"),
     session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Resume a session"),
+    mcp_config: Optional[str] = typer.Option(None, "--mcp-config", help="Path to MCP servers JSON config"),
 ) -> None:
     """Start an interactive chat session."""
-    _run_chat_loop(session_id=session_id, model=model, provider=provider, max_steps=max_steps)
+    config = _build_config(model=model, provider=provider, max_steps=max_steps)
+    asyncio.run(_run_with_mcp(
+        lambda agent: _async_chat_loop(agent, config, session_id),
+        config,
+        mcp_config,
+    ))
 
 
 @app.command()
 def run(
     task: str = typer.Argument(..., help="Task to execute"),
-    model: str = typer.Option("claude-sonnet-4-20250514", "--model", "-m"),
-    provider: str = typer.Option("anthropic", "--provider", "-p"),
-    max_steps: int = typer.Option(50, "--max-steps"),
+    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
+    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p"),
+    max_steps: int = typer.Option(_DEFAULT_MAX_STEPS, "--max-steps"),
+    mcp_config: Optional[str] = typer.Option(None, "--mcp-config", help="Path to MCP servers JSON config"),
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(model=model, provider=provider, max_steps=max_steps)
-    agent = Agent(config=config)
-    agent.on_event(_event_handler)
 
-    session = asyncio.run(agent.run(task))
-    store = SessionStore(config.session_dir)
-    store.save(session)
+    async def _do(agent: Agent) -> None:
+        agent.on_event(_event_handler)
+        session = await agent.run(task)
+        store = SessionStore(config.session_dir)
+        store.save(session)
+        console.print(f"\n[dim]Session: {session.session_id}[/]")
 
-    console.print(f"\n[dim]Session: {session.session_id}[/]")
+    asyncio.run(_run_with_mcp(_do, config, mcp_config))
 
 
 @app.command()
 def resume(
     session_id: str = typer.Argument(..., help="Session ID to resume"),
+    mcp_config: Optional[str] = typer.Option(None, "--mcp-config", help="Path to MCP servers JSON config"),
 ) -> None:
     """Resume a saved session."""
-    _run_chat_loop(session_id=session_id)
+    config = _build_config()
+    asyncio.run(_run_with_mcp(
+        lambda agent: _async_chat_loop(agent, config, session_id),
+        config,
+        mcp_config,
+    ))
 
 
 @app.command()
@@ -186,34 +242,45 @@ def sessions() -> None:
 
 
 @app.command()
-def tools() -> None:
+def tools(
+    mcp_config: Optional[str] = typer.Option(None, "--mcp-config", help="Path to MCP servers JSON config"),
+) -> None:
     """List available tools."""
     config = _build_config()
-    agent = Agent(config=config)
-    for spec in agent.registry.list_tools():
-        effects = ", ".join(e.value for e in spec.side_effects)
-        console.print(f"  [bold]{spec.name}[/]  [dim]({effects})[/]  {spec.description}")
+
+    async def _do(agent: Agent) -> None:
+        for spec in agent.registry.list_tools():
+            effects = ", ".join(e.value for e in spec.side_effects)
+            console.print(f"  [bold]{spec.name}[/]  [dim]({effects})[/]  {spec.description}")
+
+    asyncio.run(_run_with_mcp(_do, config, mcp_config))
 
 
 @app.command()
 def tui(
-    model: str = typer.Option("claude-sonnet-4-20250514", "--model", "-m"),
-    provider: str = typer.Option("anthropic", "--provider", "-p"),
-    max_steps: int = typer.Option(50, "--max-steps"),
+    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
+    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p"),
+    max_steps: int = typer.Option(_DEFAULT_MAX_STEPS, "--max-steps"),
+    mcp_config: Optional[str] = typer.Option(None, "--mcp-config", help="Path to MCP servers JSON config"),
 ) -> None:
     """Launch the rich TUI interface."""
     from agent.transports.tui import run_tui
 
     config = _build_config(model=model, provider=provider, max_steps=max_steps)
-    asyncio.run(run_tui(config))
+    asyncio.run(_run_with_mcp(
+        lambda agent: run_tui(config, agent=agent),
+        config,
+        mcp_config,
+    ))
 
 
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind address"),
     port: int = typer.Option(8080, "--port", help="Port to listen on"),
-    model: str = typer.Option("claude-sonnet-4-20250514", "--model", "-m"),
-    provider: str = typer.Option("anthropic", "--provider", "-p"),
+    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
+    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p"),
+    mcp_config: Optional[str] = typer.Option(None, "--mcp-config", help="Path to MCP servers JSON config"),
 ) -> None:
     """Start the web API server (requires uvicorn)."""
     config = _build_config(model=model, provider=provider)
@@ -224,6 +291,9 @@ def serve(
     except ImportError:
         console.print("[red]uvicorn is required for the web server. Install with: pip install uvicorn[/]")
         raise typer.Exit(1)
+
+    if mcp_config:
+        console.print("[yellow]Warning: --mcp-config is not yet supported for the serve command.[/]")
 
     asgi_app = create_asgi_app(config)
     console.print(f"[bold green]Starting web server on {host}:{port}[/]")

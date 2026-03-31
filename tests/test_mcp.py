@@ -478,3 +478,124 @@ class TestMCPBridge:
             count = await bridge.register_all(registry)
         assert count == 0
         assert len(registry) == 0
+
+
+# ---------------------------------------------------------------------------
+# load_mcp_config
+# ---------------------------------------------------------------------------
+
+
+class TestLoadMCPConfig:
+    def test_load_with_servers_key(self, tmp_path):
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text(
+            '{"servers": [{"name": "test", "transport": "stdio", "command": "echo"}]}'
+        )
+        configs = load_mcp_config(str(f))
+        assert len(configs) == 1
+        assert configs[0].name == "test"
+        assert configs[0].command == "echo"
+
+    def test_load_bare_array(self, tmp_path):
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text('[{"name": "t", "transport": "stdio", "command": "x"}]')
+        configs = load_mcp_config(str(f))
+        assert len(configs) == 1
+        assert configs[0].name == "t"
+
+    def test_load_http_server(self, tmp_path):
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text(
+            '{"servers": [{"name": "api", "transport": "http",'
+            ' "url": "https://example.com/mcp", "prefix_tools": true}]}'
+        )
+        configs = load_mcp_config(str(f))
+        assert configs[0].transport == "http"
+        assert configs[0].url == "https://example.com/mcp"
+        assert configs[0].prefix_tools is True
+
+    def test_load_multiple_servers(self, tmp_path):
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text(
+            '{"servers": ['
+            '{"name": "a", "transport": "stdio", "command": "x"},'
+            '{"name": "b", "transport": "stdio", "command": "y"}'
+            "]}"
+        )
+        configs = load_mcp_config(str(f))
+        assert len(configs) == 2
+        assert configs[0].name == "a"
+        assert configs[1].name == "b"
+
+    def test_load_validates_fields(self, tmp_path):
+        from pydantic import ValidationError
+
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text('[{"transport": "stdio"}]')  # missing required "name"
+        with pytest.raises(ValidationError):
+            load_mcp_config(str(f))
+
+    def test_load_file_not_found(self):
+        from agent.extensions.mcp import load_mcp_config
+
+        with pytest.raises(FileNotFoundError):
+            load_mcp_config("/nonexistent/mcp.json")
+
+    def test_load_invalid_json(self, tmp_path):
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text("not valid json")
+        with pytest.raises(Exception):
+            load_mcp_config(str(f))
+
+    def test_load_bad_shape(self, tmp_path):
+        from agent.extensions.mcp import load_mcp_config
+
+        f = tmp_path / "mcp.json"
+        f.write_text('"just a string"')
+        with pytest.raises(ValueError, match="Expected"):
+            load_mcp_config(str(f))
+
+
+# ---------------------------------------------------------------------------
+# _register_builtins preserves pre-existing tools
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterBuiltinsPreservesExternal:
+    def test_external_tools_not_pruned(self):
+        """MCP tools already in the registry should survive _register_builtins."""
+        from agent.core.agent import Agent
+        from agent.core.config import AgentConfig
+
+        registry = ToolRegistry()
+
+        async def dummy(**kwargs):
+            return "ok"
+
+        from agent.tools.schema import ToolSpec, SideEffect
+
+        registry.add(
+            ToolSpec(
+                name="mcp_external_tool",
+                description="An external MCP tool",
+                side_effects=[SideEffect.EXTERNAL],
+                handler=dummy,
+            )
+        )
+
+        agent = Agent(config=AgentConfig(), registry=registry)
+        assert "mcp_external_tool" in agent.registry
+        # Built-in tools should also be present
+        assert "read_file" in agent.registry

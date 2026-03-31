@@ -151,10 +151,14 @@ def _format_args(arguments: dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "(no arguments)"
 
 
-async def run_tui(config: AgentConfig | None = None) -> None:
-    """Launch the TUI interactive loop."""
+async def run_tui(config: AgentConfig | None = None, agent: Agent | None = None) -> None:
+    """Launch the TUI interactive loop.
+
+    If *agent* is provided it is used as-is (e.g. with MCP tools already
+    registered). Otherwise a new :class:`Agent` is created from *config*.
+    """
     config = config or AgentConfig()
-    agent = Agent(config=config)
+    agent = agent or Agent(config=config)
     renderer = TUIRenderer()
     store = SessionStore(config.session_dir)
     session: Session | None = None

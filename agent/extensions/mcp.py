@@ -275,6 +275,24 @@ class MCPBridge:
 # ---------------------------------------------------------------------------
 
 
+def load_mcp_config(path: str) -> list[MCPServerConfig]:
+    """Load MCP server configs from a JSON file.
+
+    Accepts either ``{"servers": [...]}`` or a bare ``[...]`` array.
+    Each element is validated against :class:`MCPServerConfig`.
+    """
+    from pathlib import Path as _Path
+
+    data = json.loads(_Path(path).read_text(encoding="utf-8"))
+    servers_data = data.get("servers", data) if isinstance(data, dict) else data
+    if not isinstance(servers_data, list):
+        raise ValueError(
+            f"Expected a JSON object with a 'servers' array or a bare array, "
+            f"got {type(data).__name__}"
+        )
+    return [MCPServerConfig.model_validate(s) for s in servers_data]
+
+
 def _require_mcp() -> None:
     try:
         import mcp  # noqa: F401
