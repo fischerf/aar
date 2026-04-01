@@ -1,5 +1,7 @@
 # Aar — Adaptive Action & Reasoning Agent
 
+[![Website](https://img.shields.io/badge/website-fischerf.github.io%2Faar-blue?style=flat-square)](https://fischerf.github.io/aar/)
+
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports. **Aar** stands for *Adaptive Action & Reasoning*.
 
 ## Design goals
@@ -809,4 +811,4 @@ Tests for providers whose API key is not set will fail with an authentication er
 
 ## License
 
-Apache License 2.0 
+Apache License 2.0
