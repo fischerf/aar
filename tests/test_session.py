@@ -95,33 +95,34 @@ class TestToMessages:
         """Tool calls should be grouped with the assistant message.
 
         The loop emits events in this order:
-        AssistantMessage → ToolCall → ToolResult → AssistantMessage
-        In to_messages(), pending tool calls are merged into the *next*
-        AssistantMessage encountered.
+        ToolCall → AssistantMessage(TOOL_USE) → ToolResult → AssistantMessage(final)
+        In to_messages(), pending tool calls are merged into the AssistantMessage
+        that immediately follows them.
         """
         s = Session()
         s.add_user_message("Read test.py")
-        # The loop emits: assistant msg, then tool calls, then tool results
-        s.add_assistant_message("Let me read that", stop_reason=StopReason.TOOL_USE)
+        # The loop emits: tool calls FIRST, then assistant msg, then tool results
         s.add_tool_call(tool_name="read_file", tool_call_id="tc_1", arguments={"path": "test.py"})
+        s.add_assistant_message("Let me read that", stop_reason=StopReason.TOOL_USE)
         s.add_tool_result(tool_call_id="tc_1", tool_name="read_file", output="print('hi')")
         s.add_assistant_message("The file contains a print statement")
 
         msgs = s.to_messages()
+        assert len(msgs) == 4
         # msg[0]: user
         assert msgs[0]["role"] == "user"
-        # msg[1]: first assistant (plain, no pending tool calls at that point)
+        # msg[1]: assistant with tool_use block merged in
         assert msgs[1]["role"] == "assistant"
-        assert msgs[1]["content"] == "Let me read that"
-        # msg[2]: second assistant, merged with the pending tool call
-        assert msgs[2]["role"] == "assistant"
-        assert isinstance(msgs[2]["content"], list)
-        tool_use_blocks = [b for b in msgs[2]["content"] if b.get("type") == "tool_use"]
+        assert isinstance(msgs[1]["content"], list)
+        tool_use_blocks = [b for b in msgs[1]["content"] if b.get("type") == "tool_use"]
         assert len(tool_use_blocks) == 1
         assert tool_use_blocks[0]["name"] == "read_file"
-        # msg[3]: tool result as user message
-        assert msgs[3]["role"] == "user"
-        assert msgs[3]["content"][0]["type"] == "tool_result"
+        # msg[2]: tool result as user message
+        assert msgs[2]["role"] == "user"
+        assert msgs[2]["content"][0]["type"] == "tool_result"
+        # msg[3]: final assistant answer
+        assert msgs[3]["role"] == "assistant"
+        assert msgs[3]["content"] == "The file contains a print statement"
 
     def test_multiple_tool_calls_grouped(self):
         """Multiple tool calls should all appear in the assistant message."""
