@@ -11,10 +11,10 @@ from agent.core.loop import run_loop
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.providers.base import Provider
-from agent.tools.execution import ToolExecutor
-from agent.tools.registry import ToolRegistry
 from agent.tools.builtin.filesystem import register_filesystem_tools
 from agent.tools.builtin.shell import register_shell_tools
+from agent.tools.execution import ToolExecutor
+from agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ def _create_provider(config: ProviderConfig) -> Provider:
 
     module_path, class_name = class_path.rsplit(".", 1)
     import importlib
+
     module = importlib.import_module(module_path)
     cls = getattr(module, class_name)
     return cls(config)
@@ -52,9 +53,7 @@ class Agent:
         self.config = config or AgentConfig()
         self.provider = provider or _create_provider(self.config.provider)
         self.registry = registry or ToolRegistry()
-        self.executor = ToolExecutor(
-            self.registry, self.config.tools, self.config.safety
-        )
+        self.executor = ToolExecutor(self.registry, self.config.tools, self.config.safety)
         self._on_event: Callable[[Event], Any] | None = None
 
         # Register built-in tools based on config
@@ -115,6 +114,7 @@ class Agent:
         session = await self.run(prompt, session)
         # Find the last assistant message
         from agent.core.events import AssistantMessage
+
         for event in reversed(session.events):
             if isinstance(event, AssistantMessage) and event.content:
                 return event.content
