@@ -24,6 +24,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.5",
 ]
+all = ["anthropic>=0.40", "openai>=1.0", "httpx>=0.27", "mcp>=1.0"]
 
 [project.scripts]
 aar = "agent.transports.cli:app"
