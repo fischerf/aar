@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "signal": {
+      "command": "python",
+      "args": ["-m", "signal_mcp"],
+      "cwd": "/path/to/signal-mcp",
+      "env": {
+        "SIGNAL_API_URL": "http://localhost:8080",
+        "SIGNAL_PHONE_NUMBER": "+15551234567",
+        "SIGNAL_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
