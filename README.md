@@ -214,6 +214,30 @@ Enable reasoning extraction for models like `deepseek-r1`:
 ProviderConfig(name="ollama", model="deepseek-r1", extra={"supports_reasoning": True})
 ```
 
+### Generic (OpenAI-compatible)
+
+Any OpenAI-compatible HTTP endpoint, using a custom `api-key` header for authentication.
+
+```python
+config = AgentConfig(provider=ProviderConfig(
+    name="generic",
+    model="gpt-4o-2024-08-06",
+    api_key="...",           # or GENERIC_API_KEY env var
+    extra={
+        "endpoint": "https://api.provider.com/gpt/gpt-5.1",
+        # Optional overrides:
+        # "extra_headers": {"X-Trace-Id": "abc123"},
+        # "timeout": 120.0,
+        # "response_format": "json_object",  # "text" | "json_object" | "json_schema"
+    },
+))
+```
+
+The endpoint URL can also be set via the `GENERIC_ENDPOINT` environment variable.
+Supports: tools, streaming, structured output (`json_object` / `json_schema`).
+
+Install: `pip install aar-agent[generic]` (uses `httpx`, already included in the base install).
+
 ## Tool system
 
 ### Built-in tools
