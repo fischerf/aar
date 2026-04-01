@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -9,7 +10,7 @@ from pydantic import BaseModel, Field
 
 class ProviderConfig(BaseModel):
     name: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-6"
     api_key: str = ""
     base_url: str = ""
     max_tokens: int = 4096
@@ -22,9 +23,6 @@ class ToolConfig(BaseModel):
         default_factory=lambda: ["read_file", "write_file", "edit_file", "list_directory", "bash"]
     )
     allowed_paths: list[str] = Field(default_factory=list)
-    denied_commands: list[str] = Field(
-        default_factory=lambda: ["rm -rf /", "mkfs", "dd if=", ":(){:|:&};:"]
-    )
     command_timeout: int = 30
     max_output_chars: int = 50_000
 
@@ -35,10 +33,20 @@ class SafetyConfig(BaseModel):
     require_approval_for_execute: bool = False
     denied_paths: list[str] = Field(
         default_factory=lambda: [
-            "/etc/shadow", "/etc/passwd",
+            # Unix system files
+            "/etc/shadow", "/etc/passwd", "/etc/sudoers", "/etc/sudoers.d/**",
+            # Generic secret/credential globs
             "**/.env", "**/.env.*",
-            "**/credentials*", "**/secrets*",
-            "**/*.pem", "**/*.key",
+            "**/credentials", "**/credentials.*",
+            "**/secrets", "**/secrets.*",
+            # Key material
+            "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx",
+            # SSH
+            "**/.ssh/**", "**/id_rsa", "**/id_dsa", "**/id_ecdsa", "**/id_ed25519",
+            # Cloud provider credential stores
+            "**/.aws/**", "**/.azure/**", "**/.config/gcloud/**",
+            # Package manager tokens
+            "**/.netrc", "**/.npmrc", "**/.pypirc",
         ]
     )
     allowed_paths: list[str] = Field(default_factory=list)
@@ -56,3 +64,8 @@ class AgentConfig(BaseModel):
     timeout: float = 300.0
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
     system_prompt: str = "You are a helpful assistant with access to tools."
+
+
+def load_config(path: Path) -> AgentConfig:
+    """Load and validate an AgentConfig from a JSON file."""
+    return AgentConfig.model_validate(json.loads(path.read_text()))

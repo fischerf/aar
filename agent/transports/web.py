@@ -37,18 +37,24 @@ class WebTransport:
         self._active_streams: dict[str, EventStream] = {}
         self._sessions: dict[str, Session] = {}
 
-    def _get_or_create_agent(self) -> Agent:
-        agent = Agent(config=self.config)
-        return agent
+    def _make_agent(self, safety_override: dict | None = None) -> Agent:
+        if safety_override:
+            merged_safety = self.config.safety.model_copy(update=safety_override)
+            config = self.config.model_copy(update={"safety": merged_safety})
+        else:
+            config = self.config
+        return Agent(config=config)
 
     async def handle_chat(
-        self, prompt: str, session_id: str | None = None
+        self, prompt: str, session_id: str | None = None, safety_override: dict | None = None
     ) -> dict[str, Any]:
         """Handle a chat request. Returns the response payload.
 
         If session_id is provided, continues that session.
+        If safety_override is provided, those SafetyConfig fields override the server defaults
+        for this request only.
         """
-        agent = self._get_or_create_agent()
+        agent = self._make_agent(safety_override)
 
         # Set up event stream for this request
         stream = EventStream()
@@ -93,9 +99,13 @@ class WebTransport:
         }
 
     async def handle_stream(
-        self, prompt: str, session_id: str | None = None
+        self, prompt: str, session_id: str | None = None, safety_override: dict | None = None
     ) -> AsyncEventIterator:
-        """Handle a streaming chat request. Returns an async iterator of SSE events."""
+        """Handle a streaming chat request. Returns an async iterator of SSE events.
+
+        If safety_override is provided, those SafetyConfig fields override the server defaults
+        for this request only.
+        """
         stream = EventStream()
         queue: asyncio.Queue[Event | None] = asyncio.Queue()
 
@@ -109,7 +119,7 @@ class WebTransport:
 
         async def run_agent() -> None:
             try:
-                agent = self._get_or_create_agent()
+                agent = self._make_agent(safety_override)
                 agent.on_event(on_event)
                 session = None
                 if session_id:
@@ -223,6 +233,7 @@ def create_asgi_app(config: AgentConfig | None = None) -> Any:
             result = await transport.handle_chat(
                 prompt=data["prompt"],
                 session_id=data.get("session_id"),
+                safety_override=data.get("safety"),
             )
             await _json_response(send, result)
 
@@ -232,6 +243,7 @@ def create_asgi_app(config: AgentConfig | None = None) -> Any:
             iterator = await transport.handle_stream(
                 prompt=data["prompt"],
                 session_id=data.get("session_id"),
+                safety_override=data.get("safety"),
             )
             await _sse_response(send, iterator)
 

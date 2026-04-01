@@ -12,10 +12,11 @@ import typer
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from agent.core.agent import Agent
-from agent.core.config import AgentConfig, ProviderConfig
+from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, load_config
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
@@ -28,11 +29,12 @@ from agent.core.events import (
 )
 from agent.core.session import Session
 from agent.memory.session_store import SessionStore
+from agent.safety.permissions import ApprovalResult
 
 app = typer.Typer(name="aar", help="Lean Python Agent CLI", no_args_is_help=True)
 console = Console()
 
-_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_MODEL = "claude-sonnet-4-6"
 _DEFAULT_PROVIDER = "anthropic"
 _DEFAULT_MAX_STEPS = 50
 
@@ -42,15 +44,54 @@ def _build_config(
     provider: str = _DEFAULT_PROVIDER,
     api_key: str = "",
     max_steps: int = _DEFAULT_MAX_STEPS,
+    config_file: Optional[str] = None,
+    read_only: bool = False,
+    require_approval: bool = False,
+    denied_paths: str = "",
+    allowed_paths: str = "",
 ) -> AgentConfig:
-    return AgentConfig(
-        provider=ProviderConfig(
-            name=provider,
-            model=model,
-            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
-        ),
-        max_steps=max_steps,
+    cfg = load_config(Path(config_file)) if config_file else AgentConfig()
+
+    cfg.provider.name = provider
+    cfg.provider.model = model
+    cfg.provider.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    cfg.max_steps = max_steps
+
+    if read_only:
+        cfg.safety.read_only = True
+    if require_approval:
+        cfg.safety.require_approval_for_writes = True
+        cfg.safety.require_approval_for_execute = True
+    if denied_paths:
+        extra = [p.strip() for p in denied_paths.split(",") if p.strip()]
+        cfg.safety.denied_paths = cfg.safety.denied_paths + extra
+    if allowed_paths:
+        cfg.safety.allowed_paths = [p.strip() for p in allowed_paths.split(",") if p.strip()]
+
+    return cfg
+
+
+async def _terminal_approval_callback(spec: Any, tc: Any) -> ApprovalResult:
+    """Prompt the user in the terminal when a tool call requires approval."""
+    args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items())
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]{tc.tool_name}[/]\n{args_text}",
+            title="[bold red]Approval Required[/]",
+            border_style="red",
+        )
     )
+    response = await asyncio.to_thread(
+        console.input,
+        "[bold]Allow? \\[y]es / \\[n]o / \\[a]lways:[/] ",
+    )
+    r = response.strip().lower()
+    if r in {"a", "always"}:
+        return ApprovalResult.APPROVED_ALWAYS
+    if r in {"y", "yes"}:
+        return ApprovalResult.APPROVED
+    return ApprovalResult.DENIED
 
 
 _SIDE_EFFECT_BADGES = {
@@ -103,7 +144,9 @@ def _make_event_handler(verbose: bool = False):
                 duration = f" [dim]{event.duration_ms:.0f}ms[/]"
             else:
                 duration = ""
-            console.print(Panel(output, title=f"Result: {event.tool_name}{duration}", border_style=style))
+            console.print(
+                Panel(output, title=f"Result: {event.tool_name}{duration}", border_style=style)
+            )
         elif isinstance(event, ReasoningBlock) and event.content:
             console.print(f"\n[dim italic]{event.content[:300]}[/]")
         elif isinstance(event, ErrorEvent):
@@ -128,6 +171,7 @@ async def _run_with_mcp(
     coro_factory: Any,
     config: AgentConfig,
     mcp_config_path: str | None = None,
+    approval_callback: Any = None,
 ) -> Any:
     """Run an async operation with optional MCP bridge lifecycle management.
 
@@ -148,10 +192,10 @@ async def _run_with_mcp(
         async with MCPBridge(servers) as bridge:
             count = await bridge.register_all(registry)
             console.print(f"[dim]Registered {count} MCP tool(s)[/]")
-            agent = Agent(config=config, registry=registry)
+            agent = Agent(config=config, registry=registry, approval_callback=approval_callback)
             return await coro_factory(agent)
     else:
-        agent = Agent(config=config)
+        agent = Agent(config=config, approval_callback=approval_callback)
         return await coro_factory(agent)
 
 
@@ -208,6 +252,20 @@ async def _async_chat_loop(
 # CLI commands
 # ---------------------------------------------------------------------------
 
+_SAFETY_OPTIONS = {
+    "config_file": typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
+    "read_only": typer.Option(False, "--read-only", help="Block all write and execute tools"),
+    "require_approval": typer.Option(
+        False, "--require-approval", help="Prompt before any write or execute tool"
+    ),
+    "denied_paths": typer.Option(
+        "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
+    ),
+    "allowed_paths": typer.Option(
+        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+    ),
+}
+
 
 @app.command()
 def chat(
@@ -220,15 +278,33 @@ def chat(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
+    ),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
+    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
+    require_approval: bool = typer.Option(
+        False, "--require-approval", help="Prompt before any write or execute tool"
+    ),
+    denied_paths: str = typer.Option(
+        "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
+    ),
+    allowed_paths: str = typer.Option(
+        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+    ),
 ) -> None:
     """Start an interactive chat session."""
-    config = _build_config(model=model, provider=provider, max_steps=max_steps)
+    config = _build_config(
+        model=model, provider=provider, max_steps=max_steps,
+        config_file=config_file, read_only=read_only, require_approval=require_approval,
+        denied_paths=denied_paths, allowed_paths=allowed_paths,
+    )
     asyncio.run(
         _run_with_mcp(
             lambda agent: _async_chat_loop(agent, config, session_id, verbose),
             config,
             mcp_config,
+            approval_callback=_terminal_approval_callback,
         )
     )
 
@@ -242,10 +318,27 @@ def run(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
+    ),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
+    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
+    require_approval: bool = typer.Option(
+        False, "--require-approval", help="Prompt before any write or execute tool"
+    ),
+    denied_paths: str = typer.Option(
+        "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
+    ),
+    allowed_paths: str = typer.Option(
+        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+    ),
 ) -> None:
     """Run a single task and exit."""
-    config = _build_config(model=model, provider=provider, max_steps=max_steps)
+    config = _build_config(
+        model=model, provider=provider, max_steps=max_steps,
+        config_file=config_file, read_only=read_only, require_approval=require_approval,
+        denied_paths=denied_paths, allowed_paths=allowed_paths,
+    )
 
     async def _do(agent: Agent) -> None:
         agent.on_event(_make_event_handler(verbose))
@@ -254,7 +347,7 @@ def run(
         store.save(session)
         console.print(f"\n[dim]Session: {session.session_id}[/]")
 
-    asyncio.run(_run_with_mcp(_do, config, mcp_config))
+    asyncio.run(_run_with_mcp(_do, config, mcp_config, approval_callback=_terminal_approval_callback))
 
 
 @app.command()
@@ -263,7 +356,9 @@ def resume(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
+    ),
 ) -> None:
     """Resume a saved session."""
     config = _build_config()
@@ -272,6 +367,7 @@ def resume(
             lambda agent: _async_chat_loop(agent, config, session_id, verbose),
             config,
             mcp_config,
+            approval_callback=_terminal_approval_callback,
         )
     )
 
@@ -313,17 +409,35 @@ def tui(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
+    ),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
+    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
+    require_approval: bool = typer.Option(
+        False, "--require-approval", help="Prompt before any write or execute tool"
+    ),
+    denied_paths: str = typer.Option(
+        "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
+    ),
+    allowed_paths: str = typer.Option(
+        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+    ),
 ) -> None:
     """Launch the rich TUI interface."""
     from agent.transports.tui import run_tui
 
-    config = _build_config(model=model, provider=provider, max_steps=max_steps)
+    config = _build_config(
+        model=model, provider=provider, max_steps=max_steps,
+        config_file=config_file, read_only=read_only, require_approval=require_approval,
+        denied_paths=denied_paths, allowed_paths=allowed_paths,
+    )
     asyncio.run(
         _run_with_mcp(
             lambda agent: run_tui(config, agent=agent, verbose=verbose),
             config,
             mcp_config,
+            approval_callback=_terminal_approval_callback,
         )
     )
 
@@ -337,9 +451,11 @@ def serve(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
     ),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
+    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
 ) -> None:
     """Start the web API server (requires uvicorn)."""
-    config = _build_config(model=model, provider=provider)
+    config = _build_config(model=model, provider=provider, config_file=config_file, read_only=read_only)
     from agent.transports.web import create_asgi_app
 
     try:

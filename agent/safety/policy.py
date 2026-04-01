@@ -65,21 +65,23 @@ class PolicyConfig(BaseModel):
     # Default denied command patterns
     denied_commands: list[str] = Field(
         default_factory=lambda: [
-            "rm -rf /",
-            "rm -rf /*",
-            "mkfs",
-            "dd if=",
+            # Filesystem destruction
+            "rm -rf /", "rm -rf /*", "rm -rf ~",
+            "mkfs", "dd if=", "> /dev/sda",
+            # System control
+            "shutdown", "reboot", "halt", "poweroff",
+            "init 0", "init 6",
+            # Fork bomb
             ":(){:|:&};:",
-            "chmod 777",
-            "curl|sh",
-            "curl|bash",
-            "wget|sh",
-            "wget|bash",
-            "> /dev/sda",
-            "shutdown",
-            "reboot",
-            "init 0",
-            "init 6",
+            # Blanket permission change
+            "chmod 777", "chmod -R 777",
+            # Piped remote-code-execution patterns
+            "curl|sh", "curl | sh", "curl|bash", "curl | bash",
+            "wget|sh", "wget | sh", "wget|bash", "wget | bash",
+            # Netcat reverse shell
+            "nc -e", "ncat -e",
+            # Shell history wipe
+            "history -c",
         ]
     )
 
