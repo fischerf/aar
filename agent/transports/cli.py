@@ -47,6 +47,7 @@ def _build_config(
     config_file: Optional[str] = None,
     read_only: bool = False,
     require_approval: bool = False,
+    restrict_to_cwd: bool = False,
     denied_paths: str = "",
     allowed_paths: str = "",
 ) -> AgentConfig:
@@ -65,8 +66,11 @@ def _build_config(
     if denied_paths:
         extra = [p.strip() for p in denied_paths.split(",") if p.strip()]
         cfg.safety.denied_paths = cfg.safety.denied_paths + extra
+    # Explicit --allowed-paths wins; otherwise --restrict-to-cwd sets the whitelist
     if allowed_paths:
         cfg.safety.allowed_paths = [p.strip() for p in allowed_paths.split(",") if p.strip()]
+    elif restrict_to_cwd:
+        cfg.safety.allowed_paths = [str(Path.cwd()) + "/**"]
 
     return cfg
 
@@ -252,21 +256,6 @@ async def _async_chat_loop(
 # CLI commands
 # ---------------------------------------------------------------------------
 
-_SAFETY_OPTIONS = {
-    "config_file": typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
-    "read_only": typer.Option(False, "--read-only", help="Block all write and execute tools"),
-    "require_approval": typer.Option(
-        False, "--require-approval", help="Prompt before any write or execute tool"
-    ),
-    "denied_paths": typer.Option(
-        "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
-    ),
-    "allowed_paths": typer.Option(
-        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
-    ),
-}
-
-
 @app.command()
 def chat(
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m", help="Model to use"),
@@ -284,20 +273,26 @@ def chat(
     config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
     read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
     require_approval: bool = typer.Option(
-        False, "--require-approval", help="Prompt before any write or execute tool"
+        True, "--require-approval/--no-require-approval",
+        help="Prompt before write/execute tools (default: on)",
+    ),
+    restrict_to_cwd: bool = typer.Option(
+        True, "--restrict-to-cwd/--no-restrict-to-cwd",
+        help="Restrict file tools to current directory (default: on)",
     ),
     denied_paths: str = typer.Option(
         "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
     ),
     allowed_paths: str = typer.Option(
-        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+        "", "--allowed-paths",
+        help="Comma-separated glob patterns to allow; overrides --restrict-to-cwd",
     ),
 ) -> None:
     """Start an interactive chat session."""
     config = _build_config(
         model=model, provider=provider, max_steps=max_steps,
         config_file=config_file, read_only=read_only, require_approval=require_approval,
-        denied_paths=denied_paths, allowed_paths=allowed_paths,
+        restrict_to_cwd=restrict_to_cwd, denied_paths=denied_paths, allowed_paths=allowed_paths,
     )
     asyncio.run(
         _run_with_mcp(
@@ -324,20 +319,26 @@ def run(
     config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
     read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
     require_approval: bool = typer.Option(
-        False, "--require-approval", help="Prompt before any write or execute tool"
+        False, "--require-approval/--no-require-approval",
+        help="Prompt before write/execute tools (default: off)",
+    ),
+    restrict_to_cwd: bool = typer.Option(
+        False, "--restrict-to-cwd/--no-restrict-to-cwd",
+        help="Restrict file tools to current directory (default: off)",
     ),
     denied_paths: str = typer.Option(
         "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
     ),
     allowed_paths: str = typer.Option(
-        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+        "", "--allowed-paths",
+        help="Comma-separated glob patterns to allow; overrides --restrict-to-cwd",
     ),
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(
         model=model, provider=provider, max_steps=max_steps,
         config_file=config_file, read_only=read_only, require_approval=require_approval,
-        denied_paths=denied_paths, allowed_paths=allowed_paths,
+        restrict_to_cwd=restrict_to_cwd, denied_paths=denied_paths, allowed_paths=allowed_paths,
     )
 
     async def _do(agent: Agent) -> None:
@@ -415,13 +416,19 @@ def tui(
     config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
     read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
     require_approval: bool = typer.Option(
-        False, "--require-approval", help="Prompt before any write or execute tool"
+        True, "--require-approval/--no-require-approval",
+        help="Prompt before write/execute tools (default: on)",
+    ),
+    restrict_to_cwd: bool = typer.Option(
+        True, "--restrict-to-cwd/--no-restrict-to-cwd",
+        help="Restrict file tools to current directory (default: on)",
     ),
     denied_paths: str = typer.Option(
         "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
     ),
     allowed_paths: str = typer.Option(
-        "", "--allowed-paths", help="Comma-separated glob patterns to allow (restricts to whitelist)"
+        "", "--allowed-paths",
+        help="Comma-separated glob patterns to allow; overrides --restrict-to-cwd",
     ),
 ) -> None:
     """Launch the rich TUI interface."""
@@ -430,7 +437,7 @@ def tui(
     config = _build_config(
         model=model, provider=provider, max_steps=max_steps,
         config_file=config_file, read_only=read_only, require_approval=require_approval,
-        denied_paths=denied_paths, allowed_paths=allowed_paths,
+        restrict_to_cwd=restrict_to_cwd, denied_paths=denied_paths, allowed_paths=allowed_paths,
     )
     asyncio.run(
         _run_with_mcp(

@@ -8,7 +8,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 - **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
-- **Provider-agnostic** — swap between Anthropic, OpenAI, and Ollama without changing agent code
+- **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint without changing agent code
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable; long sessions can be compacted
@@ -25,12 +25,13 @@ pip install aar-agent
 pip install "aar-agent[anthropic]"
 pip install "aar-agent[openai]"
 pip install "aar-agent[ollama]"   # Ollama uses httpx, already a core dep
+pip install "aar-agent[generic]"  # Generic uses httpx, already a core dep
 
 # With MCP support
 pip install "aar-agent[mcp]"
 
 # Everything at once
-pip install "aar-agent[anthropic,mcp,dev]"
+pip install "aar-agent[all,dev]"
 ```
 
 > **Note:** `aar-agent` is not published to PyPI.  
@@ -73,15 +74,25 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 ## CLI
 
 ```bash
-# Interactive chat
+# Interactive chat (workspace sandbox on by default — asks before write/execute,
+# file tools restricted to cwd)
 aar chat
 
 # Chat with a specific provider/model
 aar chat --provider openai --model gpt-4o
 aar chat --provider ollama --model llama3
 
-# Run a one-shot task
+# Disable the workspace sandbox for full access
+aar chat --no-require-approval --no-restrict-to-cwd
+
+# Run a one-shot task (permissive by default — no approval prompts)
 aar run "Refactor main.py to use async/await"
+
+# Run with workspace sandbox (opt-in for automated mode)
+aar run --require-approval --restrict-to-cwd "Delete unused imports"
+
+# Load full config from a JSON file
+aar chat --config aar.json
 
 # Resume a previous session
 aar resume <session-id>
@@ -92,7 +103,7 @@ aar sessions
 # List available tools
 aar tools
 
-# Launch the rich TUI
+# Launch the rich TUI (workspace sandbox on, like chat)
 aar tui
 
 # Start the HTTP/SSE web server
@@ -142,7 +153,7 @@ from agent import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
 
 config = AgentConfig(
     provider=ProviderConfig(
-        name="anthropic",                          # "anthropic" | "openai" | "ollama"
+        name="anthropic",                          # "anthropic" | "openai" | "ollama" | "generic"
         model="claude-sonnet-4-20250514",
         api_key="...",                             # or set via env var
         max_tokens=4096,
@@ -157,9 +168,8 @@ config = AgentConfig(
         read_only=False,                           # block all writes
         require_approval_for_writes=False,         # ask before every write
         require_approval_for_execute=False,        # ask before every shell command
-        denied_paths=["**/.env", "**/*.key"],      # glob patterns
+        denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         allowed_paths=[],                          # whitelist (empty = allow all non-denied)
-        denied_commands=["rm -rf /", "mkfs"],      # substring matches
         sandbox="local",                           # "local" | "subprocess"
     ),
     max_steps=50,
@@ -288,6 +298,19 @@ agent.registry.add(ToolSpec(
 
 ## Safety
 
+Aar has a layered safety system with sensible defaults. See [`docs/safety.md`](docs/safety.md) for the full reference.
+
+### Workspace sandbox (interactive modes)
+
+`aar chat` and `aar tui` enable a **workspace sandbox** by default:
+
+- **File tools restricted to cwd** — `allowed_paths` is set to the current directory and its subdirectories
+- **Approval before write/execute** — the agent prompts before any write or shell command
+
+This means an interactive session cannot touch files outside your project or run commands without your consent. Disable with `--no-require-approval --no-restrict-to-cwd`.
+
+`aar run` is **permissive by default** (no sandbox) for automation use cases. Opt in with `--require-approval --restrict-to-cwd`.
+
 ### Policy modes
 
 ```python
@@ -306,10 +329,17 @@ SafetyConfig(require_approval_for_execute=True)
 SafetyConfig(allowed_paths=["/my/project/**"])
 ```
 
+### Built-in defaults
+
+**Denied paths** — credential files, key material, cloud config, SSH keys, `.env` files (25+ patterns).
+**Denied commands** — filesystem destruction (`rm -rf /`), system control (`shutdown`, `reboot`), fork bombs, piped RCE (`curl|sh`), reverse shells, blanket permission changes (20+ patterns).
+
+These are always active regardless of transport or flags. Override via `--denied-paths` or config file.
+
 ### Human approval callback
 
 ```python
-from agent.safety.permissions import ApprovalResult, PermissionManager
+from agent.safety.permissions import ApprovalResult
 from agent.tools.execution import ToolExecutor
 
 async def my_approval_callback(spec, tool_call) -> ApprovalResult:
@@ -319,13 +349,30 @@ async def my_approval_callback(spec, tool_call) -> ApprovalResult:
         return ApprovalResult.APPROVED_ALWAYS
     return ApprovalResult.APPROVED if answer == "y" else ApprovalResult.DENIED
 
-executor = ToolExecutor(
-    registry,
-    tool_config,
-    SafetyConfig(require_approval_for_execute=True),
+agent = Agent(
+    config=AgentConfig(safety=SafetyConfig(require_approval_for_execute=True)),
     approval_callback=my_approval_callback,
 )
 ```
+
+### Configuration via JSON file
+
+```bash
+aar chat --config aar.json
+```
+
+```json
+{
+  "safety": {
+    "read_only": true,
+    "require_approval_for_writes": true,
+    "denied_paths": ["**/.env", "**/secrets/**"]
+  },
+  "provider": {"name": "anthropic", "model": "claude-sonnet-4-6"}
+}
+```
+
+Load programmatically with `load_config(Path("aar.json"))`.
 
 ## Sessions and persistence
 
@@ -704,7 +751,8 @@ agent/
 │   ├── base.py          # Provider ABC + ProviderCapabilities
 │   ├── anthropic.py     # Anthropic Messages API adapter
 │   ├── openai.py        # OpenAI Chat Completions adapter
-│   └── ollama.py        # Ollama REST API adapter
+│   ├── ollama.py        # Ollama REST API adapter
+│   └── generic.py       # Generic OpenAI-compatible endpoint adapter
 ├── tools/
 │   ├── registry.py      # Tool registry (decorator + explicit)
 │   ├── schema.py        # ToolSpec, SideEffect
@@ -754,7 +802,7 @@ pip install "aar-agent[dev]"
 pytest tests/ -v
 ```
 
-The test suite (214 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
+The test suite (236 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
 
 - Loop termination, max steps, timeout, cancellation (`asyncio.Event` + `CancelledError`), provider errors
 - Session persistence, resumption, compaction, `trace_id` round-trip, message conversion
