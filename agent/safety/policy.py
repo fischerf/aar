@@ -164,12 +164,23 @@ class SafetyPolicy:
 
     @staticmethod
     def _normalize_path(path: str) -> str:
-        """Resolve *path* to an absolute path and normalise separators to ``/``.
+        """Normalise *path* for policy comparison.
 
-        This ensures that relative paths (``"."``, ``"README.md"``), Windows
-        backslash paths, and Unix-style paths all compare consistently against
-        the glob patterns stored in ``allowed_paths`` / ``denied_paths``.
+        - Paths that are already absolute — Unix-style (``/etc/shadow``) or
+          Windows drive-rooted (``C:\\project\\file.py``) — are left as-is
+          with only their separators converted to ``/``.  Feeding them through
+          ``Path.resolve()`` on Windows would prepend the current drive letter
+          (``/etc/shadow`` → ``C:/etc/shadow``), which breaks patterns written
+          as ``/etc/**`` and the tests that use them.
+        - Truly relative paths (``"."``, ``"README.md"``, ``"src/app.py"``)
+          ARE resolved against the CWD so they can be matched against
+          whitelist patterns that contain the full absolute CWD
+          (e.g. ``C:/project/**``).
         """
+        # Unix absolute (/…) or Windows drive-letter path (C:\… or C:/…)
+        if path.startswith("/") or (len(path) >= 2 and path[1] == ":"):
+            return path.replace("\\", "/")
+        # Relative path — resolve against CWD
         try:
             return str(Path(path).resolve()).replace("\\", "/")
         except Exception:
@@ -209,7 +220,9 @@ class SafetyPolicy:
                 # which resolves to "b:/proj" — strip the trailing /** to compare.
                 if norm_pattern.endswith("/**"):
                     base = norm_pattern[:-3]  # remove trailing /**
-                    if norm_path == base:
+                    # Case-insensitive: Windows drive letters can differ in
+                    # case between Path.cwd() and Path.resolve().
+                    if norm_path.lower() == base.lower():
                         return PolicyDecision.ALLOW
             logger.info("Policy DENY (not in allowed paths): %s", path)
             return PolicyDecision.DENY
