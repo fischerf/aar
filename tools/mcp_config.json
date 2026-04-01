@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {
+      "name": "gitlab",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["tools/gitlab_mcp/server.py"],
+      "prefix_tools": true
+    }
+  ]
+}
