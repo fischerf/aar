@@ -298,81 +298,22 @@ agent.registry.add(ToolSpec(
 
 ## Safety
 
-Aar has a layered safety system with sensible defaults. See [`docs/safety.md`](docs/safety.md) for the full reference.
+Aar has a layered safety system with sensible defaults. See [`docs/safety.md`](docs/safety.md) for the full reference, including the complete list of denied paths/commands, per-transport defaults, CLI flags, sandbox modes, and the approval callback API.
 
-### Workspace sandbox (interactive modes)
+**Key features at a glance:**
 
-`aar chat` and `aar tui` enable a **workspace sandbox** by default:
-
-- **File tools restricted to cwd** — `allowed_paths` is set to the current directory and its subdirectories
-- **Approval before write/execute** — the agent prompts before any write or shell command
-
-This means an interactive session cannot touch files outside your project or run commands without your consent. Disable with `--no-require-approval --no-restrict-to-cwd`.
-
-`aar run` is **permissive by default** (no sandbox) for automation use cases. Opt in with `--require-approval --restrict-to-cwd`.
-
-### Policy modes
+- **Workspace sandbox** — `aar chat` and `aar tui` restrict file tools to the current directory and require approval before writes/shell commands. `aar run` is permissive for automation. Toggle with `--[no-]require-approval` and `--[no-]restrict-to-cwd`.
+- **Built-in deny lists** — credential files, key material, `.env` files, and dangerous shell commands (25+ path patterns, 20+ command patterns) are always blocked.
+- **Human approval** — supply a custom `ApprovalCallback` that returns `APPROVED`, `DENIED`, or `APPROVED_ALWAYS`.
+- **Configurable policy** — set via CLI flags, a JSON config file (see [Configuration](#configuration)), or a `SafetyConfig` object.
 
 ```python
 from agent import SafetyConfig
 
-# Read-only: blocks all writes and shell commands
-SafetyConfig(read_only=True)
-
-# Require human approval before any write
-SafetyConfig(require_approval_for_writes=True)
-
-# Require approval before any shell command
-SafetyConfig(require_approval_for_execute=True)
-
-# Restrict file access to a specific directory
-SafetyConfig(allowed_paths=["/my/project/**"])
+SafetyConfig(read_only=True)                        # block all writes and shell commands
+SafetyConfig(require_approval_for_writes=True)       # prompt before writes
+SafetyConfig(allowed_paths=["/my/project/**"])        # restrict file access
 ```
-
-### Built-in defaults
-
-**Denied paths** — credential files, key material, cloud config, SSH keys, `.env` files (25+ patterns).
-**Denied commands** — filesystem destruction (`rm -rf /`), system control (`shutdown`, `reboot`), fork bombs, piped RCE (`curl|sh`), reverse shells, blanket permission changes (20+ patterns).
-
-These are always active regardless of transport or flags. Override via `--denied-paths` or config file.
-
-### Human approval callback
-
-```python
-from agent.safety.permissions import ApprovalResult
-from agent.tools.execution import ToolExecutor
-
-async def my_approval_callback(spec, tool_call) -> ApprovalResult:
-    print(f"Allow {spec.name}({tool_call.arguments})? [y/n/always]")
-    answer = input().strip().lower()
-    if answer == "always":
-        return ApprovalResult.APPROVED_ALWAYS
-    return ApprovalResult.APPROVED if answer == "y" else ApprovalResult.DENIED
-
-agent = Agent(
-    config=AgentConfig(safety=SafetyConfig(require_approval_for_execute=True)),
-    approval_callback=my_approval_callback,
-)
-```
-
-### Configuration via JSON file
-
-```bash
-aar chat --config aar.json
-```
-
-```json
-{
-  "safety": {
-    "read_only": true,
-    "require_approval_for_writes": true,
-    "denied_paths": ["**/.env", "**/secrets/**"]
-  },
-  "provider": {"name": "anthropic", "model": "claude-sonnet-4-6"}
-}
-```
-
-Load programmatically with `load_config(Path("aar.json"))`.
 
 ## Sessions and persistence
 
@@ -738,61 +679,17 @@ uvicorn.run(app, host="0.0.0.0", port=8080)
 
 ## Architecture
 
+The project follows a modular design: a thin core loop, provider adapters, a tool registry with a safety pipeline, session persistence, and pluggable transports. See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough of every component, the core loop, the event emission order, provider internals, the tool execution pipeline, and the safety architecture.
+
 ```
 agent/
-├── core/
-│   ├── loop.py          # Thin agent loop (~80 lines)
-│   ├── agent.py         # High-level Agent class
-│   ├── events.py        # Typed event model
-│   ├── session.py       # Session (history + message conversion)
-│   ├── state.py         # AgentState enum
-│   └── config.py        # AgentConfig, ProviderConfig, SafetyConfig
-├── providers/
-│   ├── base.py          # Provider ABC + ProviderCapabilities
-│   ├── anthropic.py     # Anthropic Messages API adapter
-│   ├── openai.py        # OpenAI Chat Completions adapter
-│   ├── ollama.py        # Ollama REST API adapter
-│   └── generic.py       # Generic OpenAI-compatible endpoint adapter
-├── tools/
-│   ├── registry.py      # Tool registry (decorator + explicit)
-│   ├── schema.py        # ToolSpec, SideEffect
-│   ├── execution.py     # ToolExecutor (policy + sandbox + run)
-│   └── builtin/         # read_file, write_file, edit_file, list_dir, bash
-├── safety/
-│   ├── policy.py        # SafetyPolicy (ALLOW / DENY / ASK)
-│   ├── permissions.py   # PermissionManager (approval gates)
-│   └── sandbox.py       # LocalSandbox, SubprocessSandbox
-├── memory/
-│   └── session_store.py # JSONL persistence + compaction
-├── extensions/
-│   ├── mcp.py           # MCPBridge — connect MCP servers, register tools
-│   └── observability.py # session_metrics() — timing, tokens, errors
-└── transports/
-    ├── cli.py           # Typer CLI (chat, run, tui, serve, …)
-    ├── tui.py           # Rich TUI
-    ├── web.py           # ASGI app + SSE streaming
-    └── stream.py        # EventStream / AsyncEventStream
-```
-
-The core loop:
-
-```python
-while not done and step < max_steps:
-    if cancel_event and cancel_event.is_set(): break   # cooperative cancel
-    if elapsed > timeout: break
-
-    t = time.monotonic()
-    response = await provider.complete(messages, tools, system)
-    response.meta.duration_ms = (time.monotonic() - t) * 1000  # provider timing
-
-    if response.tool_calls:
-        results = await tool_executor.execute(response.tool_calls)  # tool timing inside
-        session.append(results)
-        continue
-
-    session.append(response)
-    if response.stop_reason in {"end_turn", "max_tokens"}:
-        done = True
+├── core/           # Loop, agent, events, session, config
+├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
+├── tools/          # Tool registry, schema, execution engine
+├── safety/         # Policy engine, permission manager, sandboxes
+├── memory/         # Session persistence (JSONL)
+├── extensions/     # MCP bridge, observability
+└── transports/     # CLI, TUI, web, event stream
 ```
 
 ## Testing
