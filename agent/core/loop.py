@@ -60,10 +60,14 @@ async def run_loop(
             elapsed = time.monotonic() - start_time
             if elapsed > config.timeout:
                 session.state = AgentState.ERROR
-                _emit(session, on_event, ErrorEvent(
-                    message=f"Agent timed out after {config.timeout}s",
-                    recoverable=False,
-                ))
+                _emit(
+                    session,
+                    on_event,
+                    ErrorEvent(
+                        message=f"Agent timed out after {config.timeout}s",
+                        recoverable=False,
+                    ),
+                )
                 return session
 
             session.increment_step()
@@ -79,13 +83,11 @@ async def run_loop(
                     system=config.system_prompt,
                 )
             except Exception as e:
-                _log.exception(
-                    "Provider error at step %d", session.step_count, extra=_extra
-                )
+                _log.exception("Provider error at step %d", session.step_count, extra=_extra)
                 session.state = AgentState.ERROR
-                _emit(session, on_event, ErrorEvent(
-                    message=f"Provider error: {e}", recoverable=False
-                ))
+                _emit(
+                    session, on_event, ErrorEvent(message=f"Provider error: {e}", recoverable=False)
+                )
                 return session
 
             provider_ms = (time.monotonic() - t_provider) * 1000
@@ -109,14 +111,20 @@ async def run_loop(
 
             # Handle tool calls
             if response.tool_calls:
-                _emit(session, on_event, AssistantMessage(
-                    content=response.content, stop_reason=StopReason.TOOL_USE
-                ))
+                # Emit ToolCall events BEFORE AssistantMessage so that
+                # session.to_messages() sees the correct order:
+                #   ToolCall… → AssistantMessage → ToolResult…
+                # and can bundle the tool_calls onto the assistant message.
                 for tc in response.tool_calls:
                     spec = tool_executor.registry.get(tc.tool_name)
                     if spec:
                         tc.data["side_effects"] = [e.value for e in spec.side_effects]
                     _emit(session, on_event, tc)
+                _emit(
+                    session,
+                    on_event,
+                    AssistantMessage(content=response.content, stop_reason=StopReason.TOOL_USE),
+                )
 
                 session.state = AgentState.WAITING_FOR_TOOL
                 results = await tool_executor.execute(response.tool_calls)
@@ -132,9 +140,11 @@ async def run_loop(
                 done = True
 
         if session.step_count >= config.max_steps and not done:
-            _emit(session, on_event, ErrorEvent(
-                message=f"Reached max steps ({config.max_steps})", recoverable=False
-            ))
+            _emit(
+                session,
+                on_event,
+                ErrorEvent(message=f"Reached max steps ({config.max_steps})", recoverable=False),
+            )
 
         if session.state == AgentState.RUNNING:
             session.state = AgentState.COMPLETED

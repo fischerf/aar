@@ -144,10 +144,13 @@ class MCPClient:
             raise ValueError(
                 f"MCP server {self.config.name!r}: 'command' is required for stdio transport"
             )
+        import os
+
+        merged_env = {**os.environ, **self.config.env}
         params = StdioServerParameters(
             command=self.config.command,
             args=self.config.args,
-            env=self.config.env or None,
+            env=merged_env,
         )
         read, write = await self._exit_stack.enter_async_context(stdio_client(params))
         return read, write

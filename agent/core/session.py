@@ -80,18 +80,25 @@ class Session(BaseModel):
                 messages.append({"role": "user", "content": event.content})
 
             elif isinstance(event, AssistantMessage):
+                # Flush pending tool results before the next assistant message
+                if pending_tool_results:
+                    messages.append(_tool_results_message(pending_tool_results))
+                    pending_tool_results = []
+
                 if pending_tool_calls:
                     # Assistant message with tool calls
                     content_blocks: list[dict] = []
                     if event.content:
                         content_blocks.append({"type": "text", "text": event.content})
                     for tc in pending_tool_calls:
-                        content_blocks.append({
-                            "type": "tool_use",
-                            "id": tc.tool_call_id,
-                            "name": tc.tool_name,
-                            "input": tc.arguments,
-                        })
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": tc.tool_call_id,
+                                "name": tc.tool_name,
+                                "input": tc.arguments,
+                            }
+                        )
                     messages.append({"role": "assistant", "content": content_blocks})
                     pending_tool_calls = []
                 else:
@@ -107,12 +114,14 @@ class Session(BaseModel):
         if pending_tool_calls:
             content_blocks = []
             for tc in pending_tool_calls:
-                content_blocks.append({
-                    "type": "tool_use",
-                    "id": tc.tool_call_id,
-                    "name": tc.tool_name,
-                    "input": tc.arguments,
-                })
+                content_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.tool_call_id,
+                        "name": tc.tool_name,
+                        "input": tc.arguments,
+                    }
+                )
             messages.append({"role": "assistant", "content": content_blocks})
 
         if pending_tool_results:
@@ -125,10 +134,12 @@ def _tool_results_message(results: list[ToolResult]) -> dict[str, Any]:
     """Build a user message containing tool result blocks."""
     content = []
     for tr in results:
-        content.append({
-            "type": "tool_result",
-            "tool_use_id": tr.tool_call_id,
-            "content": tr.output,
-            "is_error": tr.is_error,
-        })
+        content.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": tr.tool_call_id,
+                "content": tr.output,
+                "is_error": tr.is_error,
+            }
+        )
     return {"role": "user", "content": content}

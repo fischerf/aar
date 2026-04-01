@@ -23,6 +23,7 @@ PROVIDER_REGISTRY: dict[str, str] = {
     "anthropic": "agent.providers.anthropic.AnthropicProvider",
     "openai": "agent.providers.openai.OpenAIProvider",
     "ollama": "agent.providers.ollama.OllamaProvider",
+    "generic": "agent.providers.generic.GenericProvider",
 }
 
 
