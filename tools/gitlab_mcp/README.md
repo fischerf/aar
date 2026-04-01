@@ -300,3 +300,9 @@ def list_mrs(
 ```
 
 That's it — restart the server and the new tool appears in your MCP client.
+
+---
+
+## License
+
+Apache License 2.0 

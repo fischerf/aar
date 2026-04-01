@@ -804,3 +804,9 @@ Tests for providers whose API key is not set will fail with an authentication er
 - `typer >= 0.12`
 - `rich >= 13.0`
 - Provider SDK as needed: `anthropic`, `openai`
+
+---
+
+## License
+
+Apache License 2.0 

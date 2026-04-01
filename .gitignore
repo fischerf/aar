@@ -1,2 +1,7 @@
 .agent/
 start_tui.bat
+tools/game_mcp/
+.claude/
+docs/release.md
+docs/revised_lean_agent_implementation_plan.md
+docs/typed-snacking-melody.md

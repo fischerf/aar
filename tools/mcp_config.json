@@ -6,6 +6,16 @@
       "command": "python",
       "args": ["tools/gitlab_mcp/server.py"],
       "prefix_tools": true
+    },
+    {
+      "name": "signal",
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, 'tools'); from signal_mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
+      "prefix_tools": true
     }
   ]
 }
