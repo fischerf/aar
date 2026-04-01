@@ -14,12 +14,24 @@ def register_shell_tools(registry: ToolRegistry) -> None:
 
     async def bash(command: str, timeout: int = 30) -> str:
         """Execute a shell command and return stdout + stderr."""
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=os.getcwd(),
-        )
+        # On Windows use Git Bash (bash -c) so Unix commands work correctly.
+        # On other platforms delegate to the system shell via create_subprocess_shell.
+        if os.name == "nt":
+            proc = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
+            )
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
+            )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -36,17 +48,27 @@ def register_shell_tools(registry: ToolRegistry) -> None:
             output_parts.append(f"Exit code: {proc.returncode}")
         return "\n".join(output_parts) if output_parts else "(no output)"
 
-    registry.add(ToolSpec(
-        name="bash",
-        description="Execute a shell command. Returns stdout, stderr, and exit code.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30)"},
+    registry.add(
+        ToolSpec(
+            name="bash",
+            description=(
+                "Execute a shell command. Returns stdout, stderr, and exit code. "
+                "On Windows commands run via Git Bash (bash -c), so standard Unix/bash "
+                "syntax works (ls, cat, grep, find, …). Use Windows-style paths for "
+                "file tools, but bash syntax for shell commands."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command to execute"},
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default: 30)",
+                    },
+                },
+                "required": ["command"],
             },
-            "required": ["command"],
-        },
-        side_effects=[SideEffect.EXECUTE],
-        handler=bash,
-    ))
+            side_effects=[SideEffect.EXECUTE],
+            handler=bash,
+        )
+    )

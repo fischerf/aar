@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import re
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -51,10 +52,14 @@ class PolicyConfig(BaseModel):
     # Default path restrictions
     denied_paths: list[str] = Field(
         default_factory=lambda: [
-            "/etc/shadow", "/etc/passwd",
-            "**/.env", "**/.env.*",
-            "**/credentials*", "**/secrets*",
-            "**/*.pem", "**/*.key",
+            "/etc/shadow",
+            "/etc/passwd",
+            "**/.env",
+            "**/.env.*",
+            "**/credentials*",
+            "**/secrets*",
+            "**/*.pem",
+            "**/*.key",
         ]
     )
     allowed_paths: list[str] = Field(default_factory=list)  # empty = allow all not denied
@@ -66,20 +71,36 @@ class PolicyConfig(BaseModel):
     denied_commands: list[str] = Field(
         default_factory=lambda: [
             # Filesystem destruction
-            "rm -rf /", "rm -rf /*", "rm -rf ~",
-            "mkfs", "dd if=", "> /dev/sda",
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf ~",
+            "mkfs",
+            "dd if=",
+            "> /dev/sda",
             # System control
-            "shutdown", "reboot", "halt", "poweroff",
-            "init 0", "init 6",
+            "shutdown",
+            "reboot",
+            "halt",
+            "poweroff",
+            "init 0",
+            "init 6",
             # Fork bomb
             ":(){:|:&};:",
             # Blanket permission change
-            "chmod 777", "chmod -R 777",
+            "chmod 777",
+            "chmod -R 777",
             # Piped remote-code-execution patterns
-            "curl|sh", "curl | sh", "curl|bash", "curl | bash",
-            "wget|sh", "wget | sh", "wget|bash", "wget | bash",
+            "curl|sh",
+            "curl | sh",
+            "curl|bash",
+            "curl | bash",
+            "wget|sh",
+            "wget | sh",
+            "wget|bash",
+            "wget | bash",
             # Netcat reverse shell
-            "nc -e", "ncat -e",
+            "nc -e",
+            "ncat -e",
             # Shell history wipe
             "history -c",
         ]
@@ -102,13 +123,9 @@ class SafetyPolicy:
         """Pre-compile regex patterns for command rules."""
         for rule in self.config.command_rules:
             if rule.is_regex:
-                self._compiled_command_rules.append(
-                    (re.compile(rule.pattern), rule.decision)
-                )
+                self._compiled_command_rules.append((re.compile(rule.pattern), rule.decision))
             else:
-                self._compiled_command_rules.append(
-                    (rule.pattern, rule.decision)
-                )
+                self._compiled_command_rules.append((rule.pattern, rule.decision))
 
     def check_tool(self, spec: ToolSpec, arguments: dict[str, Any]) -> PolicyDecision:
         """Check whether a tool call is allowed.
@@ -145,11 +162,27 @@ class SafetyPolicy:
 
         return PolicyDecision.ALLOW
 
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Resolve *path* to an absolute path and normalise separators to ``/``.
+
+        This ensures that relative paths (``"."``, ``"README.md"``), Windows
+        backslash paths, and Unix-style paths all compare consistently against
+        the glob patterns stored in ``allowed_paths`` / ``denied_paths``.
+        """
+        try:
+            return str(Path(path).resolve()).replace("\\", "/")
+        except Exception:
+            return path.replace("\\", "/")
+
     def _check_path(self, path: str, is_write: bool) -> PolicyDecision:
         """Check a file path against path rules."""
+        norm_path = self._normalize_path(path)
+
         # Check explicit path rules first
         for rule in self.config.path_rules:
-            if fnmatch.fnmatch(path, rule.pattern):
+            norm_pattern = rule.pattern.replace("\\", "/")
+            if fnmatch.fnmatch(norm_path, norm_pattern):
                 if is_write and not rule.allow_write:
                     logger.info("Policy DENY (path rule, no write): %s", path)
                     return PolicyDecision.DENY
@@ -158,17 +191,26 @@ class SafetyPolicy:
                     return PolicyDecision.DENY
                 return PolicyDecision.ALLOW
 
-        # Check denied paths
+        # Check denied paths (patterns use forward slashes; path is already normalised)
         for pattern in self.config.denied_paths:
-            if fnmatch.fnmatch(path, pattern):
+            norm_pattern = pattern.replace("\\", "/")
+            if fnmatch.fnmatch(norm_path, norm_pattern):
                 logger.info("Policy DENY (denied path): %s matches %s", path, pattern)
                 return PolicyDecision.DENY
 
-        # Check allowed paths (if specified, only these are allowed)
+        # Check allowed paths (if specified, only matching paths are permitted)
         if self.config.allowed_paths:
             for pattern in self.config.allowed_paths:
-                if fnmatch.fnmatch(path, pattern):
+                norm_pattern = pattern.replace("\\", "/")
+                if fnmatch.fnmatch(norm_path, norm_pattern):
                     return PolicyDecision.ALLOW
+                # Also allow the workspace root directory itself.
+                # e.g. pattern "b:/proj/**" should permit list_directory(".")
+                # which resolves to "b:/proj" — strip the trailing /** to compare.
+                if norm_pattern.endswith("/**"):
+                    base = norm_pattern[:-3]  # remove trailing /**
+                    if norm_path == base:
+                        return PolicyDecision.ALLOW
             logger.info("Policy DENY (not in allowed paths): %s", path)
             return PolicyDecision.DENY
 
