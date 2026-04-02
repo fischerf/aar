@@ -18,20 +18,20 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 ## Installation
 
 ```bash
-# Core only (no LLM provider)
-pip install aar-agent
+# Everything at once
+pip install "aar-agent[all,dev]"
 
-# With a specific provider
+# or provider specific
 pip install "aar-agent[anthropic]"
 pip install "aar-agent[openai]"
 pip install "aar-agent[ollama]"   # Ollama uses httpx, already a core dep
 pip install "aar-agent[generic]"  # Generic uses httpx, already a core dep
 
-# With MCP support
-pip install "aar-agent[mcp]"
+# or with Ollama provider + MCP support
+pip install "aar-agent[ollama,mcp]"
 
-# Everything at once
-pip install "aar-agent[all,dev]"
+# Core only (no LLM provider)
+pip install aar-agent
 ```
 
 > **Note:** `aar-agent` is not published to PyPI.  
@@ -46,14 +46,14 @@ files take effect immediately without reinstalling:
 git clone https://github.com/your-org/aar.git
 cd aar
 
+# Full dev setup — includes pytest, pytest-asyncio, and ruff
+pip install -e ".[all,dev]"
+
 # Core only
 pip install -e .
 
 # With a provider and MCP support
 pip install -e ".[anthropic,mcp]"
-
-# Full dev setup — includes pytest, pytest-asyncio, and ruff
-pip install -e ".[anthropic,mcp,dev]"
 ```
 
 The `-e` flag creates a live link from `site-packages` back to the source
@@ -178,6 +178,37 @@ config = AgentConfig(
     session_dir=".agent/sessions",
 )
 ```
+
+### Configurable system prompt
+
+By default, the system prompt is assembled automatically from up to three layers:
+
+| Layer | Source | Purpose |
+|-------|--------|---------|
+| **Base** | built-in | Runtime facts — OS, working directory, shell |
+| **Global rules** | `~/.aar/rules.md` | Personal preferences that apply to all projects |
+| **Project rules** | `.agent/rules.md` | Project-specific instructions (checked into git) |
+
+Each layer is optional. If no rules files exist, the agent behaves exactly as before — only the base prompt is used. When present, the layers are concatenated in order, separated by `---`.
+
+**Global rules** — create `~/.aar/rules.md` for preferences that follow you across projects:
+
+```markdown
+# My rules
+- Always use type hints on public functions.
+- Prefer pathlib over os.path.
+- Use ruff for formatting.
+```
+
+**Project rules** — create `.agent/rules.md` for instructions specific to the current repo:
+
+```markdown
+# Project rules
+- This is a FastAPI app. Use pytest-asyncio for async tests.
+- Follow the existing service pattern in app/services/.
+```
+
+**Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
 
 ## Providers
 
