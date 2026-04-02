@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 
 def _default_system_prompt() -> str:
-    """Generate a system prompt that includes OS, cwd, and shell context."""
+    """Generate a base system prompt with OS, cwd, and shell context."""
     os_name = platform.system()  # "Windows", "Linux", "Darwin"
     cwd = str(Path.cwd())
 
@@ -36,6 +36,27 @@ def _default_system_prompt() -> str:
     return "\n".join(lines)
 
 
+def build_system_prompt() -> str:
+    """Assemble the system prompt from base + global rules + project rules.
+
+    Layers (all optional except base):
+      1. Base     — runtime facts (OS, cwd, shell)
+      2. Global   — ~/.aar/rules.md (user-wide preferences)
+      3. Project  — .agent/rules.md (project-specific instructions)
+    """
+    sections = [_default_system_prompt()]
+
+    global_rules = Path.home() / ".aar" / "rules.md"
+    if global_rules.is_file():
+        sections.append(global_rules.read_text(encoding="utf-8").strip())
+
+    project_rules = Path.cwd() / ".agent" / "rules.md"
+    if project_rules.is_file():
+        sections.append(project_rules.read_text(encoding="utf-8").strip())
+
+    return "\n---\n".join(sections)
+
+
 class ProviderConfig(BaseModel):
     name: str = "anthropic"
     model: str = "claude-sonnet-4-6"
@@ -57,8 +78,8 @@ class ToolConfig(BaseModel):
 
 class SafetyConfig(BaseModel):
     read_only: bool = False
-    require_approval_for_writes: bool = False
-    require_approval_for_execute: bool = False
+    require_approval_for_writes: bool = True
+    require_approval_for_execute: bool = True
     denied_paths: list[str] = Field(
         default_factory=lambda: [
             # Unix system files
@@ -108,7 +129,7 @@ class AgentConfig(BaseModel):
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
-    system_prompt: str = Field(default_factory=_default_system_prompt)
+    system_prompt: str = Field(default_factory=build_system_prompt)
 
 
 def load_config(path: Path) -> AgentConfig:

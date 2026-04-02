@@ -34,42 +34,71 @@ from agent.safety.permissions import ApprovalResult
 app = typer.Typer(name="aar", help="Lean Python Agent CLI", no_args_is_help=True)
 console = Console()
 
-_DEFAULT_MODEL = "claude-sonnet-4-6"
-_DEFAULT_PROVIDER = "anthropic"
-_DEFAULT_MAX_STEPS = 50
+_USER_DIR = Path.home() / ".aar"
+_USER_CONFIG = _USER_DIR / "config.json"
+_USER_MCP_CONFIG = _USER_DIR / "mcp_servers.json"
+
+# Map provider name → env var that holds the API key
+_PROVIDER_ENV_KEY: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "ollama": "",          # Ollama needs no key
+    "generic": "",
+}
 
 
 def _build_config(
-    model: str = _DEFAULT_MODEL,
-    provider: str = _DEFAULT_PROVIDER,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     api_key: str = "",
-    max_steps: int = _DEFAULT_MAX_STEPS,
+    base_url: str = "",
+    max_steps: Optional[int] = None,
     config_file: Optional[str] = None,
-    read_only: bool = False,
-    require_approval: bool = False,
-    restrict_to_cwd: bool = False,
+    read_only: Optional[bool] = None,
+    require_approval: Optional[bool] = None,
+    restrict_to_cwd: Optional[bool] = None,
     denied_paths: str = "",
     allowed_paths: str = "",
 ) -> AgentConfig:
-    cfg = load_config(Path(config_file)) if config_file else AgentConfig()
+    """Build an AgentConfig with layered precedence.
 
-    cfg.provider.name = provider
-    cfg.provider.model = model
-    cfg.provider.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    cfg.max_steps = max_steps
+    Priority: explicit CLI flag > config file (--config or ~/.aar/config.json) > built-in defaults.
+    ``None`` means "not explicitly set" — the loaded config (or built-in default) wins.
+    """
+    # Load config file or fall back to built-in defaults
+    if config_file:
+        cfg = load_config(Path(config_file))
+    elif _USER_CONFIG.is_file():
+        cfg = load_config(_USER_CONFIG)
+    else:
+        cfg = AgentConfig()
 
-    if read_only:
-        cfg.safety.read_only = True
-    if require_approval:
-        cfg.safety.require_approval_for_writes = True
-        cfg.safety.require_approval_for_execute = True
+    # Provider settings — only override when explicitly passed
+    if provider is not None:
+        cfg.provider.name = provider
+    if model is not None:
+        cfg.provider.model = model
+    if base_url:
+        cfg.provider.base_url = base_url
+    if max_steps is not None:
+        cfg.max_steps = max_steps
+
+    # api_key: CLI flag > env var matching the provider > loaded config
+    env_var = _PROVIDER_ENV_KEY.get(cfg.provider.name, "ANTHROPIC_API_KEY")
+    cfg.provider.api_key = api_key or (os.environ.get(env_var, "") if env_var else "") or cfg.provider.api_key
+
+    # Safety — only override when the user explicitly passed the flag
+    if read_only is not None:
+        cfg.safety.read_only = read_only
+    if require_approval is not None:
+        cfg.safety.require_approval_for_writes = require_approval
+        cfg.safety.require_approval_for_execute = require_approval
     if denied_paths:
         extra = [p.strip() for p in denied_paths.split(",") if p.strip()]
         cfg.safety.denied_paths = cfg.safety.denied_paths + extra
-    # Explicit --allowed-paths wins; otherwise --restrict-to-cwd sets the whitelist
     if allowed_paths:
         cfg.safety.allowed_paths = [p.strip() for p in allowed_paths.split(",") if p.strip()]
-    elif restrict_to_cwd:
+    elif restrict_to_cwd is not None and restrict_to_cwd:
         cfg.safety.allowed_paths = [str(Path.cwd()) + "/**"]
 
     return cfg
@@ -179,14 +208,19 @@ async def _run_with_mcp(
 ) -> Any:
     """Run an async operation with optional MCP bridge lifecycle management.
 
-    If *mcp_config_path* is provided, opens an :class:`MCPBridge`, registers
-    all discovered tools into a shared :class:`ToolRegistry`, creates an
-    :class:`Agent` with that registry, and calls ``coro_factory(agent)``.
-    The bridge stays alive until the coroutine completes.
+    If *mcp_config_path* is provided (or ``~/.aar/mcp_servers.json`` exists),
+    opens an :class:`MCPBridge`, registers all discovered tools into a shared
+    :class:`ToolRegistry`, creates an :class:`Agent` with that registry, and
+    calls ``coro_factory(agent)``. The bridge stays alive until the coroutine
+    completes.
 
-    Without *mcp_config_path* this simply creates a plain ``Agent`` and
-    delegates to the coroutine factory.
+    Without any MCP config this simply creates a plain ``Agent`` and delegates
+    to the coroutine factory.
     """
+    # Auto-discover user-level MCP config when no explicit path is given
+    if not mcp_config_path and _USER_MCP_CONFIG.is_file():
+        mcp_config_path = str(_USER_MCP_CONFIG)
+
     if mcp_config_path:
         from agent.extensions.mcp import MCPBridge, load_mcp_config
         from agent.tools.registry import ToolRegistry
@@ -258,27 +292,29 @@ async def _async_chat_loop(
 
 @app.command()
 def chat(
-    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m", help="Model to use"),
-    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p", help="Provider name"),
-    max_steps: int = typer.Option(
-        _DEFAULT_MAX_STEPS, "--max-steps", help="Maximum agent loop steps"
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Model to use"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"),
+    base_url: str = typer.Option("", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"),
+    api_key: str = typer.Option("", "--api-key", help="API key (overrides env var for the chosen provider)"),
+    max_steps: Optional[int] = typer.Option(
+        None, "--max-steps", help="Maximum agent loop steps"
     ),
     session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Resume a session"),
     mcp_config: Optional[str] = typer.Option(
-        None, "--mcp-config", help="Path to MCP servers JSON config"
+        None, "--mcp-config", help="Path to MCP servers JSON config (default: ~/.aar/mcp_servers.json)"
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
     ),
-    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
-    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
-    require_approval: bool = typer.Option(
-        True, "--require-approval/--no-require-approval",
-        help="Prompt before write/execute tools (default: on)",
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"),
+    read_only: Optional[bool] = typer.Option(None, "--read-only/--no-read-only", help="Block all write and execute tools"),
+    require_approval: Optional[bool] = typer.Option(
+        None, "--require-approval/--no-require-approval",
+        help="Prompt before write/execute tools",
     ),
-    restrict_to_cwd: bool = typer.Option(
-        True, "--restrict-to-cwd/--no-restrict-to-cwd",
-        help="Restrict file tools to current directory (default: on)",
+    restrict_to_cwd: Optional[bool] = typer.Option(
+        None, "--restrict-to-cwd/--no-restrict-to-cwd",
+        help="Restrict file tools to current directory",
     ),
     denied_paths: str = typer.Option(
         "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
@@ -290,7 +326,7 @@ def chat(
 ) -> None:
     """Start an interactive chat session."""
     config = _build_config(
-        model=model, provider=provider, max_steps=max_steps,
+        model=model, provider=provider, api_key=api_key, base_url=base_url, max_steps=max_steps,
         config_file=config_file, read_only=read_only, require_approval=require_approval,
         restrict_to_cwd=restrict_to_cwd, denied_paths=denied_paths, allowed_paths=allowed_paths,
     )
@@ -307,24 +343,26 @@ def chat(
 @app.command()
 def run(
     task: str = typer.Argument(..., help="Task to execute"),
-    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
-    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p"),
-    max_steps: int = typer.Option(_DEFAULT_MAX_STEPS, "--max-steps"),
+    model: Optional[str] = typer.Option(None, "--model", "-m"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"),
+    base_url: str = typer.Option("", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"),
+    api_key: str = typer.Option("", "--api-key", help="API key (overrides env var for the chosen provider)"),
+    max_steps: Optional[int] = typer.Option(None, "--max-steps"),
     mcp_config: Optional[str] = typer.Option(
-        None, "--mcp-config", help="Path to MCP servers JSON config"
+        None, "--mcp-config", help="Path to MCP servers JSON config (default: ~/.aar/mcp_servers.json)"
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
     ),
-    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
-    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
-    require_approval: bool = typer.Option(
-        False, "--require-approval/--no-require-approval",
-        help="Prompt before write/execute tools (default: off)",
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"),
+    read_only: Optional[bool] = typer.Option(None, "--read-only/--no-read-only", help="Block all write and execute tools"),
+    require_approval: Optional[bool] = typer.Option(
+        None, "--require-approval/--no-require-approval",
+        help="Prompt before write/execute tools",
     ),
-    restrict_to_cwd: bool = typer.Option(
-        False, "--restrict-to-cwd/--no-restrict-to-cwd",
-        help="Restrict file tools to current directory (default: off)",
+    restrict_to_cwd: Optional[bool] = typer.Option(
+        None, "--restrict-to-cwd/--no-restrict-to-cwd",
+        help="Restrict file tools to current directory",
     ),
     denied_paths: str = typer.Option(
         "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
@@ -336,7 +374,7 @@ def run(
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(
-        model=model, provider=provider, max_steps=max_steps,
+        model=model, provider=provider, api_key=api_key, base_url=base_url, max_steps=max_steps,
         config_file=config_file, read_only=read_only, require_approval=require_approval,
         restrict_to_cwd=restrict_to_cwd, denied_paths=denied_paths, allowed_paths=allowed_paths,
     )
@@ -404,24 +442,26 @@ def tools(
 
 @app.command()
 def tui(
-    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
-    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p"),
-    max_steps: int = typer.Option(_DEFAULT_MAX_STEPS, "--max-steps"),
+    model: Optional[str] = typer.Option(None, "--model", "-m"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"),
+    base_url: str = typer.Option("", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"),
+    api_key: str = typer.Option("", "--api-key", help="API key (overrides env var for the chosen provider)"),
+    max_steps: Optional[int] = typer.Option(None, "--max-steps"),
     mcp_config: Optional[str] = typer.Option(
-        None, "--mcp-config", help="Path to MCP servers JSON config"
+        None, "--mcp-config", help="Path to MCP servers JSON config (default: ~/.aar/mcp_servers.json)"
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
     ),
-    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
-    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
-    require_approval: bool = typer.Option(
-        True, "--require-approval/--no-require-approval",
-        help="Prompt before write/execute tools (default: on)",
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"),
+    read_only: Optional[bool] = typer.Option(None, "--read-only/--no-read-only", help="Block all write and execute tools"),
+    require_approval: Optional[bool] = typer.Option(
+        None, "--require-approval/--no-require-approval",
+        help="Prompt before write/execute tools",
     ),
-    restrict_to_cwd: bool = typer.Option(
-        True, "--restrict-to-cwd/--no-restrict-to-cwd",
-        help="Restrict file tools to current directory (default: on)",
+    restrict_to_cwd: Optional[bool] = typer.Option(
+        None, "--restrict-to-cwd/--no-restrict-to-cwd",
+        help="Restrict file tools to current directory",
     ),
     denied_paths: str = typer.Option(
         "", "--denied-paths", help="Comma-separated glob patterns to block (appended to defaults)"
@@ -435,7 +475,7 @@ def tui(
     from agent.transports.tui import run_tui
 
     config = _build_config(
-        model=model, provider=provider, max_steps=max_steps,
+        model=model, provider=provider, api_key=api_key, base_url=base_url, max_steps=max_steps,
         config_file=config_file, read_only=read_only, require_approval=require_approval,
         restrict_to_cwd=restrict_to_cwd, denied_paths=denied_paths, allowed_paths=allowed_paths,
     )
@@ -453,16 +493,18 @@ def tui(
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind address"),
     port: int = typer.Option(8080, "--port", help="Port to listen on"),
-    model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
-    provider: str = typer.Option(_DEFAULT_PROVIDER, "--provider", "-p"),
+    model: Optional[str] = typer.Option(None, "--model", "-m"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"),
+    base_url: str = typer.Option("", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"),
+    api_key: str = typer.Option("", "--api-key", help="API key (overrides env var for the chosen provider)"),
     mcp_config: Optional[str] = typer.Option(
-        None, "--mcp-config", help="Path to MCP servers JSON config"
+        None, "--mcp-config", help="Path to MCP servers JSON config (default: ~/.aar/mcp_servers.json)"
     ),
-    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file"),
-    read_only: bool = typer.Option(False, "--read-only", help="Block all write and execute tools"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"),
+    read_only: Optional[bool] = typer.Option(None, "--read-only/--no-read-only", help="Block all write and execute tools"),
 ) -> None:
     """Start the web API server (requires uvicorn)."""
-    config = _build_config(model=model, provider=provider, config_file=config_file, read_only=read_only)
+    config = _build_config(model=model, provider=provider, api_key=api_key, base_url=base_url, config_file=config_file, read_only=read_only)
     from agent.transports.web import create_asgi_app
 
     try:
@@ -482,6 +524,72 @@ def serve(
     console.print(f"[bold green]Starting web server on {host}:{port}[/]")
     console.print(f"[dim]POST /chat, POST /chat/stream, GET /sessions, GET /health[/]")
     uvicorn.run(asgi_app, host=host, port=port, log_level="info")
+
+
+@app.command()
+def init(
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config files"),
+) -> None:
+    """Create ~/.aar/config.json and ~/.aar/mcp_servers.json with default values."""
+    import json as _json
+
+    _USER_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Derive the config dict from AgentConfig() so defaults live in one place
+    defaults = AgentConfig()
+    default_config = defaults.model_dump(mode="json", exclude={"system_prompt"})
+    # Normalize path separators for cross-platform portability
+    default_config["session_dir"] = str(defaults.session_dir.as_posix())
+
+    # Empty by default — works out of the box with no MCP errors.
+    # Users add entries by copying from mcp_servers.example.json.
+    default_mcp: dict = {"servers": []}
+
+    _USER_MCP_EXAMPLE = _USER_DIR / "mcp_servers.example.json"
+    example_mcp: dict = {
+        "servers": [
+            {
+                "name": "my-stdio-server",
+                "transport": "stdio",
+                "command": "python",
+                "args": ["path/to/server.py"],
+                "env": {},
+                "prefix_tools": True,
+            },
+            {
+                "name": "my-http-server",
+                "transport": "http",
+                "url": "http://localhost:8000/mcp",
+                "headers": {"Authorization": "Bearer YOUR_TOKEN"},
+                "prefix_tools": True,
+            },
+        ]
+    }
+
+    created: list[str] = []
+    skipped: list[str] = []
+
+    for path, data in [
+        (_USER_CONFIG, default_config),
+        (_USER_MCP_CONFIG, default_mcp),
+        (_USER_MCP_EXAMPLE, example_mcp),
+    ]:
+        if path.is_file() and not force:
+            console.print(f"[yellow]Warning:[/] {path} already exists — skipping (use --force to overwrite)")
+            skipped.append(str(path))
+        else:
+            path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            created.append(str(path))
+            console.print(f"[green]Created:[/] {path}")
+
+    if created:
+        console.print("\n[bold]Next steps:[/]")
+        console.print(f"  1. Edit [bold]{_USER_CONFIG}[/] — set provider, model, api_key, base_url, etc.")
+        console.print(f"  2. Copy entries from [bold]{_USER_MCP_EXAMPLE}[/] into [bold]{_USER_MCP_CONFIG}[/] to enable MCP servers.")
+        console.print("  3. Optionally add global rules to [bold]~/.aar/rules.md[/].")
+        console.print("  4. Run [bold]aar chat[/] — no flags needed.")
+    if skipped:
+        console.print(f"\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
 
 if __name__ == "__main__":
