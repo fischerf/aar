@@ -138,11 +138,34 @@ class TUIRenderer:
             Panel(
                 "[bold]Aar Agent TUI[/]\n\n"
                 "Type your message and press Enter.\n"
-                "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] [bold]/clear[/]",
+                "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
+                "[bold]/policy[/] [bold]/clear[/]",
                 border_style="blue",
                 padding=(1, 2),
             )
         )
+
+    def render_policy(self, config: AgentConfig) -> None:
+        """Display the current safety policy as a table."""
+        sc = config.safety
+        t = Table(title="Safety Policy", show_header=True, header_style="bold")
+        t.add_column("Setting", style="bold")
+        t.add_column("Value")
+        t.add_row("read_only", "[red]yes[/]" if sc.read_only else "[green]no[/]")
+        t.add_row(
+            "require_approval_for_writes",
+            "[yellow]yes[/]" if sc.require_approval_for_writes else "[green]no[/]",
+        )
+        t.add_row(
+            "require_approval_for_execute",
+            "[yellow]yes[/]" if sc.require_approval_for_execute else "[green]no[/]",
+        )
+        t.add_row("sandbox", sc.sandbox)
+        t.add_row("log_all_commands", "yes" if sc.log_all_commands else "no")
+        allowed = ", ".join(sc.allowed_paths) if sc.allowed_paths else "[dim]all (no whitelist)[/]"
+        t.add_row("allowed_paths", allowed)
+        t.add_row("denied_paths", f"[dim]{len(sc.denied_paths)} patterns[/]")
+        self.console.print(t)
 
 
 _SIDE_EFFECT_BADGES = {
@@ -218,6 +241,9 @@ async def run_tui(
                     renderer.console.print(
                         f"  [bold]{spec.name}[/]  [dim]({effects})[/]  {spec.description}"
                     )
+                continue
+            elif stripped.lower() == "/policy":
+                renderer.render_policy(config)
                 continue
             elif stripped.lower() == "/clear":
                 renderer.console.clear()

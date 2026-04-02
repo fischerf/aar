@@ -11,6 +11,7 @@ from agent.core.loop import run_loop
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.providers.base import Provider
+from agent.safety.permissions import ApprovalCallback
 from agent.tools.builtin.filesystem import register_filesystem_tools
 from agent.tools.builtin.shell import register_shell_tools
 from agent.tools.execution import ToolExecutor
@@ -50,11 +51,14 @@ class Agent:
         config: AgentConfig | None = None,
         provider: Provider | None = None,
         registry: ToolRegistry | None = None,
+        approval_callback: ApprovalCallback | None = None,
     ) -> None:
         self.config = config or AgentConfig()
         self.provider = provider or _create_provider(self.config.provider)
         self.registry = registry or ToolRegistry()
-        self.executor = ToolExecutor(self.registry, self.config.tools, self.config.safety)
+        self.executor = ToolExecutor(
+            self.registry, self.config.tools, self.config.safety, approval_callback
+        )
         self._on_event: Callable[[Event], Any] | None = None
 
         # Register built-in tools based on config

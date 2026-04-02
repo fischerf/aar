@@ -40,7 +40,6 @@ class ToolExecutor:
             require_approval_for_execute=sc.require_approval_for_execute,
             denied_paths=sc.denied_paths,
             allowed_paths=sc.allowed_paths,
-            denied_commands=tool_config.denied_commands,
             log_all_commands=sc.log_all_commands,
         )
         self.policy = SafetyPolicy(policy_cfg)

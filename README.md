@@ -8,7 +8,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 - **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
-- **Provider-agnostic** — swap between Anthropic, OpenAI, and Ollama without changing agent code
+- **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint without changing agent code
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable; long sessions can be compacted
@@ -18,19 +18,20 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 ## Installation
 
 ```bash
-# Core only (no LLM provider)
-pip install aar-agent
+# Everything at once
+pip install "aar-agent[all,dev]"
 
-# With a specific provider
+# or provider specific
 pip install "aar-agent[anthropic]"
 pip install "aar-agent[openai]"
 pip install "aar-agent[ollama]"   # Ollama uses httpx, already a core dep
+pip install "aar-agent[generic]"  # Generic uses httpx, already a core dep
 
-# With MCP support
-pip install "aar-agent[mcp]"
+# or with Ollama provider + MCP support
+pip install "aar-agent[ollama,mcp]"
 
-# Everything at once
-pip install "aar-agent[anthropic,mcp,dev]"
+# Core only (no LLM provider)
+pip install aar-agent
 ```
 
 > **Note:** `aar-agent` is not published to PyPI.  
@@ -45,14 +46,14 @@ files take effect immediately without reinstalling:
 git clone https://github.com/your-org/aar.git
 cd aar
 
+# Full dev setup — includes pytest, pytest-asyncio, and ruff
+pip install -e ".[all,dev]"
+
 # Core only
 pip install -e .
 
 # With a provider and MCP support
 pip install -e ".[anthropic,mcp]"
-
-# Full dev setup — includes pytest, pytest-asyncio, and ruff
-pip install -e ".[anthropic,mcp,dev]"
 ```
 
 The `-e` flag creates a live link from `site-packages` back to the source
@@ -73,15 +74,25 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 ## CLI
 
 ```bash
-# Interactive chat
+# Interactive chat (workspace sandbox on by default — asks before write/execute,
+# file tools restricted to cwd)
 aar chat
 
 # Chat with a specific provider/model
 aar chat --provider openai --model gpt-4o
 aar chat --provider ollama --model llama3
 
-# Run a one-shot task
+# Disable the workspace sandbox for full access
+aar chat --no-require-approval --no-restrict-to-cwd
+
+# Run a one-shot task (permissive by default — no approval prompts)
 aar run "Refactor main.py to use async/await"
+
+# Run with workspace sandbox (opt-in for automated mode)
+aar run --require-approval --restrict-to-cwd "Delete unused imports"
+
+# Load full config from a JSON file
+aar chat --config aar.json
 
 # Resume a previous session
 aar resume <session-id>
@@ -92,7 +103,7 @@ aar sessions
 # List available tools
 aar tools
 
-# Launch the rich TUI
+# Launch the rich TUI (workspace sandbox on, like chat)
 aar tui
 
 # Start the HTTP/SSE web server
@@ -142,7 +153,7 @@ from agent import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
 
 config = AgentConfig(
     provider=ProviderConfig(
-        name="anthropic",                          # "anthropic" | "openai" | "ollama"
+        name="anthropic",                          # "anthropic" | "openai" | "ollama" | "generic"
         model="claude-sonnet-4-20250514",
         api_key="...",                             # or set via env var
         max_tokens=4096,
@@ -157,9 +168,8 @@ config = AgentConfig(
         read_only=False,                           # block all writes
         require_approval_for_writes=False,         # ask before every write
         require_approval_for_execute=False,        # ask before every shell command
-        denied_paths=["**/.env", "**/*.key"],      # glob patterns
+        denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         allowed_paths=[],                          # whitelist (empty = allow all non-denied)
-        denied_commands=["rm -rf /", "mkfs"],      # substring matches
         sandbox="local",                           # "local" | "subprocess"
     ),
     max_steps=50,
@@ -168,6 +178,37 @@ config = AgentConfig(
     session_dir=".agent/sessions",
 )
 ```
+
+### Configurable system prompt
+
+By default, the system prompt is assembled automatically from up to three layers:
+
+| Layer | Source | Purpose |
+|-------|--------|---------|
+| **Base** | built-in | Runtime facts — OS, working directory, shell |
+| **Global rules** | `~/.aar/rules.md` | Personal preferences that apply to all projects |
+| **Project rules** | `.agent/rules.md` | Project-specific instructions (checked into git) |
+
+Each layer is optional. If no rules files exist, the agent behaves exactly as before — only the base prompt is used. When present, the layers are concatenated in order, separated by `---`.
+
+**Global rules** — create `~/.aar/rules.md` for preferences that follow you across projects:
+
+```markdown
+# My rules
+- Always use type hints on public functions.
+- Prefer pathlib over os.path.
+- Use ruff for formatting.
+```
+
+**Project rules** — create `.agent/rules.md` for instructions specific to the current repo:
+
+```markdown
+# Project rules
+- This is a FastAPI app. Use pytest-asyncio for async tests.
+- Follow the existing service pattern in app/services/.
+```
+
+**Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
 
 ## Providers
 
@@ -288,43 +329,21 @@ agent.registry.add(ToolSpec(
 
 ## Safety
 
-### Policy modes
+Aar has a layered safety system with sensible defaults. See [`docs/safety.md`](docs/safety.md) for the full reference, including the complete list of denied paths/commands, per-transport defaults, CLI flags, sandbox modes, and the approval callback API.
+
+**Key features at a glance:**
+
+- **Workspace sandbox** — `aar chat` and `aar tui` restrict file tools to the current directory and require approval before writes/shell commands. `aar run` is permissive for automation. Toggle with `--[no-]require-approval` and `--[no-]restrict-to-cwd`.
+- **Built-in deny lists** — credential files, key material, `.env` files, and dangerous shell commands (25+ path patterns, 20+ command patterns) are always blocked.
+- **Human approval** — supply a custom `ApprovalCallback` that returns `APPROVED`, `DENIED`, or `APPROVED_ALWAYS`.
+- **Configurable policy** — set via CLI flags, a JSON config file (see [Configuration](#configuration)), or a `SafetyConfig` object.
 
 ```python
 from agent import SafetyConfig
 
-# Read-only: blocks all writes and shell commands
-SafetyConfig(read_only=True)
-
-# Require human approval before any write
-SafetyConfig(require_approval_for_writes=True)
-
-# Require approval before any shell command
-SafetyConfig(require_approval_for_execute=True)
-
-# Restrict file access to a specific directory
-SafetyConfig(allowed_paths=["/my/project/**"])
-```
-
-### Human approval callback
-
-```python
-from agent.safety.permissions import ApprovalResult, PermissionManager
-from agent.tools.execution import ToolExecutor
-
-async def my_approval_callback(spec, tool_call) -> ApprovalResult:
-    print(f"Allow {spec.name}({tool_call.arguments})? [y/n/always]")
-    answer = input().strip().lower()
-    if answer == "always":
-        return ApprovalResult.APPROVED_ALWAYS
-    return ApprovalResult.APPROVED if answer == "y" else ApprovalResult.DENIED
-
-executor = ToolExecutor(
-    registry,
-    tool_config,
-    SafetyConfig(require_approval_for_execute=True),
-    approval_callback=my_approval_callback,
-)
+SafetyConfig(read_only=True)                        # block all writes and shell commands
+SafetyConfig(require_approval_for_writes=True)       # prompt before writes
+SafetyConfig(allowed_paths=["/my/project/**"])        # restrict file access
 ```
 
 ## Sessions and persistence
@@ -691,60 +710,17 @@ uvicorn.run(app, host="0.0.0.0", port=8080)
 
 ## Architecture
 
+The project follows a modular design: a thin core loop, provider adapters, a tool registry with a safety pipeline, session persistence, and pluggable transports. See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough of every component, the core loop, the event emission order, provider internals, the tool execution pipeline, and the safety architecture.
+
 ```
 agent/
-├── core/
-│   ├── loop.py          # Thin agent loop (~80 lines)
-│   ├── agent.py         # High-level Agent class
-│   ├── events.py        # Typed event model
-│   ├── session.py       # Session (history + message conversion)
-│   ├── state.py         # AgentState enum
-│   └── config.py        # AgentConfig, ProviderConfig, SafetyConfig
-├── providers/
-│   ├── base.py          # Provider ABC + ProviderCapabilities
-│   ├── anthropic.py     # Anthropic Messages API adapter
-│   ├── openai.py        # OpenAI Chat Completions adapter
-│   └── ollama.py        # Ollama REST API adapter
-├── tools/
-│   ├── registry.py      # Tool registry (decorator + explicit)
-│   ├── schema.py        # ToolSpec, SideEffect
-│   ├── execution.py     # ToolExecutor (policy + sandbox + run)
-│   └── builtin/         # read_file, write_file, edit_file, list_dir, bash
-├── safety/
-│   ├── policy.py        # SafetyPolicy (ALLOW / DENY / ASK)
-│   ├── permissions.py   # PermissionManager (approval gates)
-│   └── sandbox.py       # LocalSandbox, SubprocessSandbox
-├── memory/
-│   └── session_store.py # JSONL persistence + compaction
-├── extensions/
-│   ├── mcp.py           # MCPBridge — connect MCP servers, register tools
-│   └── observability.py # session_metrics() — timing, tokens, errors
-└── transports/
-    ├── cli.py           # Typer CLI (chat, run, tui, serve, …)
-    ├── tui.py           # Rich TUI
-    ├── web.py           # ASGI app + SSE streaming
-    └── stream.py        # EventStream / AsyncEventStream
-```
-
-The core loop:
-
-```python
-while not done and step < max_steps:
-    if cancel_event and cancel_event.is_set(): break   # cooperative cancel
-    if elapsed > timeout: break
-
-    t = time.monotonic()
-    response = await provider.complete(messages, tools, system)
-    response.meta.duration_ms = (time.monotonic() - t) * 1000  # provider timing
-
-    if response.tool_calls:
-        results = await tool_executor.execute(response.tool_calls)  # tool timing inside
-        session.append(results)
-        continue
-
-    session.append(response)
-    if response.stop_reason in {"end_turn", "max_tokens"}:
-        done = True
+├── core/           # Loop, agent, events, session, config
+├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
+├── tools/          # Tool registry, schema, execution engine
+├── safety/         # Policy engine, permission manager, sandboxes
+├── memory/         # Session persistence (JSONL)
+├── extensions/     # MCP bridge, observability
+└── transports/     # CLI, TUI, web, event stream
 ```
 
 ## Testing
@@ -754,7 +730,7 @@ pip install "aar-agent[dev]"
 pytest tests/ -v
 ```
 
-The test suite (214 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
+The test suite (236 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
 
 - Loop termination, max steps, timeout, cancellation (`asyncio.Event` + `CancelledError`), provider errors
 - Session persistence, resumption, compaction, `trace_id` round-trip, message conversion
