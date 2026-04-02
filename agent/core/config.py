@@ -78,8 +78,8 @@ class ToolConfig(BaseModel):
 
 class SafetyConfig(BaseModel):
     read_only: bool = False
-    require_approval_for_writes: bool = False
-    require_approval_for_execute: bool = False
+    require_approval_for_writes: bool = True
+    require_approval_for_execute: bool = True
     denied_paths: list[str] = Field(
         default_factory=lambda: [
             # Unix system files
