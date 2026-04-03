@@ -126,6 +126,66 @@ class TestSessionsCommand:
 
 
 # ---------------------------------------------------------------------------
+# `aar prompt`
+# ---------------------------------------------------------------------------
+
+
+class TestPromptCommand:
+    def test_prints_base_prompt_content(self):
+        """Default invocation shows the assembled system prompt inside a Rich panel."""
+        result = runner.invoke(app, ["prompt"])
+        assert result.exit_code == 0
+        assert "You are a helpful assistant" in result.output
+        assert "Working directory" in result.output
+
+    def test_panel_title_present_by_default(self):
+        """The Rich panel title 'System Prompt' is shown in normal mode."""
+        result = runner.invoke(app, ["prompt"])
+        assert result.exit_code == 0
+        assert "System Prompt" in result.output
+
+    def test_raw_flag_prints_plain_text(self):
+        """--raw emits the prompt without any Rich panel decoration."""
+        result = runner.invoke(app, ["prompt", "--raw"])
+        assert result.exit_code == 0
+        assert "You are a helpful assistant" in result.output
+        # The Panel subtitle "N chars · M lines" is only present in rich mode
+        assert "chars" not in result.output or "\xb7" not in result.output
+        # Specifically, the middle-dot separator from the subtitle must be absent
+        assert "\xb7" not in result.output
+
+    def test_raw_output_matches_config_system_prompt(self):
+        """--raw output equals config.system_prompt exactly (modulo trailing newline)."""
+        from agent.core.config import build_system_prompt
+
+        result = runner.invoke(app, ["prompt", "--raw"])
+        assert result.exit_code == 0
+        assert build_system_prompt() in result.output
+
+    def test_custom_config_file(self, tmp_path):
+        """--config loads a JSON file and its system_prompt is displayed."""
+        cfg = AgentConfig(system_prompt="CUSTOM_SYSTEM_PROMPT_VALUE")
+        config_path = tmp_path / "cfg.json"
+        config_path.write_text(cfg.model_dump_json())
+
+        result = runner.invoke(app, ["prompt", "--config", str(config_path)])
+        assert result.exit_code == 0
+        assert "CUSTOM_SYSTEM_PROMPT_VALUE" in result.output
+
+    def test_custom_config_file_raw(self, tmp_path):
+        """--config combined with --raw prints the custom prompt as plain text."""
+        cfg = AgentConfig(system_prompt="RAW_CUSTOM_PROMPT_XYZ")
+        config_path = tmp_path / "cfg.json"
+        config_path.write_text(cfg.model_dump_json())
+
+        result = runner.invoke(app, ["prompt", "--raw", "--config", str(config_path)])
+        assert result.exit_code == 0
+        assert "RAW_CUSTOM_PROMPT_XYZ" in result.output
+        # The middle-dot subtitle separator is only present in rich panel mode
+        assert "\xb7" not in result.output
+
+
+# ---------------------------------------------------------------------------
 # `agent run <task>`
 # ---------------------------------------------------------------------------
 

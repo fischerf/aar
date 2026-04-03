@@ -517,6 +517,46 @@ def sessions() -> None:
 
 
 @app.command()
+def prompt(
+    model: Optional[str] = typer.Option(None, "--model", "-m"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+    ),
+    config_file: Optional[str] = typer.Option(
+        None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"
+    ),
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        help="Print as plain text without Rich formatting (useful for piping / diffing)",
+    ),
+) -> None:
+    """Print the fully assembled system prompt so you can see exactly what the agent receives."""
+    config = _build_config(
+        model=model,
+        provider=provider,
+        config_file=config_file,
+    )
+    system_prompt = config.system_prompt
+
+    if raw:
+        typer.echo(system_prompt)
+        return
+
+    n_chars = len(system_prompt)
+    n_lines = system_prompt.count("\n") + 1
+    console.print(
+        Panel(
+            system_prompt,
+            title="[bold cyan]System Prompt[/]",
+            subtitle=f"[dim]{n_chars} chars · {n_lines} lines[/]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+
+@app.command()
 def tools(
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="Path to MCP servers JSON config"
