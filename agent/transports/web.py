@@ -84,6 +84,7 @@ class WebTransport:
 
         # Find the final assistant text
         from agent.core.events import AssistantMessage
+
         final_text = ""
         for event in reversed(session.events):
             if isinstance(event, AssistantMessage) and event.content:
@@ -192,6 +193,7 @@ def format_sse(event: Event) -> str:
 
 # --- Optional: minimal ASGI app for quick deployment ---
 
+
 def create_asgi_app(config: AgentConfig | None = None) -> Any:
     """Create a minimal ASGI application wrapping the web transport.
 
@@ -211,6 +213,10 @@ def create_asgi_app(config: AgentConfig | None = None) -> Any:
 
         path = scope["path"]
         method = scope["method"]
+
+        if method == "OPTIONS":
+            await _cors_preflight(send)
+            return
 
         if method == "GET" and path == "/health":
             await _json_response(send, {"status": "ok"})
@@ -263,35 +269,61 @@ async def _read_body(receive: Any) -> bytes:
     return body
 
 
+_CORS_HEADERS = [
+    [b"access-control-allow-origin", b"*"],
+    [b"access-control-allow-methods", b"GET, POST, OPTIONS"],
+    [b"access-control-allow-headers", b"content-type"],
+]
+
+
+async def _cors_preflight(send: Any) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 204,
+            "headers": _CORS_HEADERS,
+        }
+    )
+    await send({"type": "http.response.body", "body": b""})
+
+
 async def _json_response(send: Any, data: dict, status: int = 200) -> None:
     body = json.dumps(data).encode()
-    await send({
-        "type": "http.response.start",
-        "status": status,
-        "headers": [
-            [b"content-type", b"application/json"],
-            [b"content-length", str(len(body)).encode()],
-        ],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(body)).encode()],
+                *_CORS_HEADERS,
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": body})
 
 
 async def _sse_response(send: Any, iterator: AsyncEventIterator) -> None:
-    await send({
-        "type": "http.response.start",
-        "status": 200,
-        "headers": [
-            [b"content-type", b"text/event-stream"],
-            [b"cache-control", b"no-cache"],
-            [b"connection", b"keep-alive"],
-        ],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"content-type", b"text/event-stream"],
+                [b"cache-control", b"no-cache"],
+                [b"connection", b"keep-alive"],
+                *_CORS_HEADERS,
+            ],
+        }
+    )
     try:
         async for chunk in iterator:
-            await send({
-                "type": "http.response.body",
-                "body": chunk.encode(),
-                "more_body": True,
-            })
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": chunk.encode(),
+                    "more_body": True,
+                }
+            )
     finally:
         await send({"type": "http.response.body", "body": b"", "more_body": False})

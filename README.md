@@ -94,8 +94,10 @@ aar run --require-approval --restrict-to-cwd "Delete unused imports"
 # Load full config from a JSON file
 aar chat --config aar.json
 
-# Resume a previous session
-aar resume <session-id>
+# Resume a previous session (works with chat, run, and tui)
+aar chat --session <session-id>
+aar run "follow up task" --session <session-id>
+aar tui --session <session-id>
 
 # List saved sessions
 aar sessions
@@ -112,7 +114,7 @@ aar serve --host 0.0.0.0 --port 8080
 
 ### Verbose mode
 
-Pass `--verbose` (or `-v`) to `chat`, `run`, `resume`, or `tui` to enable richer
+Pass `--verbose` (or `-v`) to `chat`, `run`, or `tui` to enable richer
 operation feedback:
 
 - **Side-effect badge** before each tool name — `[read]`, `[write]`, `[exec]`, `[net]`, `[ext]`
@@ -407,6 +409,15 @@ print(store.list_sessions())
 
 # Compact a long session to its most recent 200 events
 store.compact("a3f1b2c4d5e6f7a8", max_events=200)
+```
+
+From the CLI, resume a session by passing `--session` (or `-s`) to any interactive
+command:
+
+```bash
+aar chat --session a3f1b2c4d5e6f7a8
+aar run "add error handling" --session a3f1b2c4d5e6f7a8
+aar tui --session a3f1b2c4d5e6f7a8
 ```
 
 ## Event model

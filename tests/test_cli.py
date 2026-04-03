@@ -27,7 +27,6 @@ from agent.providers.base import ProviderResponse
 from agent.transports.cli import app
 from tests.conftest import MockProvider
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,6 +55,7 @@ def _mock_config(tmp_path: Path, provider_name: str = "mock") -> AgentConfig:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def tmp_session_dir():
     with tempfile.TemporaryDirectory() as d:
@@ -65,6 +65,7 @@ def tmp_session_dir():
 # ---------------------------------------------------------------------------
 # `agent tools`
 # ---------------------------------------------------------------------------
+
 
 class TestToolsCommand:
     def test_lists_all_builtin_tools(self):
@@ -89,6 +90,7 @@ class TestToolsCommand:
 # ---------------------------------------------------------------------------
 # `agent sessions`
 # ---------------------------------------------------------------------------
+
 
 class TestSessionsCommand:
     def test_no_sessions(self, tmp_session_dir):
@@ -127,13 +129,16 @@ class TestSessionsCommand:
 # `agent run <task>`
 # ---------------------------------------------------------------------------
 
+
 class TestRunCommand:
     def test_run_simple_task(self, tmp_session_dir):
         mock_p = _make_mock_provider("The task is done.")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["run", "do something"])
 
         assert result.exit_code == 0
@@ -143,8 +148,10 @@ class TestRunCommand:
         mock_p = _make_mock_provider("Done!")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["run", "do something"])
 
         assert result.exit_code == 0
@@ -155,8 +162,10 @@ class TestRunCommand:
         mock_p = _make_mock_provider("All done.")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["run", "task"])
 
         assert result.exit_code == 0
@@ -170,8 +179,10 @@ class TestRunCommand:
         mock_p = _make_mock_provider("Done.")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(
                 app, ["run", "task", "--model", "gpt-4o", "--provider", "openai"]
             )
@@ -184,8 +195,10 @@ class TestRunCommand:
         mock_p.enqueue_text("Tool returned: echo: hi")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["run", "call echo"])
 
         assert result.exit_code == 0
@@ -197,13 +210,16 @@ class TestRunCommand:
 # `agent chat` (interactive)
 # ---------------------------------------------------------------------------
 
+
 class TestChatCommand:
     def test_chat_single_message_then_quit(self, tmp_session_dir):
         mock_p = _make_mock_provider("Hello back!")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             # Inject: one message, then /quit
             result = runner.invoke(app, ["chat"], input="hello\n/quit\n")
 
@@ -214,8 +230,10 @@ class TestChatCommand:
         mock_p = _make_mock_provider("Hi!")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             # EOF immediately — no messages sent
             result = runner.invoke(app, ["chat"], input="")
 
@@ -225,8 +243,10 @@ class TestChatCommand:
         mock_p = MockProvider()  # no responses queued — empty input shouldn't call provider
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["chat"], input="   \n/quit\n")
 
         assert result.exit_code == 0
@@ -237,8 +257,10 @@ class TestChatCommand:
             mock_p = MockProvider()
             config = _mock_config(tmp_session_dir)
 
-            with patch("agent.core.agent._create_provider", return_value=mock_p), \
-                 patch("agent.transports.cli._build_config", return_value=config):
+            with (
+                patch("agent.core.agent._create_provider", return_value=mock_p),
+                patch("agent.transports.cli._build_config", return_value=config),
+            ):
                 result = runner.invoke(app, ["chat"], input=f"{cmd}\n")
 
             assert result.exit_code == 0
@@ -247,8 +269,10 @@ class TestChatCommand:
         mock_p = _make_mock_provider("Great!")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             runner.invoke(app, ["chat"], input="hi\n/quit\n")
 
         store = SessionStore(tmp_session_dir)
@@ -260,8 +284,10 @@ class TestChatCommand:
         mock_p.enqueue_text("Second response")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["chat"], input="message one\nmessage two\n/quit\n")
 
         assert result.exit_code == 0
@@ -272,8 +298,10 @@ class TestChatCommand:
     def test_chat_invalid_session_id_exits_with_error(self, tmp_session_dir):
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=MockProvider()), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(app, ["chat", "--session", "nonexistent_id"])
 
         assert result.exit_code == 1
@@ -290,11 +318,12 @@ class TestChatCommand:
         mock_p = _make_mock_provider("Continued!")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
             result = runner.invoke(
-                app, ["chat", "--session", existing.session_id],
-                input="follow up\n/quit\n"
+                app, ["chat", "--session", existing.session_id], input="follow up\n/quit\n"
             )
 
         assert result.exit_code == 0
@@ -307,87 +336,44 @@ class TestChatCommand:
 
 
 # ---------------------------------------------------------------------------
-# `agent resume <session-id>`
+# `run --session` (resume into one-shot)
 # ---------------------------------------------------------------------------
 
-class TestResumeCommand:
-    def test_resume_does_not_pass_typer_sentinels_to_config(self, tmp_session_dir):
-        """Regression: resume() called chat() directly, so default params were Typer
-        OptionInfo objects instead of plain strings — causing a Pydantic ValidationError.
 
-        This test does NOT patch _build_config so the real validation runs.
-        """
+class TestRunWithSession:
+    def test_run_with_valid_session_resumes(self, tmp_session_dir):
+        """Passing --session with an existing ID should resume it."""
         store = SessionStore(tmp_session_dir)
-        s = Session()
-        store.save(s)
+        existing = Session()
+        existing.add_user_message("original message")
+        existing.add_assistant_message("original reply")
+        store.save(existing)
 
-        mock_agent = MagicMock()
-        mock_agent.run = AsyncMock(return_value=s)
-        mock_agent.on_event = MagicMock()
-
-        with patch("agent.transports.cli.Agent", return_value=mock_agent), \
-             patch("agent.transports.cli.SessionStore", return_value=store):
-            result = runner.invoke(app, ["resume", s.session_id], input="/quit\n")
-
-        assert "ValidationError" not in result.output
-        assert "Input should be a valid string" not in result.output
-        assert result.exit_code == 0
-
-    def test_resume_build_config_receives_plain_types(self, tmp_session_dir):
-        """_build_config must receive plain Python types, not Typer OptionInfo objects."""
-        store = SessionStore(tmp_session_dir)
-        s = Session()
-        store.save(s)
-
-        captured: dict = {}
-        original = __import__(
-            "agent.transports.cli", fromlist=["_build_config"]
-        )._build_config
-
-        def spy(**kwargs):
-            captured.update(kwargs)
-            return original(**kwargs)
-
-        with patch("agent.transports.cli._build_config", side_effect=spy), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()), \
-             patch("agent.transports.cli.SessionStore", return_value=store):
-            runner.invoke(app, ["resume", s.session_id], input="/quit\n")
-
-        # resume now calls _build_config() with no args (uses defaults),
-        # so we just verify it was called successfully
-        assert captured is not None
-
-    def test_resume_existing_session(self, tmp_session_dir):
-        store = SessionStore(tmp_session_dir)
-        s = Session()
-        s.add_user_message("first turn")
-        s.add_assistant_message("first reply")
-        store.save(s)
-
-        mock_p = _make_mock_provider("Resumed reply!")
+        mock_p = _make_mock_provider("Continued from run!")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
-            result = runner.invoke(
-                app, ["resume", s.session_id],
-                input="follow up\n/quit\n"
-            )
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
+            result = runner.invoke(app, ["run", "follow up task", "--session", existing.session_id])
 
         assert result.exit_code == 0
-        assert "Resumed reply!" in result.output
+        assert "Continued from run!" in result.output
 
-    def test_resume_nonexistent_session(self, tmp_session_dir):
+    def test_run_with_nonexistent_session(self, tmp_session_dir):
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=MockProvider()), \
-             patch("agent.transports.cli._build_config", return_value=config):
-            result = runner.invoke(app, ["resume", "no_such_session"])
+        with (
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
+            result = runner.invoke(app, ["run", "task", "--session", "no_such_session"])
 
         assert result.exit_code == 1
         assert "not found" in result.output.lower()
 
-    def test_resume_preserves_history(self, tmp_session_dir):
+    def test_run_with_session_preserves_history(self, tmp_session_dir):
         """History from the original session should be sent to the provider."""
         store = SessionStore(tmp_session_dir)
         s = Session()
@@ -398,12 +384,11 @@ class TestResumeCommand:
         mock_p = _make_mock_provider("And 3+3 is 6.")
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.core.agent._create_provider", return_value=mock_p), \
-             patch("agent.transports.cli._build_config", return_value=config):
-            runner.invoke(
-                app, ["resume", s.session_id],
-                input="and 3+3?\n/quit\n"
-            )
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
+            runner.invoke(app, ["run", "and 3+3?", "--session", s.session_id])
 
         assert len(mock_p.call_history) == 1
         messages = mock_p.call_history[0]["messages"]
@@ -411,22 +396,47 @@ class TestResumeCommand:
         assert "2+2" in all_content
         assert "4" in all_content
 
+    def test_run_with_session_saves_updated_session(self, tmp_session_dir):
+        """After resuming, the session on disk should contain both old and new events."""
+        store = SessionStore(tmp_session_dir)
+        s = Session()
+        s.add_user_message("first turn")
+        s.add_assistant_message("first reply")
+        store.save(s)
+
+        mock_p = _make_mock_provider("second reply")
+        config = _mock_config(tmp_session_dir)
+
+        with (
+            patch("agent.core.agent._create_provider", return_value=mock_p),
+            patch("agent.transports.cli._build_config", return_value=config),
+        ):
+            runner.invoke(app, ["run", "second turn", "--session", s.session_id])
+
+        loaded = store.load(s.session_id)
+        # Original 2 events + SessionEvent(started) is NOT added on resume
+        # + 1 new user message + 1 new assistant message = 4 events
+        assert len(loaded.events) >= 4
+
 
 # ---------------------------------------------------------------------------
 # `agent tui`
 # ---------------------------------------------------------------------------
+
 
 class TestTuiCommand:
     def test_tui_launches_and_exits(self, tmp_session_dir):
         """TUI should boot without error when run_tui is patched to exit immediately."""
         config = _mock_config(tmp_session_dir)
 
-        async def noop_tui(cfg, agent=None, verbose=False):
+        async def noop_tui(cfg, agent=None, verbose=False, session_id=None):
             pass
 
-        with patch("agent.transports.tui.run_tui", new=noop_tui), \
-             patch("agent.transports.cli._build_config", return_value=config), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()):
+        with (
+            patch("agent.transports.tui.run_tui", new=noop_tui),
+            patch("agent.transports.cli._build_config", return_value=config),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+        ):
             result = runner.invoke(app, ["tui"])
 
         assert result.exit_code == 0
@@ -434,14 +444,14 @@ class TestTuiCommand:
     def test_tui_passes_model_option(self, tmp_session_dir):
         received_config = {}
 
-        async def capture_tui(cfg, agent=None, verbose=False):
+        async def capture_tui(cfg, agent=None, verbose=False, session_id=None):
             received_config["model"] = cfg.provider.model
 
-        with patch("agent.transports.tui.run_tui", new=capture_tui), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()):
-            result = runner.invoke(
-                app, ["tui", "--model", "gpt-4o", "--provider", "openai"]
-            )
+        with (
+            patch("agent.transports.tui.run_tui", new=capture_tui),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+        ):
+            result = runner.invoke(app, ["tui", "--model", "gpt-4o", "--provider", "openai"])
 
         assert result.exit_code == 0
         assert received_config.get("model") == "gpt-4o"
@@ -449,29 +459,49 @@ class TestTuiCommand:
     def test_tui_passes_provider_option(self, tmp_session_dir):
         received_config = {}
 
-        async def capture_tui(cfg, agent=None, verbose=False):
+        async def capture_tui(cfg, agent=None, verbose=False, session_id=None):
             received_config["provider"] = cfg.provider.name
 
-        with patch("agent.transports.tui.run_tui", new=capture_tui), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()):
-            result = runner.invoke(
-                app, ["tui", "--provider", "ollama", "--model", "llama3"]
-            )
+        with (
+            patch("agent.transports.tui.run_tui", new=capture_tui),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+        ):
+            result = runner.invoke(app, ["tui", "--provider", "ollama", "--model", "llama3"])
 
         assert result.exit_code == 0
         assert received_config.get("provider") == "ollama"
+
+    def test_tui_passes_session_id(self, tmp_session_dir):
+        received = {}
+
+        async def capture_tui(cfg, agent=None, verbose=False, session_id=None):
+            received["session_id"] = session_id
+
+        with (
+            patch("agent.transports.tui.run_tui", new=capture_tui),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+        ):
+            result = runner.invoke(
+                app, ["tui", "--session", "abc123", "--provider", "ollama", "--model", "llama3"]
+            )
+
+        assert result.exit_code == 0
+        assert received.get("session_id") == "abc123"
 
 
 # ---------------------------------------------------------------------------
 # `agent serve`
 # ---------------------------------------------------------------------------
 
+
 class TestServeCommand:
     def test_serve_exits_when_uvicorn_missing(self, tmp_session_dir):
         config = _mock_config(tmp_session_dir)
 
-        with patch("agent.transports.cli._build_config", return_value=config), \
-             patch.dict("sys.modules", {"uvicorn": None}):
+        with (
+            patch("agent.transports.cli._build_config", return_value=config),
+            patch.dict("sys.modules", {"uvicorn": None}),
+        ):
             result = runner.invoke(app, ["serve"])
 
         assert result.exit_code == 1
@@ -484,9 +514,11 @@ class TestServeCommand:
         mock_uvicorn = MagicMock()
         mock_uvicorn.run.side_effect = lambda app, **kw: captured.update(kw)
 
-        with patch("agent.transports.cli._build_config", return_value=config), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()), \
-             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        with (
+            patch("agent.transports.cli._build_config", return_value=config),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
+        ):
             result = runner.invoke(app, ["serve"])
 
         assert result.exit_code == 0
@@ -500,9 +532,11 @@ class TestServeCommand:
         mock_uvicorn = MagicMock()
         mock_uvicorn.run.side_effect = lambda app, **kw: captured.update(kw)
 
-        with patch("agent.transports.cli._build_config", return_value=config), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()), \
-             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        with (
+            patch("agent.transports.cli._build_config", return_value=config),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
+        ):
             result = runner.invoke(app, ["serve", "--host", "0.0.0.0", "--port", "9090"])
 
         assert result.exit_code == 0
@@ -513,9 +547,11 @@ class TestServeCommand:
         config = _mock_config(tmp_session_dir)
         mock_uvicorn = MagicMock()
 
-        with patch("agent.transports.cli._build_config", return_value=config), \
-             patch("agent.core.agent._create_provider", return_value=MockProvider()), \
-             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        with (
+            patch("agent.transports.cli._build_config", return_value=config),
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
+        ):
             result = runner.invoke(app, ["serve", "--port", "8080"])
 
         assert result.exit_code == 0
@@ -525,6 +561,7 @@ class TestServeCommand:
 # ---------------------------------------------------------------------------
 # Live tests — Ollama (skipped unless --live flag is passed)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.live
 class TestLiveOllama:
@@ -543,8 +580,14 @@ class TestLiveOllama:
     def test_run_produces_output(self, tmp_session_dir):
         result = runner.invoke(
             app,
-            ["run", "Reply with exactly the word PONG and nothing else.",
-             "--provider", self.PROVIDER, "--model", self.MODEL],
+            [
+                "run",
+                "Reply with exactly the word PONG and nothing else.",
+                "--provider",
+                self.PROVIDER,
+                "--model",
+                self.MODEL,
+            ],
         )
         assert result.exit_code == 0
         # Should have some non-empty text response
@@ -572,10 +615,7 @@ class TestLiveOllama:
                 max_steps=3,
             )
             mock_cfg.return_value = real_config
-            result = runner.invoke(
-                app, ["chat"],
-                input="Reply with the single word YES.\n/quit\n"
-            )
+            result = runner.invoke(app, ["chat"], input="Reply with the single word YES.\n/quit\n")
 
         assert result.exit_code == 0
         assert len(result.output.strip()) > 0
@@ -599,7 +639,7 @@ class TestLiveOllama:
 
         assert saved_id in result.output
 
-    def test_resume_live_session(self, tmp_session_dir):
+    def test_chat_resume_live_session(self, tmp_session_dir):
         """Save a session then resume it with a follow-up."""
         with patch("agent.transports.cli._build_config") as mock_cfg:
             real_config = AgentConfig(
@@ -614,10 +654,7 @@ class TestLiveOllama:
             store = SessionStore(tmp_session_dir)
             saved_id = store.list_sessions()[0]
 
-            # Resume
-            result = runner.invoke(
-                app, ["resume", saved_id],
-                input="Say OK.\n/quit\n"
-            )
+            # Resume via chat --session
+            result = runner.invoke(app, ["chat", "--session", saved_id], input="Say OK.\n/quit\n")
 
         assert result.exit_code == 0

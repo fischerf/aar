@@ -434,6 +434,9 @@ def run(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
     ),
+    session_id: Optional[str] = typer.Option(
+        None, "--session", "-s", help="Resume a saved session"
+    ),
     config_file: Optional[str] = typer.Option(
         None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"
     ),
@@ -483,35 +486,21 @@ def run(
 
     async def _do(agent: Agent) -> None:
         agent.on_event(_make_event_handler(verbose))
-        session = await agent.run(task)
         store = SessionStore(config.session_dir)
+        session: Session | None = None
+        if session_id:
+            try:
+                session = store.load(session_id)
+                console.print(f"[dim]Resumed session {session_id}[/]")
+            except FileNotFoundError:
+                console.print(f"[red]Session {session_id} not found[/]")
+                raise typer.Exit(1)
+        session = await agent.run(task, session)
         store.save(session)
         console.print(f"\n[dim]Session: {session.session_id}[/]")
 
     asyncio.run(
         _run_with_mcp(_do, config, mcp_config, approval_callback=_terminal_approval_callback)
-    )
-
-
-@app.command()
-def resume(
-    session_id: str = typer.Argument(..., help="Session ID to resume"),
-    mcp_config: Optional[str] = typer.Option(
-        None, "--mcp-config", help="Path to MCP servers JSON config"
-    ),
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
-    ),
-) -> None:
-    """Resume a saved session."""
-    config = _build_config()
-    asyncio.run(
-        _run_with_mcp(
-            lambda agent: _async_chat_loop(agent, config, session_id, verbose),
-            config,
-            mcp_config,
-            approval_callback=_terminal_approval_callback,
-        )
     )
 
 
@@ -565,6 +554,9 @@ def tui(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show side-effect badges, path highlights, and timing"
     ),
+    session_id: Optional[str] = typer.Option(
+        None, "--session", "-s", help="Resume a saved session"
+    ),
     config_file: Optional[str] = typer.Option(
         None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"
     ),
@@ -615,7 +607,7 @@ def tui(
     _configure_logging(config)
     asyncio.run(
         _run_with_mcp(
-            lambda agent: run_tui(config, agent=agent, verbose=verbose),
+            lambda agent: run_tui(config, agent=agent, verbose=verbose, session_id=session_id),
             config,
             mcp_config,
             approval_callback=_terminal_approval_callback,

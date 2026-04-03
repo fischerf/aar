@@ -206,6 +206,7 @@ async def run_tui(
     config: AgentConfig | None = None,
     agent: Agent | None = None,
     verbose: bool = False,
+    session_id: str | None = None,
 ) -> None:
     """Launch the TUI interactive loop.
 
@@ -217,6 +218,14 @@ async def run_tui(
     renderer = TUIRenderer(verbose=verbose)
     store = SessionStore(config.session_dir)
     session: Session | None = None
+
+    if session_id:
+        try:
+            session = store.load(session_id)
+            renderer.console.print(f"[dim]Resumed session {session_id}[/]")
+        except FileNotFoundError:
+            renderer.console.print(f"[red]Session {session_id} not found[/]")
+            return
 
     agent.on_event(renderer.render_event)
     renderer.render_welcome()
