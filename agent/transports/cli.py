@@ -60,6 +60,7 @@ def _build_config(
     restrict_to_cwd: Optional[bool] = None,
     denied_paths: str = "",
     allowed_paths: str = "",
+    log_level: Optional[str] = None,
 ) -> AgentConfig:
     """Build an AgentConfig with layered precedence.
 
@@ -104,7 +105,27 @@ def _build_config(
     elif restrict_to_cwd is not None and restrict_to_cwd:
         cfg.safety.allowed_paths = [str(Path.cwd()) + "/**"]
 
+    # Log level — CLI flag overrides config file value
+    if log_level is not None:
+        cfg.log_level = log_level.upper()
+
     return cfg
+
+
+def _configure_logging(config: AgentConfig) -> None:
+    """Apply the log level from *config* to the root logger.
+
+    Also silences noisy third-party HTTP internals at anything above DEBUG so
+    they don't clutter normal output.
+    """
+    import logging
+
+    level = getattr(logging, config.log_level.upper(), logging.WARNING)
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    # Keep low-level HTTP chatter quiet unless the user explicitly wants DEBUG
+    if level > logging.DEBUG:
+        for _noisy in ("httpx", "httpcore", "asyncio"):
+            logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
 async def _terminal_approval_callback(spec: Any, tc: Any) -> ApprovalResult:
@@ -359,6 +380,11 @@ def chat(
         "--allowed-paths",
         help="Comma-separated glob patterns to allow; overrides --restrict-to-cwd",
     ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
+    ),
 ) -> None:
     """Start an interactive chat session."""
     config = _build_config(
@@ -373,7 +399,9 @@ def chat(
         restrict_to_cwd=restrict_to_cwd,
         denied_paths=denied_paths,
         allowed_paths=allowed_paths,
+        log_level=log_level,
     )
+    _configure_logging(config)
     asyncio.run(
         _run_with_mcp(
             lambda agent: _async_chat_loop(agent, config, session_id, verbose),
@@ -430,6 +458,11 @@ def run(
         "--allowed-paths",
         help="Comma-separated glob patterns to allow; overrides --restrict-to-cwd",
     ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
+    ),
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(
@@ -444,7 +477,9 @@ def run(
         restrict_to_cwd=restrict_to_cwd,
         denied_paths=denied_paths,
         allowed_paths=allowed_paths,
+        log_level=log_level,
     )
+    _configure_logging(config)
 
     async def _do(agent: Agent) -> None:
         agent.on_event(_make_event_handler(verbose))
@@ -554,6 +589,11 @@ def tui(
         "--allowed-paths",
         help="Comma-separated glob patterns to allow; overrides --restrict-to-cwd",
     ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
+    ),
 ) -> None:
     """Launch the rich TUI interface."""
     from agent.transports.tui import run_tui
@@ -570,7 +610,9 @@ def tui(
         restrict_to_cwd=restrict_to_cwd,
         denied_paths=denied_paths,
         allowed_paths=allowed_paths,
+        log_level=log_level,
     )
+    _configure_logging(config)
     asyncio.run(
         _run_with_mcp(
             lambda agent: run_tui(config, agent=agent, verbose=verbose),
