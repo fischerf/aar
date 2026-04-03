@@ -98,9 +98,12 @@ class TUIRenderer:
             )
 
         elif isinstance(event, ErrorEvent):
+            hint = (
+                "\n[dim]You can type your message again to retry.[/]" if event.recoverable else ""
+            )
             self.console.print(
                 Panel(
-                    event.message,
+                    event.message + hint,
                     title="[bold red]Error[/]",
                     border_style="red",
                     padding=(0, 2),
@@ -254,6 +257,15 @@ async def run_tui(
             # Run the agent
             renderer.console.print(Text("  Working...", style="dim italic"))
             session = await agent.run(stripped, session)
+            # If a recoverable error occurred (e.g. provider timeout), reset the
+            # session state so the next turn works without starting a new session.
+            if session.state == AgentState.ERROR:
+                last_error = next(
+                    (e for e in reversed(session.events) if isinstance(e, ErrorEvent)),
+                    None,
+                )
+                if last_error and last_error.recoverable:
+                    session.state = AgentState.COMPLETED
             store.save(session)
 
     except KeyboardInterrupt:

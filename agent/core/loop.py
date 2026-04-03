@@ -83,10 +83,16 @@ async def run_loop(
                     system=config.system_prompt,
                 )
             except Exception as e:
-                _log.exception("Provider error at step %d", session.step_count, extra=_extra)
+                _friendly, _recoverable = _provider_error_message(e)
+                _log.warning(
+                    "Provider error at step %d: %s", session.step_count, _friendly, extra=_extra
+                )
+                _log.debug("Provider error detail", exc_info=True, extra=_extra)
                 session.state = AgentState.ERROR
                 _emit(
-                    session, on_event, ErrorEvent(message=f"Provider error: {e}", recoverable=False)
+                    session,
+                    on_event,
+                    ErrorEvent(message=_friendly, recoverable=_recoverable),
                 )
                 return session
 
@@ -162,6 +168,51 @@ def _emit(session: Session, on_event, event) -> None:
     session.append(event)
     if on_event:
         on_event(event)
+
+
+def _provider_error_message(exc: BaseException) -> tuple[str, bool]:
+    """Return ``(user_friendly_message, is_recoverable)`` for a provider exception.
+
+    Keeps raw tracebacks out of user-facing output while still giving
+    actionable context.  The full traceback is still available at DEBUG level.
+    """
+    type_name = type(exc).__name__
+    exc_str = str(exc).strip()
+
+    # ── Network / transport layer (httpx / httpcore) ──────────────────────────
+    if any(
+        t in type_name for t in ("ReadTimeout", "WriteTimeout", "PoolTimeout", "ConnectTimeout")
+    ):
+        return (
+            "Request timed out — the provider took too long to respond. You can try again.",
+            True,
+        )
+    if any(t in type_name for t in ("ConnectError", "ConnectionError", "NetworkError")):
+        return (
+            "Could not connect to the provider — check that the server URL is correct"
+            " and the service is running.",
+            True,
+        )
+    if any(t in type_name for t in ("RemoteProtocolError", "LocalProtocolError")):
+        return (
+            f"Provider returned an unexpected response ({type_name}). You can try again.",
+            True,
+        )
+
+    # ── Provider-level errors (Anthropic / OpenAI SDK, etc.) ─────────────────
+    if any(
+        t in type_name for t in ("AuthenticationError", "PermissionDeniedError", "PermissionDenied")
+    ):
+        return "Authentication failed — check your API key.", False
+    if "RateLimitError" in type_name:
+        return "Rate limit exceeded — wait a moment, then try again.", True
+    if any(t in type_name for t in ("APIStatusError", "HTTPStatusError")):
+        detail = exc_str or type_name
+        return f"Provider returned an error: {detail}", True
+
+    # ── Fallback ──────────────────────────────────────────────────────────────
+    detail = exc_str or type_name
+    return f"Provider error ({type_name}): {detail}", False
 
 
 def _parse_stop(reason: str) -> StopReason:

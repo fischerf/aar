@@ -176,7 +176,42 @@ config = AgentConfig(
     timeout=300.0,                                 # seconds
     system_prompt="You are a helpful assistant.",
     session_dir=".agent/sessions",
+    log_level="WARNING",                           # DEBUG | INFO | WARNING | ERROR | CRITICAL
 )
+```
+
+### Log level
+
+Control how much the agent logs to stderr. The default is `WARNING`, which only shows errors and warnings (including friendly provider error messages). Use `DEBUG` to see full request traces, raw tracebacks, and internal loop steps.
+
+| Level | What you see |
+|-------|-------------|
+| `DEBUG` | Everything — full tracebacks, HTTP traces, step-by-step loop internals |
+| `INFO` | Step counts, provider timing, tool execution summaries |
+| `WARNING` | Provider errors, safety policy hits, unexpected conditions **(default)** |
+| `ERROR` | Only hard failures |
+| `CRITICAL` | Silent except for fatal errors |
+
+**Via config file** (`~/.aar/config.json` or `--config`):
+
+```json
+{
+  "log_level": "DEBUG"
+}
+```
+
+**Via `AgentConfig` in code:**
+
+```python
+config = AgentConfig(log_level="DEBUG")
+```
+
+**Via CLI flag** (overrides the config file for that run):
+
+```bash
+aar chat --log-level DEBUG
+aar run "do something" --log-level INFO
+aar tui --log-level WARNING
 ```
 
 ### Configurable system prompt

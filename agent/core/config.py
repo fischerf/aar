@@ -130,6 +130,7 @@ class AgentConfig(BaseModel):
     timeout: float = 300.0
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
     system_prompt: str = Field(default_factory=build_system_prompt)
+    log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
 
 
 def load_config(path: Path) -> AgentConfig:
