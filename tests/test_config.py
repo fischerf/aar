@@ -114,6 +114,115 @@ class TestBuildSystemPrompt:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# _default_system_prompt — shell_path override
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultSystemPromptShellPath:
+    def test_custom_shell_path_appears_in_prompt(self):
+        prompt = _default_system_prompt(shell_path="/usr/bin/zsh")
+        assert "Shell: /usr/bin/zsh" in prompt
+
+    def test_custom_shell_path_suppresses_default_shell_lines(self):
+        prompt = _default_system_prompt(shell_path="/usr/bin/zsh")
+        assert "Git Bash" not in prompt
+        assert "Shell: /bin/sh" not in prompt
+
+    def test_empty_shell_path_uses_default(self):
+        prompt = _default_system_prompt(shell_path="")
+        # Should contain one of the platform defaults
+        assert "Shell:" in prompt
+
+
+# ---------------------------------------------------------------------------
+# build_system_prompt — project_rules_dir override
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPromptProjectRulesDir:
+    def test_custom_rules_dir(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        custom_dir = Path(".config/aar")
+        (tmp_path / custom_dir).mkdir(parents=True)
+        (tmp_path / custom_dir / "rules.md").write_text("custom dir rule", encoding="utf-8")
+
+        prompt = build_system_prompt(project_rules_dir=custom_dir)
+        assert "custom dir rule" in prompt
+
+    def test_custom_rules_dir_ignores_default(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        # Create rules in the default location — should be ignored
+        (tmp_path / ".agent").mkdir()
+        (tmp_path / ".agent" / "rules.md").write_text("default rule", encoding="utf-8")
+
+        prompt = build_system_prompt(project_rules_dir=Path(".custom"))
+        assert "default rule" not in prompt
+
+    def test_none_falls_back_to_dot_agent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        (tmp_path / ".agent").mkdir()
+        (tmp_path / ".agent" / "rules.md").write_text("default rule", encoding="utf-8")
+
+        prompt = build_system_prompt(project_rules_dir=None)
+        assert "default rule" in prompt
+
+
+# ---------------------------------------------------------------------------
+# AgentConfig — shell_path and project_rules_dir integration
+# ---------------------------------------------------------------------------
+
+
+class TestAgentConfigNewFields:
+    def test_shell_path_default_is_empty(self):
+        config = AgentConfig()
+        assert config.shell_path == ""
+
+    def test_project_rules_dir_default_is_dot_agent(self):
+        config = AgentConfig()
+        assert config.project_rules_dir == Path(".agent")
+
+    def test_shell_path_in_system_prompt(self):
+        config = AgentConfig(shell_path="/usr/bin/zsh")
+        assert "Shell: /usr/bin/zsh" in config.system_prompt
+
+    def test_custom_project_rules_dir_used_in_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
+        custom_dir = Path(".myagent")
+        (tmp_path / custom_dir).mkdir()
+        (tmp_path / custom_dir / "rules.md").write_text("my custom rule", encoding="utf-8")
+
+        config = AgentConfig(project_rules_dir=custom_dir)
+        assert "my custom rule" in config.system_prompt
+
+    def test_explicit_system_prompt_still_overrides(self):
+        config = AgentConfig(
+            shell_path="/bin/zsh",
+            system_prompt="explicit override",
+        )
+        assert config.system_prompt == "explicit override"
+
+    def test_session_dir_default_unchanged(self):
+        config = AgentConfig()
+        assert config.session_dir == Path(".agent/sessions")
+
+    def test_load_config_with_new_fields(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            '{"shell_path": "/bin/zsh", "project_rules_dir": ".myconfig"}',
+            encoding="utf-8",
+        )
+        from agent.core.config import load_config
+
+        config = load_config(cfg_file)
+        assert config.shell_path == "/bin/zsh"
+        assert config.project_rules_dir == Path(".myconfig")
+
+
 class TestAgentConfigSystemPrompt:
     def test_default_uses_build_system_prompt(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

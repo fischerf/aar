@@ -46,8 +46,17 @@ async def _create_subprocess(
     command: str,
     cwd: str,
     env: dict[str, str] | None,
+    shell_path: str = "",
 ) -> asyncio.subprocess.Process:
-    """Create a subprocess using bash on Windows, shell on Unix."""
+    """Create a subprocess using the configured shell, bash on Windows, or system shell on Unix."""
+    if shell_path:
+        return await asyncio.create_subprocess_exec(
+            shell_path, "-c", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
     if os.name == "nt":
         return await asyncio.create_subprocess_exec(
             "bash", "-c", command,
@@ -89,9 +98,11 @@ class LocalSandbox(Sandbox):
         self,
         default_cwd: str | None = None,
         restricted_env: bool = False,
+        shell_path: str = "",
     ) -> None:
         self.default_cwd = default_cwd or os.getcwd()
         self.restricted_env = restricted_env
+        self.shell_path = shell_path
 
     async def execute(
         self,
@@ -103,7 +114,7 @@ class LocalSandbox(Sandbox):
         work_dir = cwd or self.default_cwd
         proc_env = self._build_env(env)
 
-        proc = await _create_subprocess(command, work_dir, proc_env)
+        proc = await _create_subprocess(command, work_dir, proc_env, shell_path=self.shell_path)
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -144,10 +155,12 @@ class SubprocessSandbox(Sandbox):
         default_cwd: str | None = None,
         max_memory_mb: int = 512,
         allowed_env_vars: list[str] | None = None,
+        shell_path: str = "",
     ) -> None:
         self.default_cwd = default_cwd or os.getcwd()
         self.max_memory_mb = max_memory_mb
         self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
+        self.shell_path = shell_path
 
     async def execute(
         self,
@@ -169,7 +182,7 @@ class SubprocessSandbox(Sandbox):
         # On Unix, we can use ulimit to restrict resources
         wrapped = self._wrap_command(command)
 
-        proc = await _create_subprocess(wrapped, work_dir, proc_env)
+        proc = await _create_subprocess(wrapped, work_dir, proc_env, shell_path=self.shell_path)
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

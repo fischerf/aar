@@ -181,6 +181,8 @@ config = AgentConfig(
     timeout=300.0,                                 # seconds
     system_prompt="You are a helpful assistant.",
     session_dir=".agent/sessions",
+    shell_path="",                                 # custom shell binary (see below)
+    project_rules_dir=".agent",                    # project rules folder (see below)
     log_level="WARNING",                           # DEBUG | INFO | WARNING | ERROR | CRITICAL
 )
 ```
@@ -303,7 +305,7 @@ By default, the system prompt is assembled automatically from up to three layers
 |-------|--------|---------|
 | **Base** | built-in | Runtime facts — OS, working directory, shell |
 | **Global rules** | `~/.aar/rules.md` | Personal preferences that apply to all projects |
-| **Project rules** | `.agent/rules.md` | Project-specific instructions (checked into git) |
+| **Project rules** | `<project_rules_dir>/rules.md` | Project-specific instructions (checked into git) |
 
 Each layer is optional. If no rules files exist, the agent behaves exactly as before — only the base prompt is used. When present, the layers are concatenated in order, separated by `---`.
 
@@ -316,7 +318,7 @@ Each layer is optional. If no rules files exist, the agent behaves exactly as be
 - Use ruff for formatting.
 ```
 
-**Project rules** — create `.agent/rules.md` for instructions specific to the current repo:
+**Project rules** — create `<project_rules_dir>/rules.md` (default `.agent/rules.md`) for instructions specific to the current repo:
 
 ```markdown
 # Project rules
@@ -324,7 +326,57 @@ Each layer is optional. If no rules files exist, the agent behaves exactly as be
 - Follow the existing service pattern in app/services/.
 ```
 
+The project rules folder defaults to `.agent` and can be changed via `project_rules_dir` (see below).
+
 **Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
+
+### Configurable shell
+
+By default, Aar uses Git Bash (`bash -c`) on Windows and the system shell (`/bin/sh`) on Unix for tool execution. Override this with `shell_path` to use a specific shell binary — for example WSL bash, zsh, or fish:
+
+**Via config file** (`~/.aar/config.json` or `--config`):
+
+```json
+{
+  "shell_path": "/usr/bin/zsh"
+}
+```
+
+**Via `AgentConfig` in code:**
+
+```python
+config = AgentConfig(shell_path="/usr/bin/zsh")
+```
+
+On Windows, common values include:
+
+| Shell | Typical path |
+|-------|-------------|
+| Git Bash | `bash` (default — found via PATH) |
+| WSL bash | `wsl.exe` (note: uses `-c` flag) |
+| PowerShell | Not supported (requires `-Command`, not `-c`) |
+
+When `shell_path` is set, it is used everywhere: the built-in `bash` tool, sandbox execution, and the system prompt sent to the model.
+
+### Configurable project rules directory
+
+The project rules directory defaults to `.agent`. Change it with `project_rules_dir` so the agent reads `<project_rules_dir>/rules.md` instead of `.agent/rules.md`:
+
+**Via config file:**
+
+```json
+{
+  "project_rules_dir": ".config/aar"
+}
+```
+
+**Via `AgentConfig` in code:**
+
+```python
+config = AgentConfig(project_rules_dir=".config/aar")
+```
+
+This only affects where project rules are loaded from. The `session_dir` is configured independently.
 
 ## Image input (multimodal)
 

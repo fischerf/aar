@@ -57,7 +57,11 @@ class Agent:
         self.provider = provider or _create_provider(self.config.provider)
         self.registry = registry or ToolRegistry()
         self.executor = ToolExecutor(
-            self.registry, self.config.tools, self.config.safety, approval_callback
+            self.registry,
+            self.config.tools,
+            self.config.safety,
+            approval_callback,
+            shell_path=self.config.shell_path,
         )
         self._on_event: Callable[[Event], Any] | None = None
 
@@ -75,7 +79,7 @@ class Agent:
         if enabled & fs_tools:
             register_filesystem_tools(self.registry)
         if enabled & shell_tools:
-            register_shell_tools(self.registry)
+            register_shell_tools(self.registry, shell_path=self.config.shell_path)
 
         # Only prune builtins we just added that weren't explicitly enabled
         newly_added = set(self.registry.names()) - pre_existing

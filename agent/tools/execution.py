@@ -28,6 +28,7 @@ class ToolExecutor:
         tool_config: ToolConfig,
         safety_config: SafetyConfig | None = None,
         approval_callback: ApprovalCallback | None = None,
+        shell_path: str = "",
     ) -> None:
         self.registry = registry
         self.tool_config = tool_config
@@ -44,7 +45,7 @@ class ToolExecutor:
         )
         self.policy = SafetyPolicy(policy_cfg)
         self.permissions = PermissionManager(approval_callback)
-        self.sandbox = _create_sandbox(sc)
+        self.sandbox = _create_sandbox(sc, shell_path=shell_path)
 
     async def execute(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         """Execute a batch of tool calls and return results."""
@@ -134,7 +135,9 @@ class ToolExecutor:
             )
 
 
-def _create_sandbox(config: SafetyConfig) -> Sandbox:
+def _create_sandbox(config: SafetyConfig, shell_path: str = "") -> Sandbox:
     if config.sandbox == "subprocess":
-        return SubprocessSandbox(max_memory_mb=config.sandbox_max_memory_mb)
-    return LocalSandbox()
+        return SubprocessSandbox(
+            max_memory_mb=config.sandbox_max_memory_mb, shell_path=shell_path
+        )
+    return LocalSandbox(shell_path=shell_path)
