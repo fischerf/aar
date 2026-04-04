@@ -9,21 +9,17 @@ Run live tests:
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
-from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig
-from agent.core.events import AssistantMessage, StopReason
+from agent.core.config import AgentConfig, ProviderConfig
 from agent.core.session import Session
-from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
-from agent.providers.base import ProviderResponse
 from agent.transports.cli import app
 from tests.conftest import MockProvider
 
@@ -156,11 +152,12 @@ class TestPromptCommand:
 
     def test_raw_output_matches_config_system_prompt(self):
         """--raw output equals config.system_prompt exactly (modulo trailing newline)."""
-        from agent.core.config import build_system_prompt
+        from agent.transports.cli import _build_config
 
+        config = _build_config()
         result = runner.invoke(app, ["prompt", "--raw"])
         assert result.exit_code == 0
-        assert build_system_prompt() in result.output
+        assert config.system_prompt in result.output
 
     def test_custom_config_file(self, tmp_path):
         """--config loads a JSON file and its system_prompt is displayed."""

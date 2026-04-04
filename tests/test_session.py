@@ -10,7 +10,6 @@ import pytest
 from agent.core.events import (
     AssistantMessage,
     ContentBlock,
-    EventType,
     ImageURL,
     ImageURLBlock,
     StopReason,
@@ -18,7 +17,6 @@ from agent.core.events import (
     ToolCall,
     ToolResult,
     UserMessage,
-    deserialize_event,
 )
 from agent.core.session import Session
 from agent.core.state import AgentState

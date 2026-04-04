@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,16 +11,13 @@ import typer
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
 
 from agent.core.agent import Agent
-from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, load_config
+from agent.core.config import AgentConfig, load_config
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
     Event,
-    EventType,
     ProviderMeta,
     ReasoningBlock,
     ToolCall,
@@ -707,7 +703,7 @@ def serve(
 
     asgi_app = create_asgi_app(config)
     console.print(f"[bold green]Starting web server on {host}:{port}[/]")
-    console.print(f"[dim]POST /chat, POST /chat/stream, GET /sessions, GET /health[/]")
+    console.print("[dim]POST /chat, POST /chat/stream, GET /sessions, GET /health[/]")
     uvicorn.run(asgi_app, host=host, port=port, log_level="info")
 
 
@@ -780,7 +776,7 @@ def init(
         console.print("  3. Optionally add global rules to [bold]~/.aar/rules.md[/].")
         console.print("  4. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
-        console.print(f"\n[dim]Re-run with --force to overwrite skipped files.[/]")
+        console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
 
 if __name__ == "__main__":

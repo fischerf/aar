@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import uuid
-from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 

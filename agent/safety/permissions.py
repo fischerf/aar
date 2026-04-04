@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from agent.core.events import ToolCall
 from agent.safety.policy import PolicyDecision

@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import logging
 import time
-from typing import Any
 
 from agent.core.config import SafetyConfig, ToolConfig
 from agent.core.events import ToolCall, ToolResult
@@ -14,7 +13,6 @@ from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.permissions import ApprovalCallback, PermissionManager
 from agent.safety.sandbox import LocalSandbox, Sandbox, SubprocessSandbox
 from agent.tools.registry import ToolRegistry
-from agent.tools.schema import SideEffect
 
 logger = logging.getLogger(__name__)
 

@@ -16,15 +16,13 @@ Requires ANTHROPIC_API_KEY and/or OPENAI_API_KEY in the environment.
 
 from __future__ import annotations
 
-import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent.core.config import ProviderConfig
-from agent.core.events import ReasoningBlock, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderCapabilities, ProviderResponse
+from agent.core.events import StopReason
+from agent.providers.base import ProviderCapabilities
 
 
 # ---------------------------------------------------------------------------

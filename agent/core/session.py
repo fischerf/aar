@@ -8,11 +8,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agent.core.events import (
-    AnyEvent,
     AssistantMessage,
     ContentBlock,
     Event,
-    SessionEvent,
     TextBlock,
     ToolCall,
     ToolResult,

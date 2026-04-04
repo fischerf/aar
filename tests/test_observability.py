@@ -7,7 +7,7 @@ import pytest
 from agent.core.events import ErrorEvent, ProviderMeta, ToolCall, ToolResult
 from agent.core.session import Session
 from agent.core.state import AgentState
-from agent.extensions.observability import SessionMetrics, StepMetrics, session_metrics
+from agent.extensions.observability import session_metrics
 
 
 def _make_session(
