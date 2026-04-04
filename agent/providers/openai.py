@@ -38,6 +38,21 @@ class OpenAIProvider(Provider):
         model = self.config.model.lower()
         return model.startswith(("o1", "o3"))
 
+    @property
+    def supports_vision(self) -> bool:
+        # GPT-4o, GPT-4-vision, and similar models support image input.
+        # Override via extra={"supports_vision": True/False}.
+        if "supports_vision" in self.config.extra:
+            return bool(self.config.extra["supports_vision"])
+        model = self.config.model.lower()
+        return (
+            "vision" in model
+            or "4o" in model
+            or model.startswith("gpt-4")
+            or model.startswith("o1")
+            or model.startswith("o3")
+        )
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -110,7 +125,13 @@ class OpenAIProvider(Provider):
 
 
 def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:
-    """Convert Anthropic-style messages to OpenAI format."""
+    """Convert internal messages to OpenAI Chat Completions format.
+
+    Multimodal user messages (those whose ``content`` is a list of blocks)
+    are forwarded as a content array so that ``image_url`` blocks reach the
+    model intact.  A list that contains only a single text block is unwrapped
+    back to a plain string to keep the wire format clean for text-only turns.
+    """
     api_messages: list[dict[str, Any]] = []
 
     if system:
@@ -128,7 +149,7 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                 api_msg = _convert_assistant_blocks(content)
                 api_messages.append(api_msg)
             elif role == "user":
-                # Could be tool results or text
+                # Separate tool-result blocks from regular content blocks.
                 tool_results = [b for b in content if b.get("type") == "tool_result"]
                 if tool_results:
                     for tr in tool_results:
@@ -140,15 +161,33 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                             }
                         )
                 else:
-                    # Plain text blocks
-                    text = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
-                    api_messages.append({"role": "user", "content": text})
+                    # Build an OpenAI-compatible content array, preserving
+                    # image_url blocks alongside text blocks.
+                    oai_parts: list[dict[str, Any]] = []
+                    for b in content:
+                        btype = b.get("type")
+                        if btype == "text":
+                            oai_parts.append({"type": "text", "text": b["text"]})
+                        elif btype == "image_url":
+                            # Already in the correct OpenAI format; pass through.
+                            oai_parts.append(b)
+                        # Unknown block types are silently dropped.
+
+                    if not oai_parts:
+                        continue
+
+                    # Unwrap single-text-block lists to a plain string for
+                    # cleaner serialization when there are no images.
+                    if len(oai_parts) == 1 and oai_parts[0].get("type") == "text":
+                        api_messages.append({"role": "user", "content": oai_parts[0]["text"]})
+                    else:
+                        api_messages.append({"role": "user", "content": oai_parts})
 
     return api_messages
 
 
 def _convert_assistant_blocks(blocks: list[dict[str, Any]]) -> dict[str, Any]:
-    """Convert Anthropic-style assistant content blocks to OpenAI format."""
+    """Convert internal assistant content blocks to OpenAI format."""
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
 
@@ -175,7 +214,7 @@ def _convert_assistant_blocks(blocks: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert Anthropic tool schemas to OpenAI function-calling format."""
+    """Convert internal tool schemas to OpenAI function-calling format."""
     openai_tools = []
     for tool in tools:
         openai_tools.append(

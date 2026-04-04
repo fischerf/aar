@@ -247,6 +247,113 @@ Each layer is optional. If no rules files exist, the agent behaves exactly as be
 
 **Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
 
+## Image input (multimodal)
+
+Aar supports image input for vision-capable models on all four providers. Pass a list of `ContentBlock` objects instead of a plain string to `Agent.run()`, `Agent.chat()`, or `Session.add_user_message()`.
+
+```python
+from agent.core.events import TextBlock, ImageURLBlock, ImageURL
+
+# HTTP / HTTPS URL
+response = await agent.chat([
+    TextBlock(text="What is shown in this diagram?"),
+    ImageURLBlock(image_url=ImageURL(url="https://example.com/diagram.png")),
+])
+
+# Local file — base-64 encode it first
+import base64
+raw = open("screenshot.png", "rb").read()
+data_uri = "data:image/png;base64," + base64.b64encode(raw).decode()
+
+response = await agent.chat([
+    TextBlock(text="Describe this screenshot."),
+    ImageURLBlock(image_url=ImageURL(url=data_uri)),
+])
+
+# OpenAI vision detail hint ("auto" | "low" | "high")
+ImageURLBlock(image_url=ImageURL(url="https://example.com/photo.jpg", detail="high"))
+```
+
+Text-only callers are completely unchanged — passing a plain string still works.
+
+### Provider support
+
+| Provider | Vision | Notes |
+|---|---|---|
+| Anthropic | ✓ always | claude-3+ models; HTTP URLs and base-64 data URIs |
+| OpenAI | ✓ auto-detected | gpt-4o, gpt-4-vision, o1 and newer; all image types |
+| Ollama | ✓ default on | Model must be vision-capable (e.g. `qwen2.5vl`, `llava`, `minicpm-v`) |
+| Generic | ✓ auto-detected | Any OpenAI-compatible endpoint with vision support |
+
+Vision support is auto-detected from the model name for OpenAI and Generic providers. For Ollama, it defaults to `True` and can be overridden:
+
+```python
+ProviderConfig(
+    name="ollama",
+    model="qwen2.5vl:7b",
+    extra={"supports_vision": True},   # default True; set False to opt out
+)
+```
+
+Check capability at runtime:
+
+```python
+print(agent.provider.capabilities().vision)  # True / False
+```
+
+### Format conversion
+
+The same `ContentBlock` API works identically across all providers. Aar converts internally:
+
+- **OpenAI / Generic** — content blocks forwarded as-is (already the OpenAI wire format)
+- **Anthropic** — `image_url` blocks converted to `{"type": "image", "source": {...}}`; `data:` URIs become `base64` sources, HTTP URLs become `url` sources
+- **Ollama** — sent as an OpenAI-compatible content array (Ollama 0.5+); `data:` URI payloads are also placed in the legacy `images` field for Ollama < 0.5
+
+### Ollama vision models
+
+Pull any vision-capable model and point the provider at it:
+
+```bash
+ollama pull qwen2.5vl:7b
+aar chat --provider ollama --model qwen2.5vl:7b
+```
+
+Popular choices: `qwen2.5vl:7b`, `llava:13b`, `minicpm-v`, `moondream`. Once a `qwen3.5:9b` Ollama model is published it will work with the same config — Qwen3.5 is a native vision-language model.
+
+### Multi-turn with images
+
+Images in earlier turns are preserved in `session.to_messages()` — subsequent text-only turns can refer back to them:
+
+```python
+session = None
+
+session = await agent.run(
+    [TextBlock(text="Here is our UI mockup."),
+     ImageURLBlock(image_url=ImageURL(url="https://example.com/mockup.png"))],
+    session=session,
+)
+session = await agent.run("Now write the HTML for it.", session=session)
+```
+
+### Accessing content blocks directly
+
+```python
+from agent.core.events import TextBlock, ImageURLBlock, ImageURL, ContentBlock
+
+# Build a typed block list
+parts: list[ContentBlock] = [
+    TextBlock(text="Analyse this chart."),
+    ImageURLBlock(image_url=ImageURL(url="https://example.com/chart.png", detail="high")),
+]
+
+# Session helper
+from agent.core.session import Session
+s = Session()
+msg = s.add_user_message(parts)
+print(msg.is_multimodal)   # True
+print(msg.content)         # "Analyse this chart."  (text summary for logging)
+```
+
 ## Providers
 
 ### Anthropic
@@ -290,6 +397,12 @@ Enable reasoning extraction for models like `deepseek-r1`:
 
 ```python
 ProviderConfig(name="ollama", model="deepseek-r1", extra={"supports_reasoning": True})
+```
+
+Enable vision for models with a vision encoder (see [Image input](#image-input-multimodal)):
+
+```python
+ProviderConfig(name="ollama", model="qwen2.5vl:7b", extra={"supports_vision": True})
 ```
 
 ### Generic (OpenAI-compatible)
@@ -852,6 +965,19 @@ Tests for providers whose API key is not set will fail with an authentication er
 - `typer >= 0.12`
 - `rich >= 13.0`
 - Provider SDK as needed: `anthropic`, `openai`
+
+### Windows — `bash` tool
+
+The `bash` built-in tool requires a Unix-compatible shell on Windows. **Either** of the following is sufficient:
+
+| Option | Install | Notes |
+|--------|---------|-------|
+| **Git for Windows** (Git Bash) | [git-scm.com](https://git-scm.com/download/win) | Lightweight; adds `bash` to `PATH`; drives mounted as `/c/`, `/d/`, … |
+| **WSL** (Windows Subsystem for Linux) | `wsl --install` in an admin terminal | Full Linux environment; drives mounted as `/mnt/c/`, `/mnt/d/`, … |
+
+> **If both are installed**, WSL's `bash.exe` (`C:\Windows\System32\bash.exe`) is found first by Windows `CreateProcess` before `PATH` is consulted, so WSL's bash will run. Keep this in mind when referencing file paths inside bash commands — use the appropriate mount prefix for whichever shell is active.
+
+Neither is required if you do not enable the `bash` built-in tool (`ToolConfig(enabled_builtins=[...])`).
 
 ---
 

@@ -11,7 +11,6 @@ from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
 from agent.providers.base import Provider, ProviderResponse
 
-
 _DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 
@@ -41,6 +40,11 @@ class OllamaProvider(Provider):
         # Not all Ollama models support tools; opt-in via config
         return self.config.extra.get("supports_tools", True)
 
+    @property
+    def supports_vision(self) -> bool:
+        # Most current Ollama vision models support image input; opt-out via config.
+        return self.config.extra.get("supports_vision", True)
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -68,9 +72,10 @@ class OllamaProvider(Provider):
         # Keep-alive
         payload["keep_alive"] = self._keep_alive
 
-        # Extra options
+        # Extra options (skip known non-option keys)
+        _SKIP = {"keep_alive", "supports_reasoning", "supports_tools", "supports_vision"}
         for k, v in self.config.extra.items():
-            if k not in ("keep_alive", "supports_reasoning", "supports_tools"):
+            if k not in _SKIP:
                 payload["options"][k] = v
 
         resp = await self._client.post("/api/chat", json=payload)
@@ -128,7 +133,20 @@ class OllamaProvider(Provider):
 
 
 def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:
-    """Convert internal messages to Ollama format."""
+    """Convert internal messages to Ollama format.
+
+    Multimodal user messages (carrying ``image_url`` content blocks) are
+    handled in two complementary ways:
+
+    * A content *array* is produced (Ollama 0.5+ / OpenAI-compatible format).
+    * Base-64 images (``data:`` URIs) are **also** placed in the top-level
+      ``images`` list for backwards compatibility with Ollama < 0.5 that
+      speaks the native ``/api/chat`` wire format.
+
+    HTTP/HTTPS image URLs are passed only via the content array; fetching
+    remote URLs inside the adapter would introduce unwanted side-effects and
+    latency, and Ollama 0.5+ handles them natively.
+    """
     api_messages: list[dict[str, Any]] = []
 
     if system:
@@ -140,21 +158,24 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
 
         if isinstance(content, str):
             api_messages.append({"role": role, "content": content})
+
         elif isinstance(content, list):
             if role == "assistant":
                 # Extract text and tool calls
-                text_parts = []
-                tool_calls = []
+                text_parts: list[str] = []
+                tool_calls: list[dict[str, Any]] = []
                 for block in content:
                     if block.get("type") == "text":
                         text_parts.append(block["text"])
                     elif block.get("type") == "tool_use":
-                        tool_calls.append({
-                            "function": {
-                                "name": block["name"],
-                                "arguments": block.get("input", {}),
+                        tool_calls.append(
+                            {
+                                "function": {
+                                    "name": block["name"],
+                                    "arguments": block.get("input", {}),
+                                }
                             }
-                        })
+                        )
                 api_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": " ".join(text_parts) if text_parts else "",
@@ -162,19 +183,54 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                 if tool_calls:
                     api_msg["tool_calls"] = tool_calls
                 api_messages.append(api_msg)
+
             elif role == "user":
                 tool_results = [b for b in content if b.get("type") == "tool_result"]
                 if tool_results:
+                    # Tool results go as individual "tool" role messages
                     for tr in tool_results:
-                        api_messages.append({
-                            "role": "tool",
-                            "content": tr.get("content", ""),
-                        })
+                        api_messages.append(
+                            {
+                                "role": "tool",
+                                "content": tr.get("content", ""),
+                            }
+                        )
                 else:
-                    text = " ".join(
-                        b.get("text", "") for b in content if b.get("type") == "text"
-                    )
-                    api_messages.append({"role": "user", "content": text})
+                    image_blocks = [b for b in content if b.get("type") == "image_url"]
+                    text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+
+                    if image_blocks:
+                        # Build an OpenAI-compatible content array (Ollama 0.5+)
+                        oai_content: list[dict[str, Any]] = []
+                        if text_parts:
+                            oai_content.append(
+                                {"type": "text", "text": " ".join(t for t in text_parts if t)}
+                            )
+                        for img in image_blocks:
+                            oai_content.append(img)  # pass through as-is
+
+                        api_msg = {"role": "user", "content": oai_content}
+
+                        # Legacy Ollama (< 0.5): also populate top-level ``images``
+                        # list with raw base-64 payloads extracted from data: URIs.
+                        legacy_images: list[str] = []
+                        for img in image_blocks:
+                            url = img.get("image_url", {}).get("url", "")
+                            if url.startswith("data:"):
+                                # data:<mime>;base64,<payload>
+                                try:
+                                    b64 = url.split(",", 1)[1]
+                                    legacy_images.append(b64)
+                                except IndexError:
+                                    pass  # malformed data URI — skip
+                        if legacy_images:
+                            api_msg["images"] = legacy_images
+
+                        api_messages.append(api_msg)
+                    else:
+                        # Text-only user message
+                        text = " ".join(t for t in text_parts if t)
+                        api_messages.append({"role": "user", "content": text})
 
     return api_messages
 
@@ -183,14 +239,16 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert internal tool schemas to Ollama format."""
     ollama_tools = []
     for tool in tools:
-        ollama_tools.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
-            },
-        })
+        ollama_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+        )
     return ollama_tools
 
 
@@ -217,11 +275,11 @@ def _extract_thinking(content: str) -> tuple[str, list]:
         end = clean.find("</think>")
         if end == -1:
             # Unclosed think tag — treat rest as reasoning
-            reasoning.append(ReasoningBlock(content=clean[start + 7:].strip()))
+            reasoning.append(ReasoningBlock(content=clean[start + 7 :].strip()))
             clean = clean[:start].strip()
             break
-        thinking_text = clean[start + 7:end].strip()
+        thinking_text = clean[start + 7 : end].strip()
         if thinking_text:
             reasoning.append(ReasoningBlock(content=thinking_text))
-        clean = (clean[:start] + clean[end + 8:]).strip()
+        clean = (clean[:start] + clean[end + 8 :]).strip()
     return clean, reasoning

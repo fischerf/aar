@@ -9,8 +9,12 @@ import pytest
 
 from agent.core.events import (
     AssistantMessage,
+    ContentBlock,
     EventType,
+    ImageURL,
+    ImageURLBlock,
     StopReason,
+    TextBlock,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -19,7 +23,6 @@ from agent.core.events import (
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
-
 
 # ---------------------------------------------------------------------------
 # Session basics
@@ -144,6 +147,128 @@ class TestToMessages:
     def test_empty_session_returns_empty(self):
         s = Session()
         assert s.to_messages() == []
+
+
+# ---------------------------------------------------------------------------
+# Multimodal messages (text + images)
+# ---------------------------------------------------------------------------
+
+
+class TestMultimodalMessages:
+    def test_add_user_message_plain_string_unchanged(self):
+        s = Session()
+        msg = s.add_user_message("hello")
+        assert msg.content == "hello"
+        assert not msg.is_multimodal
+        assert msg.parts == []
+
+    def test_add_user_message_content_blocks(self):
+        parts: list[ContentBlock] = [
+            TextBlock(text="what is in this image?"),
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png")),
+        ]
+        s = Session()
+        msg = s.add_user_message(parts)
+        assert msg.is_multimodal
+        assert msg.content == "what is in this image?"  # text summary
+        assert len(msg.parts) == 2
+
+    def test_add_user_message_image_only(self):
+        parts: list[ContentBlock] = [
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png")),
+        ]
+        s = Session()
+        msg = s.add_user_message(parts)
+        assert msg.is_multimodal
+        assert msg.content == ""  # no text blocks → empty summary
+
+    def test_add_user_message_multiple_text_blocks_summary(self):
+        parts: list[ContentBlock] = [
+            TextBlock(text="first"),
+            TextBlock(text="second"),
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png")),
+        ]
+        s = Session()
+        msg = s.add_user_message(parts)
+        assert msg.content == "first second"
+
+    def test_to_messages_multimodal_emits_content_list(self):
+        parts: list[ContentBlock] = [
+            TextBlock(text="describe this"),
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png")),
+        ]
+        s = Session()
+        s.add_user_message(parts)
+        msgs = s.to_messages()
+
+        assert len(msgs) == 1
+        msg = msgs[0]
+        assert msg["role"] == "user"
+        assert isinstance(msg["content"], list)
+        assert msg["content"][0] == {"type": "text", "text": "describe this"}
+        assert msg["content"][1] == {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/img.png"},
+        }
+
+    def test_to_messages_text_only_emits_string(self):
+        s = Session()
+        s.add_user_message("plain text")
+        msgs = s.to_messages()
+        assert msgs[0]["content"] == "plain text"
+
+    def test_to_messages_multimodal_then_text_turn(self):
+        """Multimodal first turn, plain text second turn."""
+        parts: list[ContentBlock] = [
+            TextBlock(text="what is this?"),
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png")),
+        ]
+        s = Session()
+        s.add_user_message(parts)
+        s.add_assistant_message("It is a cat.")
+        s.add_user_message("Are you sure?")
+
+        msgs = s.to_messages()
+        assert len(msgs) == 3
+        assert isinstance(msgs[0]["content"], list)  # multimodal block
+        assert msgs[1]["content"] == "It is a cat."
+        assert msgs[2]["content"] == "Are you sure?"  # plain string
+
+    def test_to_messages_data_uri_image(self):
+        data_uri = "data:image/jpeg;base64,/9j/4AAQ"
+        parts: list[ContentBlock] = [
+            TextBlock(text="check this"),
+            ImageURLBlock(image_url=ImageURL(url=data_uri)),
+        ]
+        s = Session()
+        s.add_user_message(parts)
+        msgs = s.to_messages()
+
+        img_block = msgs[0]["content"][1]
+        assert img_block["type"] == "image_url"
+        assert img_block["image_url"]["url"] == data_uri
+
+    def test_to_messages_detail_hint_included(self):
+        parts: list[ContentBlock] = [
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png", detail="high")),
+        ]
+        s = Session()
+        s.add_user_message(parts)
+        msgs = s.to_messages()
+
+        img_block = msgs[0]["content"][0]
+        assert img_block["image_url"]["detail"] == "high"
+
+    def test_to_messages_detail_none_excluded(self):
+        parts: list[ContentBlock] = [
+            ImageURLBlock(image_url=ImageURL(url="https://example.com/img.png")),
+        ]
+        s = Session()
+        s.add_user_message(parts)
+        msgs = s.to_messages()
+
+        img_block = msgs[0]["content"][0]
+        assert "detail" not in img_block["image_url"]
 
 
 # ---------------------------------------------------------------------------

@@ -5,9 +5,43 @@ from __future__ import annotations
 import time
 import uuid
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# Content block models (for multimodal / image input)
+# ---------------------------------------------------------------------------
+
+
+class TextBlock(BaseModel):
+    """A plain-text content block in a multimodal user message."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ImageURL(BaseModel):
+    """Points to an image by HTTP/HTTPS URL or a ``data:`` URI."""
+
+    url: str
+    detail: str | None = None  # OpenAI vision detail hint ("auto" | "low" | "high")
+
+
+class ImageURLBlock(BaseModel):
+    """An image content block, identified by URL or base-64 data URI."""
+
+    type: Literal["image_url"] = "image_url"
+    image_url: ImageURL
+
+
+# Pydantic v2 discriminated union dispatched on the ``type`` field.
+ContentBlock = Annotated[TextBlock | ImageURLBlock, Field(discriminator="type")]
+
+
+# ---------------------------------------------------------------------------
+# Core event types
+# ---------------------------------------------------------------------------
 
 
 class EventType(str, Enum):
@@ -45,6 +79,13 @@ class Event(BaseModel):
 class UserMessage(Event):
     type: EventType = EventType.USER_MESSAGE
     content: str = ""
+    # Non-empty when the message carries image or mixed content.
+    parts: list[ContentBlock] = Field(default_factory=list)
+
+    @property
+    def is_multimodal(self) -> bool:
+        """Return True when this message contains image (or other non-text) blocks."""
+        return bool(self.parts)
 
 
 class AssistantMessage(Event):

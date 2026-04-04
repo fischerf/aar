@@ -10,8 +10,10 @@ from pydantic import BaseModel, Field
 from agent.core.events import (
     AnyEvent,
     AssistantMessage,
+    ContentBlock,
     Event,
     SessionEvent,
+    TextBlock,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -37,8 +39,22 @@ class Session(BaseModel):
         else:
             self.events.append(event)
 
-    def add_user_message(self, content: str) -> UserMessage:
-        msg = UserMessage(content=content)
+    def add_user_message(self, content: str | list[ContentBlock]) -> UserMessage:
+        """Add a user message to the session.
+
+        *content* may be a plain string (text-only) or a list of
+        :class:`~agent.core.events.ContentBlock` objects (text + images).
+        When a list is provided, a plain-text summary derived from the
+        :class:`~agent.core.events.TextBlock` parts is stored in
+        ``UserMessage.content`` for logging and display, while the full
+        block list is stored in ``UserMessage.parts`` for the provider
+        adapters.
+        """
+        if isinstance(content, str):
+            msg = UserMessage(content=content)
+        else:
+            text_summary = " ".join(b.text for b in content if isinstance(b, TextBlock))
+            msg = UserMessage(content=text_summary, parts=content)
         self.append(msg)
         return msg
 
@@ -66,6 +82,9 @@ class Session(BaseModel):
 
         Returns a list of message dicts with role/content structure,
         grouping tool calls and results into the appropriate messages.
+        Multimodal user messages emit a content *list* instead of a plain
+        string so that every provider adapter receives properly structured
+        image blocks.
         """
         messages: list[dict[str, Any]] = []
         pending_tool_calls: list[ToolCall] = []
@@ -77,7 +96,15 @@ class Session(BaseModel):
                 if pending_tool_results:
                     messages.append(_tool_results_message(pending_tool_results))
                     pending_tool_results = []
-                messages.append({"role": "user", "content": event.content})
+                if event.is_multimodal:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [p.model_dump(exclude_none=True) for p in event.parts],
+                        }
+                    )
+                else:
+                    messages.append({"role": "user", "content": event.content})
 
             elif isinstance(event, AssistantMessage):
                 # Flush pending tool results before the next assistant message

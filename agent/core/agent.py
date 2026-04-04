@@ -6,7 +6,7 @@ import logging
 from typing import Any, Callable
 
 from agent.core.config import AgentConfig, ProviderConfig
-from agent.core.events import Event, SessionEvent
+from agent.core.events import ContentBlock, Event, SessionEvent
 from agent.core.loop import run_loop
 from agent.core.session import Session
 from agent.core.state import AgentState
@@ -87,11 +87,17 @@ class Agent:
         """Set a callback that fires for every event during a run."""
         self._on_event = callback
 
-    async def run(self, prompt: str, session: Session | None = None) -> Session:
+    async def run(
+        self,
+        prompt: str | list[ContentBlock],
+        session: Session | None = None,
+    ) -> Session:
         """Run the agent with a user prompt.
 
         Args:
-            prompt: The user's message.
+            prompt: The user's message — either a plain string or a list of
+                :class:`~agent.core.events.ContentBlock` objects for multimodal
+                (text + image) input.
             session: Optional existing session to continue.
 
         Returns:
@@ -114,8 +120,22 @@ class Agent:
 
         return session
 
-    async def chat(self, prompt: str, session: Session | None = None) -> str:
-        """Convenience method: run and return just the final assistant text."""
+    async def chat(
+        self,
+        prompt: str | list[ContentBlock],
+        session: Session | None = None,
+    ) -> str:
+        """Convenience method: run and return just the final assistant text.
+
+        Args:
+            prompt: The user's message — either a plain string or a list of
+                :class:`~agent.core.events.ContentBlock` objects for multimodal
+                (text + image) input.
+            session: Optional existing session to continue.
+
+        Returns:
+            The last assistant message text, or an empty string.
+        """
         session = await self.run(prompt, session)
         # Find the last assistant message
         from agent.core.events import AssistantMessage
