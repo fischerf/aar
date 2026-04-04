@@ -123,7 +123,7 @@ class ToolExecutor:
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except Exception as e:
-            logger.exception("Tool execution error: %s", tc.tool_name)
+            logger.debug("Tool execution error: %s", tc.tool_name, exc_info=True)
             return ToolResult(
                 tool_call_id=tc.tool_call_id,
                 tool_name=tc.tool_name,
