@@ -12,16 +12,34 @@ import json
 import logging
 import uuid
 from http import HTTPStatus
+from pathlib import Path
 from typing import Any
 
 from agent.core.agent import Agent
-from agent.core.config import AgentConfig
-from agent.core.events import Event
+from agent.core.config import AgentConfig, load_config
+from agent.core.events import Event, ToolCall
 from agent.core.session import Session
 from agent.memory.session_store import SessionStore
+from agent.safety.permissions import ApprovalCallback, ApprovalResult
+from agent.tools.registry import ToolRegistry
+from agent.tools.schema import ToolSpec
 from agent.transports.stream import EventStream
 
 logger = logging.getLogger(__name__)
+
+_USER_CONFIG = Path.home() / ".aar" / "config.json"
+
+
+async def _auto_approve_callback(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
+    """Default web approval: auto-approve all tool calls.
+
+    In the web transport there is no interactive terminal, so the act of
+    sending a request to the API is treated as implicit approval.  Inject a
+    custom *approval_callback* into :class:`WebTransport` when you need
+    stricter control (e.g. an async webhook).
+    """
+    logger.info("Web transport: auto-approving %s", tc.tool_name)
+    return ApprovalResult.APPROVED
 
 
 class WebTransport:
@@ -31,8 +49,22 @@ class WebTransport:
     that any HTTP framework (FastAPI, Starlette, aiohttp, etc.) can serve.
     """
 
-    def __init__(self, config: AgentConfig | None = None) -> None:
-        self.config = config or AgentConfig()
+    def __init__(
+        self,
+        config: AgentConfig | None = None,
+        approval_callback: ApprovalCallback | None = None,
+        registry: ToolRegistry | None = None,
+    ) -> None:
+        if config is None:
+            if _USER_CONFIG.is_file():
+                config = load_config(_USER_CONFIG)
+            else:
+                config = AgentConfig()
+        self.config = config
+        self.approval_callback: ApprovalCallback = (
+            approval_callback if approval_callback is not None else _auto_approve_callback
+        )
+        self.registry = registry  # shared across requests; None = each Agent builds its own
         self.store = SessionStore(self.config.session_dir)
         self._active_streams: dict[str, EventStream] = {}
         self._sessions: dict[str, Session] = {}
@@ -43,7 +75,11 @@ class WebTransport:
             config = self.config.model_copy(update={"safety": merged_safety})
         else:
             config = self.config
-        return Agent(config=config)
+        return Agent(
+            config=config,
+            approval_callback=self.approval_callback,
+            registry=self.registry,
+        )
 
     async def handle_chat(
         self, prompt: str, session_id: str | None = None, safety_override: dict | None = None
@@ -57,7 +93,6 @@ class WebTransport:
         agent = self._make_agent(safety_override)
 
         # Set up event stream for this request
-        stream = EventStream()
         collected_events: list[dict[str, Any]] = []
 
         def collect(event: Event) -> None:
@@ -82,18 +117,42 @@ class WebTransport:
         self.store.save(session)
         self._sessions[session.session_id] = session
 
-        # Find the final assistant text
-        from agent.core.events import AssistantMessage
+        # Emit a terminal event so the events list has a clear "done" marker.
+        from agent.core.events import AssistantMessage, SessionEvent
+        from agent.core.events import ToolResult as ToolResultEvent
 
+        ended_event = SessionEvent(action="ended", data={"state": session.state.value})
+        collect(ended_event)
+
+        # Collect the final assistant text and all tool results in one forward pass.
+        # Iterating forward and overwriting means the LAST non-empty assistant text wins.
         final_text = ""
-        for event in reversed(session.events):
+        tool_results: list[dict[str, Any]] = []
+        for event in session.events:
             if isinstance(event, AssistantMessage) and event.content:
                 final_text = event.content
-                break
+            elif isinstance(event, ToolResultEvent):
+                tool_results.append(
+                    {
+                        "tool_name": event.tool_name,
+                        "output": event.output,
+                        "is_error": event.is_error,
+                        "duration_ms": event.duration_ms,
+                    }
+                )
+
+        # When the model completes via tools without producing any narrating text
+        # (common for tool-heavy tasks), fall back to the last successful tool
+        # output so the caller always gets something meaningful in `response`.
+        if not final_text and tool_results:
+            last_ok = next((r for r in reversed(tool_results) if not r["is_error"]), None)
+            if last_ok:
+                final_text = last_ok["output"]
 
         return {
             "session_id": session.session_id,
             "response": final_text,
+            "tool_results": tool_results,
             "events": collected_events,
             "state": session.state.value,
             "step_count": session.step_count,
@@ -130,8 +189,22 @@ class WebTransport:
                         pass
                 session = await agent.run(prompt, session)
                 self.store.save(session)
+                # Emit a terminal event BEFORE closing the queue so SSE clients
+                # receive an explicit "done" signal rather than relying on
+                # stream-close detection.
+                from agent.core.events import SessionEvent
+
+                on_event(
+                    SessionEvent(
+                        action="ended",
+                        data={
+                            "state": session.state.value,
+                            "step_count": session.step_count,
+                        },
+                    )
+                )
             finally:
-                queue.put_nowait(None)  # Signal end
+                queue.put_nowait(None)  # Signal end of async iterator
                 self._active_streams.pop(eff_session_id, None)
 
         # Start the agent in the background
@@ -194,7 +267,11 @@ def format_sse(event: Event) -> str:
 # --- Optional: minimal ASGI app for quick deployment ---
 
 
-def create_asgi_app(config: AgentConfig | None = None) -> Any:
+def create_asgi_app(
+    config: AgentConfig | None = None,
+    approval_callback: ApprovalCallback | None = None,
+    registry: ToolRegistry | None = None,
+) -> Any:
     """Create a minimal ASGI application wrapping the web transport.
 
     Requires no external framework — uses raw ASGI protocol.
@@ -204,8 +281,19 @@ def create_asgi_app(config: AgentConfig | None = None) -> Any:
         GET  /sessions      — list session IDs
         GET  /sessions/{id} — session details
         GET  /health        — health check
+
+    Args:
+        config: Agent configuration. If None, auto-loads ``~/.aar/config.json``
+            or falls back to built-in defaults.
+        approval_callback: Called when a tool needs human approval. Defaults to
+            ``_auto_approve_callback`` (auto-approve all — the HTTP request is
+            treated as implicit approval). Pass a custom callback for webhook-
+            style approval or to deny all writes.
+        registry: Optional shared :class:`ToolRegistry`. Use this to expose MCP
+            tools over the web API (register them once, reuse across requests).
+            If None, each agent request builds a fresh registry from built-ins.
     """
-    transport = WebTransport(config)
+    transport = WebTransport(config, approval_callback, registry)
 
     async def app(scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
