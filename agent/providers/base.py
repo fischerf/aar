@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
-from agent.core.events import AssistantMessage, ProviderMeta, ReasoningBlock, ToolCall
+from agent.core.events import ProviderMeta, ReasoningBlock, ToolCall
 
 
 @dataclass

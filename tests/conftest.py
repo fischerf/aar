@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -27,15 +27,11 @@ def pytest_collection_modifyitems(config, items):
 
 from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
 from agent.core.events import (
-    AssistantMessage,
     ProviderMeta,
-    ReasoningBlock,
-    StopReason,
     ToolCall,
-    ToolResult,
 )
 from agent.core.session import Session
-from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.base import Provider, ProviderResponse
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec

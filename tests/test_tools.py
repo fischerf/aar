@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from agent.core.config import SafetyConfig, ToolConfig
-from agent.core.events import ToolCall, ToolResult
+from agent.core.events import ToolCall
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry, _infer_schema
 from agent.tools.schema import SideEffect, ToolSpec

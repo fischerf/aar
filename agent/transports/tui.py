@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
-from rich.console import Console, Group
-from rich.layout import Layout
-from rich.live import Live
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -20,7 +16,6 @@ from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
     Event,
-    EventType,
     ProviderMeta,
     ReasoningBlock,
     ToolCall,
