@@ -84,6 +84,11 @@ class Provider(ABC):
         """Return True when this provider/model accepts image content blocks."""
         return False
 
+    @property
+    def supports_audio(self) -> bool:
+        """Return True when this provider/model accepts audio content blocks."""
+        return False
+
     def capabilities(self) -> ProviderCapabilities:
         """Return a snapshot of this provider's capabilities."""
         return ProviderCapabilities(

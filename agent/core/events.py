@@ -35,8 +35,45 @@ class ImageURLBlock(BaseModel):
     image_url: ImageURL
 
 
+class AudioData(BaseModel):
+    """Points to audio by URL or base-64 data URI."""
+
+    url: str  # HTTP/HTTPS URL or data:<mime>;base64,<payload>
+    format: str = ""  # e.g. "wav", "mp3", "ogg" — empty = auto-detect
+
+
+class AudioBlock(BaseModel):
+    """An audio content block for speech/sound input (max ~30 s for Gemma 4)."""
+
+    type: Literal["audio"] = "audio"
+    audio: AudioData
+
+
+class VideoData(BaseModel):
+    """Points to video by URL or base-64 data URI.
+
+    Video support is **prepared but not yet implemented** at the provider
+    level.  The block type exists so callers can start building multimodal
+    pipelines; actual provider adapters will raise ``NotImplementedError``
+    until a backend supports it end-to-end.
+    """
+
+    url: str
+    format: str = ""  # e.g. "mp4", "webm"
+
+
+class VideoBlock(BaseModel):
+    """A video content block (prepared, not yet implemented in providers)."""
+
+    type: Literal["video"] = "video"
+    video: VideoData
+
+
 # Pydantic v2 discriminated union dispatched on the ``type`` field.
-ContentBlock = Annotated[TextBlock | ImageURLBlock, Field(discriminator="type")]
+ContentBlock = Annotated[
+    TextBlock | ImageURLBlock | AudioBlock | VideoBlock,
+    Field(discriminator="type"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +121,7 @@ class UserMessage(Event):
 
     @property
     def is_multimodal(self) -> bool:
-        """Return True when this message contains image (or other non-text) blocks."""
+        """Return True when this message contains image, audio, video, or other non-text blocks."""
         return bool(self.parts)
 
 

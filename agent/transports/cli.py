@@ -16,13 +16,16 @@ from agent.core.agent import Agent
 from agent.core.config import AgentConfig, load_config
 from agent.core.events import (
     AssistantMessage,
+    AudioBlock,
     ErrorEvent,
     Event,
+    ImageURLBlock,
     ProviderMeta,
     ReasoningBlock,
     ToolCall,
     ToolResult,
 )
+from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
@@ -291,7 +294,13 @@ async def _async_chat_loop(
             console.print(f"[red]Session {session_id} not found[/]")
             raise typer.Exit(1)
 
-    console.print(Panel("Agent ready. Type your message. Ctrl+C to exit.", border_style="blue"))
+    console.print(
+        Panel(
+            "Agent ready. Type your message. Ctrl+C to exit.\n"
+            "[dim]Attach files with @path (e.g. @photo.jpg @audio.wav)[/]",
+            border_style="blue",
+        )
+    )
 
     try:
         while True:
@@ -305,7 +314,22 @@ async def _async_chat_loop(
             if user_input.strip().lower() in {"/quit", "/exit", "/q"}:
                 break
 
-            session = await agent.run(user_input, session)
+            content = parse_multimodal_input(user_input)
+            if isinstance(content, list):
+                has_audio = False
+                for block in content:
+                    if isinstance(block, ImageURLBlock):
+                        console.print("[dim]  Attached: image[/]")
+                    elif isinstance(block, AudioBlock):
+                        console.print("[dim]  Attached: audio[/]")
+                        has_audio = True
+                if has_audio and not agent.provider.supports_audio:
+                    console.print(
+                        "[yellow]Warning:[/] audio input is not supported by "
+                        f"{agent.provider.name} (as of Ollama v0.20). "
+                        "Audio will be dropped."
+                    )
+            session = await agent.run(content, session)
             # Reset session state after a recoverable error (e.g. provider timeout)
             # so the user can retry without losing conversation history.
             if session.state == AgentState.ERROR:
@@ -491,7 +515,22 @@ def run(
             except FileNotFoundError:
                 console.print(f"[red]Session {session_id} not found[/]")
                 raise typer.Exit(1)
-        session = await agent.run(task, session)
+        content = parse_multimodal_input(task)
+        if isinstance(content, list):
+            has_audio = False
+            for block in content:
+                if isinstance(block, ImageURLBlock):
+                    console.print("[dim]  Attached: image[/]")
+                elif isinstance(block, AudioBlock):
+                    console.print("[dim]  Attached: audio[/]")
+                    has_audio = True
+            if has_audio and not agent.provider.supports_audio:
+                console.print(
+                    "[yellow]Warning:[/] audio input is not supported by "
+                    f"{agent.provider.name} (as of Ollama v0.20). "
+                    "Audio will be dropped."
+                )
+        session = await agent.run(content, session)
         store.save(session)
         console.print(f"\n[dim]Session: {session.session_id}[/]")
 

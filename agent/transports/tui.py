@@ -14,13 +14,16 @@ from agent.core.agent import Agent
 from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
+    AudioBlock,
     ErrorEvent,
     Event,
+    ImageURLBlock,
     ProviderMeta,
     ReasoningBlock,
     ToolCall,
     ToolResult,
 )
+from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
@@ -136,6 +139,7 @@ class TUIRenderer:
             Panel(
                 "[bold]Aar Agent TUI[/]\n\n"
                 "Type your message and press Enter.\n"
+                "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
                 "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
                 "[bold]/policy[/] [bold]/clear[/]",
                 border_style="blue",
@@ -258,9 +262,26 @@ async def run_tui(
                 renderer.render_welcome()
                 continue
 
+            # Parse multimodal attachments (@file syntax)
+            content = parse_multimodal_input(stripped)
+            if isinstance(content, list):
+                has_audio = False
+                for block in content:
+                    if isinstance(block, ImageURLBlock):
+                        renderer.console.print("[dim]  Attached: image[/]")
+                    elif isinstance(block, AudioBlock):
+                        renderer.console.print("[dim]  Attached: audio[/]")
+                        has_audio = True
+                if has_audio and not agent.provider.supports_audio:
+                    renderer.console.print(
+                        "[yellow]Warning:[/] audio input is not supported by "
+                        f"{agent.provider.name} (as of Ollama v0.20). "
+                        "Audio will be dropped."
+                    )
+
             # Run the agent
             renderer.console.print(Text("  Working...", style="dim italic"))
-            session = await agent.run(stripped, session)
+            session = await agent.run(content, session)
             # If a recoverable error occurred (e.g. provider timeout), reset the
             # session state so the next turn works without starting a new session.
             if session.state == AgentState.ERROR:
