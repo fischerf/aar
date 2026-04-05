@@ -7,7 +7,7 @@ Aar's TUI supports switchable color themes and configurable layout sections. The
 ```bash
 # launch with a specific theme
 aar tui --theme claude
-aar tui --theme bladerunner
+aar tui --theme decker
 
 # switch themes at runtime (inside the TUI)
 /theme              # list available themes
@@ -21,7 +21,7 @@ aar tui --theme bladerunner
 |------|-------------|
 | `default` | Classic Aar palette — green, yellow, cyan, red. Matches the original look. |
 | `claude` | Warm sand and sage — muted palette inspired by Claude Code. |
-| `bladerunner` | Neon glow — cyberpunk terminal aesthetic with cyan, magenta, and orange. |
+| `decker` | Neon glow — cyberpunk terminal aesthetic with cyan, magenta, and orange. |
 
 ## Setting a default theme
 
@@ -31,7 +31,7 @@ In your config file (`~/.aar/config.json`), add a `tui` section:
 {
   "provider": { "name": "ollama", "model": "llama3" },
   "tui": {
-    "theme": "bladerunner"
+    "theme": "decker"
   }
 }
 ```
@@ -39,6 +39,11 @@ In your config file (`~/.aar/config.json`), add a `tui` section:
 The `--theme` CLI flag overrides the config file, and `/theme` commands override both at runtime.
 
 ## Creating a custom theme
+
+Run `aar init` to set up `~/.aar/themes/` with:
+
+- **`example.json`** — a full template (copy of the decker theme) ready to rename and edit
+- **`theme.schema.json`** — the JSON schema for editor autocompletion
 
 Create a JSON file at `~/.aar/themes/<name>.json`. You only need to include the fields you want to override — everything else falls back to defaults.
 
@@ -222,7 +227,7 @@ Extensions can register custom panels. Control their visibility via the `extensi
 
 When Aar looks up a theme name, it checks in order:
 
-1. Built-in themes (`default`, `claude`, `bladerunner`)
+1. Built-in themes (`default`, `claude`, `decker`)
 2. User themes at `~/.aar/themes/<name>.json`
 3. Direct file path (absolute or relative)
 
@@ -232,3 +237,4 @@ When Aar looks up a theme name, it checks in order:
 - You can load a theme from any path: `aar tui --theme ./my-themes/experiment.json`
 - Partial themes are valid. Override just the fields you care about; the rest use defaults.
 - Use hex colors for precise control. Named colors depend on your terminal's palette; hex colors don't.
+- Run `aar init` to get a full example theme and JSON schema in `~/.aar/themes/`.

@@ -117,8 +117,8 @@ CLAUDE_THEME = Theme(
 # ---------------------------------------------------------------------------
 # bladerunner — cyberpunk neon on dark
 # ---------------------------------------------------------------------------
-BLADERUNNER_THEME = Theme(
-    name="bladerunner",
+DECKER_THEME = Theme(
+    name="decker",
     description="Neon glow — cyberpunk terminal aesthetic",
     assistant=PanelStyle(
         title_style="bold #00fff7",
@@ -170,5 +170,5 @@ BLADERUNNER_THEME = Theme(
 )
 
 BUILTIN_THEMES: dict[str, Theme] = {
-    t.name: t for t in [DEFAULT_THEME, CLAUDE_THEME, BLADERUNNER_THEME]
+    t.name: t for t in [DEFAULT_THEME, CLAUDE_THEME, DECKER_THEME]
 }

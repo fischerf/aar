@@ -6,6 +6,7 @@ Aar is configured via `AgentConfig` — either in code or through a JSON config 
 
 ```python
 from agent import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
+from agent.core.config import TUIConfig
 
 config = AgentConfig(
     provider=ProviderConfig(
@@ -31,6 +32,10 @@ config = AgentConfig(
     max_steps=50,
     timeout=300.0,                                 # seconds
     system_prompt="You are a helpful assistant.",
+    tui=TUIConfig(
+        theme="default",                               # "default" | "claude" | "decker" or custom name
+        layout={},                                     # section visibility (see docs/themes.md)
+    ),
     session_dir=".agent/sessions",
     shell_path="",                                 # custom shell binary (see below)
     project_rules_dir=".agent",                    # project rules folder (see below)
@@ -226,3 +231,38 @@ config = AgentConfig(project_rules_dir=".config/aar")
 ```
 
 This only affects where project rules are loaded from. The `session_dir` is configured independently.
+
+## TUI theme and layout
+
+The `tui` section controls the TUI's visual appearance and section visibility. See [Themes & Layout](themes.md) for full details.
+
+**Via config file:**
+
+```json
+{
+  "tui": {
+    "theme": "claude",
+    "layout": {
+      "reasoning": { "visible": false },
+      "token_usage": { "visible": false }
+    }
+  }
+}
+```
+
+**Via CLI flag** (theme only):
+
+```bash
+aar tui --theme decker
+aar tui -t claude
+```
+
+**At runtime** (inside the TUI):
+
+```
+/theme              # list available themes
+/theme claude       # switch theme
+/theme next         # cycle themes
+```
+
+Built-in themes: `default`, `claude`, `decker`. Custom themes go in `~/.aar/themes/<name>.json` — run `aar init` to get a template and JSON schema.

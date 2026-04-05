@@ -19,7 +19,7 @@ from agent.core.events import (
 )
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
-    BLADERUNNER_THEME,
+    DECKER_THEME,
     BUILTIN_THEMES,
     CLAUDE_THEME,
     DEFAULT_THEME,
@@ -79,7 +79,7 @@ class TestThemeModels:
 
 class TestBuiltinThemes:
     def test_three_builtins_registered(self) -> None:
-        assert set(BUILTIN_THEMES) == {"default", "claude", "bladerunner"}
+        assert set(BUILTIN_THEMES) == {"default", "claude", "decker"}
 
     def test_default_matches_original_colors(self) -> None:
         t = DEFAULT_THEME
@@ -92,9 +92,9 @@ class TestBuiltinThemes:
     def test_claude_uses_hex_colors(self) -> None:
         assert "#d4a574" in CLAUDE_THEME.assistant.border_style
 
-    def test_bladerunner_uses_neon(self) -> None:
-        assert "#00fff7" in BLADERUNNER_THEME.assistant.border_style
-        assert "#ff2d95" in BLADERUNNER_THEME.tool_call.border_style
+    def test_decker_uses_neon(self) -> None:
+        assert "#00fff7" in DECKER_THEME.assistant.border_style
+        assert "#ff2d95" in DECKER_THEME.tool_call.border_style
 
 
 # ------------------------------------------------------------------
@@ -107,7 +107,7 @@ class TestThemeRegistry:
         reg = ThemeRegistry()
         assert reg.get("default").name == "default"
         assert reg.get("claude").name == "claude"
-        assert reg.get("bladerunner").name == "bladerunner"
+        assert reg.get("decker").name == "decker"
 
     def test_get_unknown_raises(self) -> None:
         reg = ThemeRegistry()
@@ -119,7 +119,7 @@ class TestThemeRegistry:
         names = reg.list_names()
         assert "default" in names
         assert "claude" in names
-        assert "bladerunner" in names
+        assert "decker" in names
 
     def test_register_custom(self) -> None:
         reg = ThemeRegistry()
@@ -159,8 +159,8 @@ class TestTUIRendererThemes:
         assert "Assistant" in output
         assert "hello world" in output
 
-    def test_bladerunner_renders_assistant(self) -> None:
-        renderer, buf = _capture_renderer(BLADERUNNER_THEME)
+    def test_decker_renders_assistant(self) -> None:
+        renderer, buf = _capture_renderer(DECKER_THEME)
         event = AssistantMessage(content="neon reply")
         renderer.render_event(event)
         output = buf.getvalue()

@@ -794,6 +794,26 @@ def init(
         ]
     }
 
+    # Theme directory and files
+    _USER_THEMES_DIR = _USER_DIR / "themes"
+    _USER_THEMES_DIR.mkdir(parents=True, exist_ok=True)
+
+    _USER_THEME_EXAMPLE = _USER_THEMES_DIR / "example.json"
+
+    from agent.transports.themes.builtin import DECKER_THEME
+    from agent.transports.themes.models import Theme
+
+    example_theme = _json.loads(DECKER_THEME.model_dump_json())
+    example_theme["name"] = "example"
+    example_theme["description"] = (
+        "Example custom theme (copy of decker). "
+        "Rename and edit to create your own."
+    )
+
+    theme_schema = Theme.model_json_schema()
+
+    _USER_THEME_SCHEMA = _USER_THEMES_DIR / "theme.schema.json"
+
     created: list[str] = []
     skipped: list[str] = []
 
@@ -801,6 +821,8 @@ def init(
         (_USER_CONFIG, default_config),
         (_USER_MCP_CONFIG, default_mcp),
         (_USER_MCP_EXAMPLE, example_mcp),
+        (_USER_THEME_EXAMPLE, example_theme),
+        (_USER_THEME_SCHEMA, theme_schema),
     ]:
         if path.is_file() and not force:
             console.print(
@@ -818,10 +840,15 @@ def init(
             f"  1. Edit [bold]{_USER_CONFIG}[/] — set provider, model, api_key, base_url, etc."
         )
         console.print(
-            f"  2. Copy entries from [bold]{_USER_MCP_EXAMPLE}[/] into [bold]{_USER_MCP_CONFIG}[/] to enable MCP servers."
+            f"  2. Copy entries from [bold]{_USER_MCP_EXAMPLE}[/] into"
+            f" [bold]{_USER_MCP_CONFIG}[/] to enable MCP servers."
         )
         console.print("  3. Optionally add global rules to [bold]~/.aar/rules.md[/].")
-        console.print("  4. Run [bold]aar chat[/] — no flags needed.")
+        console.print(
+            f"  4. Create custom themes in [bold]{_USER_THEMES_DIR}[/]"
+            f" — see [bold]{_USER_THEME_EXAMPLE}[/] for a template."
+        )
+        console.print("  5. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
