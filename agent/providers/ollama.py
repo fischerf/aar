@@ -212,14 +212,6 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                     audio_blocks = [b for b in content if b.get("type") == "audio"]
                     text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
 
-                    # Warn about unsupported audio blocks (Ollama has no audio API)
-                    if audio_blocks:
-                        logger.warning(
-                            "Audio input is not yet supported by Ollama's API "
-                            "(as of v0.20). %d audio block(s) will be dropped.",
-                            len(audio_blocks),
-                        )
-
                     text = " ".join(t for t in text_parts if t)
                     api_msg = {"role": "user", "content": text}
 
