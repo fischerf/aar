@@ -1,0 +1,93 @@
+"""Pydantic models for TUI themes and layout configuration."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class PanelStyle(BaseModel):
+    """Style definition for a Rich Panel component."""
+
+    title_style: str = "bold green"
+    border_style: str = "green"
+    padding: tuple[int, int] = (1, 2)
+
+
+class BadgeColors(BaseModel):
+    """Colors for tool side-effect badges."""
+
+    read: str = "dim cyan"
+    write: str = "yellow"
+    execute: str = "red"
+    network: str = "blue"
+    external: str = "magenta"
+
+
+class Theme(BaseModel):
+    """Complete theme definition for the TUI renderer."""
+
+    name: str
+    description: str = ""
+
+    # Panel styles per event type
+    assistant: PanelStyle = Field(default_factory=PanelStyle)
+    tool_call: PanelStyle = Field(
+        default_factory=lambda: PanelStyle(
+            title_style="bold yellow", border_style="yellow", padding=(0, 2)
+        )
+    )
+    tool_result: PanelStyle = Field(
+        default_factory=lambda: PanelStyle(
+            title_style="bold cyan", border_style="cyan", padding=(0, 2)
+        )
+    )
+    tool_error: PanelStyle = Field(
+        default_factory=lambda: PanelStyle(
+            title_style="bold red", border_style="red", padding=(0, 2)
+        )
+    )
+    reasoning: PanelStyle = Field(
+        default_factory=lambda: PanelStyle(
+            title_style="dim", border_style="dim", padding=(0, 2)
+        )
+    )
+    error: PanelStyle = Field(
+        default_factory=lambda: PanelStyle(
+            title_style="bold red", border_style="red", padding=(0, 2)
+        )
+    )
+    welcome: PanelStyle = Field(
+        default_factory=lambda: PanelStyle(
+            title_style="bold blue", border_style="blue", padding=(1, 2)
+        )
+    )
+
+    # Text styles
+    prompt_style: str = "bold blue"
+    dim_text: str = "dim"
+    working_style: str = "dim italic"
+    path_highlight: str = "bold blue"
+    usage_style: str = "dim"
+
+    # Side-effect badges
+    badges: BadgeColors = Field(default_factory=BadgeColors)
+
+
+class SectionConfig(BaseModel):
+    """Visibility and ordering for a single TUI section."""
+
+    visible: bool = True
+    order: int = 0
+
+
+class LayoutConfig(BaseModel):
+    """Controls which TUI sections are visible and their render order."""
+
+    welcome: SectionConfig = Field(default_factory=lambda: SectionConfig(order=0))
+    status_bar: SectionConfig = Field(default_factory=lambda: SectionConfig(order=1))
+    reasoning: SectionConfig = Field(default_factory=lambda: SectionConfig(order=10))
+    assistant: SectionConfig = Field(default_factory=lambda: SectionConfig(order=20))
+    tool_call: SectionConfig = Field(default_factory=lambda: SectionConfig(order=30))
+    tool_result: SectionConfig = Field(default_factory=lambda: SectionConfig(order=40))
+    token_usage: SectionConfig = Field(default_factory=lambda: SectionConfig(order=50))
+    extensions: dict[str, SectionConfig] = Field(default_factory=dict)

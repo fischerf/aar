@@ -661,6 +661,12 @@ def tui(
         "--log-level",
         help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
     ),
+    theme: Optional[str] = typer.Option(
+        None,
+        "--theme",
+        "-t",
+        help="TUI theme name (default, claude, bladerunner) or path to theme JSON",
+    ),
 ) -> None:
     """Launch the rich TUI interface."""
     from agent.transports.tui import run_tui
@@ -682,7 +688,9 @@ def tui(
     _configure_logging(config)
     asyncio.run(
         _run_with_mcp(
-            lambda agent: run_tui(config, agent=agent, verbose=verbose, session_id=session_id),
+            lambda agent: run_tui(
+                config, agent=agent, verbose=verbose, session_id=session_id, theme_name=theme
+            ),
             config,
             mcp_config,
             approval_callback=_terminal_approval_callback,

@@ -128,10 +128,16 @@ class SafetyConfig(BaseModel):
     log_all_commands: bool = True
 
 
+class TUIConfig(BaseModel):
+    theme: str = "default"
+    layout: dict = Field(default_factory=dict)
+
+
 class AgentConfig(BaseModel):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    tui: TUIConfig = Field(default_factory=TUIConfig)
     max_steps: int = 50
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0
