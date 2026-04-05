@@ -43,7 +43,7 @@ Clone the repo and install in *editable* mode so that changes to the source
 files take effect immediately without reinstalling:
 
 ```bash
-git clone https://github.com/your-org/aar.git
+git clone https://github.com/fischerf/aar.git
 cd aar
 
 # Full dev setup — includes pytest, pytest-asyncio, and ruff
