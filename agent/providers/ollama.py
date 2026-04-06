@@ -237,6 +237,12 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                     if images:
                         api_msg["images"] = images
 
+                    if audio_blocks:
+                        logger.warning(
+                            "audio not yet supported by Ollama — dropping %d audio block(s)",
+                            len(audio_blocks),
+                        )
+
                     api_messages.append(api_msg)
 
     return api_messages

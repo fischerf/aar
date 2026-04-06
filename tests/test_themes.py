@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+
 from agent.core.agent import Agent
 from agent.core.config import AgentConfig
 from agent.core.events import (
@@ -20,27 +21,26 @@ from agent.core.events import (
 )
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
-    DECKER_THEME,
     BUILTIN_THEMES,
-    CLAUDE_THEME,
+    BERNSTEIN_THEME,
+    CLASSIC_THEME,
+    DECKER_THEME,
     DEFAULT_THEME,
     SLEEK_THEME,
 )
 from agent.transports.themes.models import (
     BadgeColors,
+    FixedLayoutConfig,
+    FixedLayoutRegion,
     FooterStyle,
     HeaderStyle,
     LayoutConfig,
     PanelStyle,
+    ScrollbarConfig,
     SectionConfig,
     Theme,
 )
 from agent.transports.tui import TUIRenderer
-from agent.transports.themes.models import (
-    FixedLayoutConfig,
-    FixedLayoutRegion,
-    ScrollbarConfig,
-)
 from agent.transports.tui_fixed import (
     AarFixedApp,
     ApprovalBar,
@@ -51,7 +51,6 @@ from agent.transports.tui_fixed import (
     SelectableRichLog,
     _Block,
 )
-
 
 # ------------------------------------------------------------------
 # Model validation
@@ -98,18 +97,18 @@ class TestThemeModels:
 
 class TestBuiltinThemes:
     def test_builtins_registered(self) -> None:
-        assert set(BUILTIN_THEMES) == {"default", "claude", "decker", "sleek"}
+        assert set(BUILTIN_THEMES) == {"default", "contrast", "decker", "sleek"}
 
-    def test_default_matches_original_colors(self) -> None:
+    def test_default_matches_bernstein_colors(self) -> None:
         t = DEFAULT_THEME
-        assert t.assistant.border_style == "green"
-        assert t.tool_call.border_style == "yellow"
-        assert t.tool_result.border_style == "cyan"
-        assert t.error.border_style == "red"
-        assert t.prompt_style == "bold blue"
+        assert "#ffb30f" in t.assistant.border_style
+        assert "#ff2900" in t.tool_call.border_style
+        assert "#ffb30f" in t.tool_result.border_style
+        assert "#d12200" in t.error.border_style
+        assert t.prompt_style == "bold #ffb30f"
 
-    def test_claude_uses_hex_colors(self) -> None:
-        assert "#d4a574" in CLAUDE_THEME.assistant.border_style
+    def test_contrast_uses_classic_colors(self) -> None:
+        assert CLASSIC_THEME.assistant.border_style == "green"
 
     def test_decker_uses_neon(self) -> None:
         assert "#00fff7" in DECKER_THEME.assistant.border_style
@@ -120,11 +119,11 @@ class TestBuiltinThemes:
         assert SLEEK_THEME.assistant.padding == (0, 1)
         assert SLEEK_THEME.tool_call.padding == (0, 1)
         assert SLEEK_THEME.welcome.padding == (0, 1)
-        # Compact regions: header=2, footer=2, input/body flexible
+        # Compact regions: header=1, footer=1, input/body flexible
         sizes = {r.name: r.size for r in SLEEK_THEME.fixed_layout.regions}
-        assert sizes["header"] == 2
+        assert sizes["header"] == 1
         assert sizes["input"] is None
-        assert sizes["footer"] == 2
+        assert sizes["footer"] == 1
         assert sizes["body"] is None  # flexible
         # Small scrollbar
         assert SLEEK_THEME.fixed_layout.scrollbar.size == 1
@@ -139,7 +138,7 @@ class TestThemeRegistry:
     def test_get_builtin(self) -> None:
         reg = ThemeRegistry()
         assert reg.get("default").name == "default"
-        assert reg.get("claude").name == "claude"
+        assert reg.get("contrast").name == "contrast"
         assert reg.get("decker").name == "decker"
 
     def test_get_unknown_raises(self) -> None:
@@ -151,7 +150,7 @@ class TestThemeRegistry:
         reg = ThemeRegistry()
         names = reg.list_names()
         assert "default" in names
-        assert "claude" in names
+        assert "contrast" in names
         assert "decker" in names
 
     def test_register_custom(self) -> None:
@@ -203,7 +202,7 @@ class TestTUIRendererThemes:
         assert "neon reply" in output
 
     def test_tool_call_renders(self) -> None:
-        renderer, buf = _capture_renderer(CLAUDE_THEME)
+        renderer, buf = _capture_renderer(CLASSIC_THEME)
         event = ToolCall(tool_name="read_file", arguments={"path": "/tmp/x"})
         renderer.render_event(event)
         output = buf.getvalue()
@@ -294,8 +293,8 @@ class TestThemeSwitching:
     def test_set_theme_changes_renderer(self) -> None:
         renderer, _ = _capture_renderer(DEFAULT_THEME)
         assert renderer.theme.name == "default"
-        renderer.set_theme(CLAUDE_THEME)
-        assert renderer.theme.name == "claude"
+        renderer.set_theme(CLASSIC_THEME)
+        assert renderer.theme.name == "contrast"
 
     def test_cycle_theme(self) -> None:
         reg = ThemeRegistry()
@@ -368,9 +367,9 @@ class TestBarStyleModels:
             assert isinstance(theme.header, HeaderStyle), f"{name} missing header"
             assert isinstance(theme.footer, FooterStyle), f"{name} missing footer"
 
-    def test_claude_header_uses_theme_colors(self) -> None:
-        assert "#6b9e78" in CLAUDE_THEME.header.provider_style
-        assert "#2d2a24" in CLAUDE_THEME.header.background
+    def test_contrast_header_uses_classic_colors(self) -> None:
+        assert CLASSIC_THEME.header.provider_style == "bold cyan"
+        assert "#1a1a2e" in CLASSIC_THEME.header.background
 
     def test_decker_footer_uses_neon(self) -> None:
         assert "#00fff7" in DECKER_THEME.footer.input_style
@@ -396,12 +395,12 @@ class TestFixedLayoutConfig:
     def test_header_has_fixed_size(self) -> None:
         fl = FixedLayoutConfig()
         header = next(r for r in fl.regions if r.name == "header")
-        assert header.size == 3
+        assert header.size == 1
 
     def test_scrollbar_defaults(self) -> None:
         sb = ScrollbarConfig()
         assert sb.enabled is True
-        assert sb.size == 2
+        assert sb.size == 1
 
     def test_builtin_themes_have_fixed_layout(self) -> None:
         for name, theme in BUILTIN_THEMES.items():
@@ -435,8 +434,8 @@ class TestFixedLayoutConfig:
         assert sb.color == "#9d00ff"
         assert sb.color_active == "#00fff7"
 
-    def test_claude_body_background(self) -> None:
-        assert CLAUDE_THEME.fixed_layout.body_background == "#1e1b16"
+    def test_contrast_body_background(self) -> None:
+        assert CLASSIC_THEME.fixed_layout.body_background == "#0e0e0e"
 
     def test_theme_json_roundtrip(self, tmp_path: Path) -> None:
         """Ensure fixed_layout survives JSON serialization."""
@@ -498,9 +497,9 @@ class TestFooterBar:
         assert "42" in rendered.plain
 
     def test_render_contains_theme_name(self) -> None:
-        bar = FooterBar(CLAUDE_THEME)
+        bar = FooterBar(CLASSIC_THEME)
         rendered = bar.render()
-        assert "claude" in rendered.plain
+        assert "contrast" in rendered.plain
 
     def test_render_contains_decker(self) -> None:
         bar = FooterBar(DECKER_THEME)
@@ -612,7 +611,7 @@ class TestFixedTUIRenderer:
     def test_welcome(self) -> None:
         renderer, log = _fixed_renderer()
         renderer.render_welcome()
-        assert "Aar Agent TUI (Fixed)" in log.rendered_text()
+        assert "Aar Agent TUI (Textual)" in log.rendered_text()
 
     def test_tool_error_uses_error_style(self) -> None:
         renderer, log = _fixed_renderer()
@@ -831,7 +830,7 @@ class TestFooterBarKeyHints:
         assert "Ctrl+K" in plain
         assert "Ctrl+L" in plain
         assert "Ctrl+Y" in plain
-        assert "/quit" in plain
+        assert "Ctrl+Q" in plain
 
 
 # ------------------------------------------------------------------
@@ -973,7 +972,7 @@ class TestAarFixedAppStartup:
         """Ensure the app starts cleanly with every built-in theme."""
         agent = _make_mock_agent()
         config = AgentConfig()
-        for theme_name in ["default", "claude", "decker", "sleek"]:
+        for theme_name in ["default", "contrast", "decker", "sleek"]:
             registry = ThemeRegistry()
             theme = registry.get(theme_name)
             app = AarFixedApp(agent=agent, config=config, theme=theme, registry=registry)
@@ -1106,11 +1105,13 @@ class TestApprovalBar:
             bar = app.query_one(ApprovalBar)
             event = bar.show_prompt("write_file", "  path: /tmp/test.txt")
             assert "visible" in bar.classes
+            await pilot.pause()
             # Simulate clicking Yes
             from textual.widgets import Button
 
             yes_btn = bar.query_one("#approval-yes", Button)
             await pilot.click(yes_btn)
+            await pilot.pause()
             await pilot.pause()
             assert event.is_set()
             from agent.safety.permissions import ApprovalResult
@@ -1149,19 +1150,22 @@ class TestApprovalBar:
             bar = app.query_one(ApprovalBar)
             bar.show_prompt("bash", "  cmd: rm -rf /")
             assert "visible" in bar.classes
+            await _pilot.pause()
             # The approval-text Static should contain "Allow?"
             from textual.widgets import Static as _Static
 
             text_widget = bar.query_one("#approval-text", _Static)
-            # Textual Static stores its renderable; check it contains Allow?
-            renderable = text_widget.renderable
-            assert "Allow?" in str(renderable)
+            # Check rendered output contains Allow?
+            rendered = text_widget.render()
+            text = rendered.plain if hasattr(rendered, "plain") else str(rendered)
+            assert "Allow?" in text
 
     @pytest.mark.asyncio
     async def test_approval_bar_no_button(self) -> None:
         """Clicking No should resolve with DENIED."""
-        from agent.safety.permissions import ApprovalResult
         from textual.widgets import Button
+
+        from agent.safety.permissions import ApprovalResult
 
         agent = _make_mock_agent()
         config = AgentConfig()
@@ -1169,8 +1173,10 @@ class TestApprovalBar:
         async with app.run_test(size=(120, 40)) as pilot:
             bar = app.query_one(ApprovalBar)
             event = bar.show_prompt("bash", "  cmd: ls")
+            await pilot.pause()
             no_btn = bar.query_one("#approval-no", Button)
             await pilot.click(no_btn)
+            await pilot.pause()
             await pilot.pause()
             assert event.is_set()
             assert bar.result == ApprovalResult.DENIED
@@ -1179,8 +1185,9 @@ class TestApprovalBar:
     @pytest.mark.asyncio
     async def test_approval_bar_always_button(self) -> None:
         """Clicking Always should resolve with APPROVED_ALWAYS."""
-        from agent.safety.permissions import ApprovalResult
         from textual.widgets import Button
+
+        from agent.safety.permissions import ApprovalResult
 
         agent = _make_mock_agent()
         config = AgentConfig()
@@ -1188,8 +1195,10 @@ class TestApprovalBar:
         async with app.run_test(size=(120, 40)) as pilot:
             bar = app.query_one(ApprovalBar)
             event = bar.show_prompt("write_file", "  path: /tmp/x")
+            await pilot.pause()
             always_btn = bar.query_one("#approval-always", Button)
             await pilot.click(always_btn)
+            await pilot.pause()
             await pilot.pause()
             assert event.is_set()
             assert bar.result == ApprovalResult.APPROVED_ALWAYS

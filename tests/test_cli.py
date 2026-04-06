@@ -486,7 +486,7 @@ class TestTuiCommand:
         """TUI should boot without error when run_tui is patched to exit immediately."""
         config = _mock_config(tmp_session_dir)
 
-        async def noop_tui(cfg, agent=None, verbose=False, session_id=None):
+        async def noop_tui(cfg, agent=None, verbose=False, session_id=None, theme_name=None):
             pass
 
         with (
@@ -501,7 +501,7 @@ class TestTuiCommand:
     def test_tui_passes_model_option(self, tmp_session_dir):
         received_config = {}
 
-        async def capture_tui(cfg, agent=None, verbose=False, session_id=None):
+        async def capture_tui(cfg, agent=None, verbose=False, session_id=None, theme_name=None):
             received_config["model"] = cfg.provider.model
 
         with (
@@ -516,7 +516,7 @@ class TestTuiCommand:
     def test_tui_passes_provider_option(self, tmp_session_dir):
         received_config = {}
 
-        async def capture_tui(cfg, agent=None, verbose=False, session_id=None):
+        async def capture_tui(cfg, agent=None, verbose=False, session_id=None, theme_name=None):
             received_config["provider"] = cfg.provider.name
 
         with (
@@ -531,7 +531,7 @@ class TestTuiCommand:
     def test_tui_passes_session_id(self, tmp_session_dir):
         received = {}
 
-        async def capture_tui(cfg, agent=None, verbose=False, session_id=None):
+        async def capture_tui(cfg, agent=None, verbose=False, session_id=None, theme_name=None):
             received["session_id"] = session_id
 
         with (
