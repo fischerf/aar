@@ -812,7 +812,7 @@ class AarFixedApp(App):
         app = self
 
         async def _approval(spec, tc) -> ApprovalResult:
-            args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items())
+            args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items() if k != "content")
             approval_bar = app.query_one(ApprovalBar)
             done = approval_bar.show_prompt(tc.tool_name, args_text)
             await done.wait()
