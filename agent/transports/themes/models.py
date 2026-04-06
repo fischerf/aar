@@ -119,7 +119,7 @@ class ScrollbarConfig(BaseModel):
     background: str = "#1a1a1a"
     background_hover: str = "#222222"
     background_active: str = "#222222"
-    size: int = 2
+    size: int = 1
     scroll_speed: int = 3  # lines per scroll tick (mouse wheel / PgUp / PgDn)
 
 
@@ -131,10 +131,10 @@ class FixedLayoutConfig(BaseModel):
 
     regions: list[FixedLayoutRegion] = Field(
         default_factory=lambda: [
-            FixedLayoutRegion(name="header", size=3),
+            FixedLayoutRegion(name="header", size=1),
             FixedLayoutRegion(name="body"),
             FixedLayoutRegion(name="input", size=3),
-            FixedLayoutRegion(name="footer", size=3),
+            FixedLayoutRegion(name="footer", size=1),
         ]
     )
     body_background: str = "#0e0e0e"

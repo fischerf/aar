@@ -339,10 +339,10 @@ SLEEK_THEME = Theme(
     ),
     fixed_layout=FixedLayoutConfig(
         regions=[
-            FixedLayoutRegion(name="header", size=2),
+            FixedLayoutRegion(name="header", size=1),
             FixedLayoutRegion(name="body"),
             FixedLayoutRegion(name="input"),
-            FixedLayoutRegion(name="footer", size=2),
+            FixedLayoutRegion(name="footer", size=1),
         ],
         body_background="#0d1117",
         input_background="#16161e",
