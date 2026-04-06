@@ -77,6 +77,10 @@ class OllamaProvider(Provider):
         if tools and self.supports_tools:
             payload["tools"] = _convert_tools(tools)
 
+        # Thinking mode (Ollama 0.20+)
+        if self.supports_reasoning:
+            payload["think"] = True
+
         # Keep-alive
         payload["keep_alive"] = self._keep_alive
 
@@ -116,10 +120,16 @@ class OllamaProvider(Provider):
         done_reason = data.get("done_reason", "")
         stop_reason = _map_stop_reason(done_reason, bool(tool_calls))
 
-        # Handle think mode — content between <think>...</think> tags
+        # Handle think mode — Ollama 0.20+ returns thinking in message.thinking
         reasoning_blocks = []
-        if self.supports_reasoning and "<think>" in content:
-            content, reasoning_blocks = _extract_thinking(content)
+        if self.supports_reasoning:
+            thinking_text = message.get("thinking", "")
+            if thinking_text:
+                from agent.core.events import ReasoningBlock
+                reasoning_blocks = [ReasoningBlock(content=thinking_text.strip())]
+            elif "<think>" in content:
+                # Fallback for older Ollama versions that embed tags in content
+                content, reasoning_blocks = _extract_thinking(content)
 
         # Usage metadata
         usage: dict[str, int] = {}
