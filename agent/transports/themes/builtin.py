@@ -1,4 +1,4 @@
-"""Built-in theme definitions: default, claude, bladerunner."""
+"""Built-in theme definitions: bernstein (default), default, decker, sleek."""
 
 from __future__ import annotations
 
@@ -18,9 +18,113 @@ from agent.transports.themes.models import (
 _DEFAULT_SCROLL_SPEED = 3
 
 # ---------------------------------------------------------------------------
-# default — matches the original hardcoded TUI styles exactly
+# bernstein — slim, warm amber palette (default)
 # ---------------------------------------------------------------------------
-DEFAULT_THEME = Theme(
+BERNSTEIN_THEME = Theme(
+    name="bernstein",
+    description="A slim, modern theme inspired by the warm, sophisticated Bernstein amber palette.",
+    assistant=PanelStyle(
+        title_style="bold #ffb30f",
+        border_style="bold #ffb30f",
+        padding=(1, 2),
+    ),
+    tool_call=PanelStyle(
+        title_style="bold #ff2900",
+        border_style="#ff2900",
+        padding=(0, 2),
+    ),
+    tool_result=PanelStyle(
+        title_style="bold #ffb30f",
+        border_style="#ffb30f",
+        padding=(0, 2),
+    ),
+    tool_error=PanelStyle(
+        title_style="bold #d12200",
+        border_style="#d12200",
+        padding=(0, 2),
+    ),
+    reasoning=PanelStyle(
+        title_style="dim #ffb30f",
+        border_style="dim #ffb30f",
+        padding=(0, 2),
+    ),
+    error=PanelStyle(
+        title_style="bold #d12200",
+        border_style="#d12200",
+        padding=(0, 2),
+    ),
+    welcome=PanelStyle(
+        title_style="bold #ffb30f",
+        border_style="bold #ffb30f",
+        padding=(1, 2),
+    ),
+    prompt_style="bold #ffb30f",
+    dim_text="dim #888888",
+    working_style="dim #ffb30f",
+    path_highlight="bold #ffb30f",
+    usage_style="dim #cccccc",
+    badges=BadgeColors(
+        read="dim #ffb30f",
+        write="yellow",
+        execute="red",
+        network="blue",
+        external="magenta",
+    ),
+    header=HeaderStyle(
+        background="on #1a1a2e",
+        text_style="bold #ffffff",
+        separator_style="dim #444444",
+        separator=SeparatorStyle(character="─", style="dim #444444"),
+        provider_style="bold #ffb30f",
+        tokens_style="dim #cccccc",
+        session_style="dim #888888",
+        state_style="bold #ffb30f",
+    ),
+    footer=FooterStyle(
+        background="on #1a1a2e",
+        text_style="bold #ffffff",
+        separator_style="dim #444444",
+        separator=SeparatorStyle(character="─", style="dim #444444"),
+        step_style="dim #ffb30f",
+        theme_style="dim #cccccc",
+        input_style="bold #ffb30f",
+    ),
+    fixed_layout=FixedLayoutConfig(
+        regions=[
+            FixedLayoutRegion(name="header", size=1),
+            FixedLayoutRegion(name="body"),
+            FixedLayoutRegion(name="input", size=3),
+            FixedLayoutRegion(name="footer", size=1),
+        ],
+        body_background="#121218",
+        input_background="#101014",
+        input_field=InputFieldStyle(
+            border_color="#444444",
+            border_color_focus="#ffb30f",
+            cursor_background="#ffb30f",
+            cursor_foreground="#121218",
+            text_color="#ffb30f",
+        ),
+        selected_block_style="on #302a1c",
+        scrollbar=ScrollbarConfig(
+            color="#3a3a3f",
+            color_hover="#555560",
+            color_active="#777780",
+            background="#1a1a1f",
+            background_hover="#222227",
+            background_active="#222227",
+            size=1,
+            scroll_speed=5,
+        ),
+    ),
+)
+
+DEFAULT_THEME = BERNSTEIN_THEME
+
+# ---------------------------------------------------------------------------
+# classic — matches the original hardcoded TUI styles exactly
+# ---------------------------------------------------------------------------
+CLASSIC_THEME = Theme(
     name="default",
     description="Classic Aar palette — green, yellow, cyan, red",
     assistant=PanelStyle(
@@ -111,100 +215,7 @@ DEFAULT_THEME = Theme(
 )
 
 # ---------------------------------------------------------------------------
-# claude — warm, muted palette inspired by Claude Code
-# ---------------------------------------------------------------------------
-CLAUDE_THEME = Theme(
-    name="claude",
-    description="Warm sand and sage — inspired by Claude Code",
-    assistant=PanelStyle(
-        title_style="bold #d4a574",
-        border_style="#d4a574",
-        padding=(1, 2),
-    ),
-    tool_call=PanelStyle(
-        title_style="bold #7b8794",
-        border_style="#7b8794",
-        padding=(0, 2),
-    ),
-    tool_result=PanelStyle(
-        title_style="bold #6b9e78",
-        border_style="#6b9e78",
-        padding=(0, 2),
-    ),
-    tool_error=PanelStyle(
-        title_style="bold #c75c5c",
-        border_style="#c75c5c",
-        padding=(0, 2),
-    ),
-    reasoning=PanelStyle(
-        title_style="#5a5a6e",
-        border_style="#5a5a6e",
-        padding=(0, 2),
-    ),
-    error=PanelStyle(
-        title_style="bold #c75c5c",
-        border_style="#c75c5c",
-        padding=(0, 2),
-    ),
-    welcome=PanelStyle(
-        title_style="bold #d4a574",
-        border_style="#d4a574",
-        padding=(1, 2),
-    ),
-    prompt_style="bold #d4a574",
-    dim_text="#7b8794",
-    working_style="italic #7b8794",
-    path_highlight="bold #6b9e78",
-    usage_style="#7b8794",
-    badges=BadgeColors(
-        read="#7b8794",
-        write="#d4a574",
-        execute="#c75c5c",
-        network="#6b9e78",
-        external="#5a5a6e",
-    ),
-    header=HeaderStyle(
-        background="on #2d2a24",
-        text_style="bold #d4a574",
-        separator_style="#5a5a6e",
-        separator=SeparatorStyle(style="#5a5a6e"),
-        provider_style="bold #6b9e78",
-        tokens_style="#7b8794",
-        session_style="#7b8794",
-        state_style="bold #d4a574",
-    ),
-    footer=FooterStyle(
-        background="on #2d2a24",
-        text_style="bold #d4a574",
-        separator_style="#5a5a6e",
-        separator=SeparatorStyle(style="#5a5a6e"),
-        step_style="#7b8794",
-        theme_style="#5a5a6e",
-        input_style="bold #d4a574",
-    ),
-    fixed_layout=FixedLayoutConfig(
-        body_background="#1e1b16",
-        input_background="#2d2a24",
-        input_field=InputFieldStyle(
-            border_color="#5a5a6e",
-            border_color_focus="#d4a574",
-            cursor_background="#d4a574",
-            cursor_foreground="#1e1b16",
-            text_color="#d4a574",
-        ),
-        selected_block_style="on #3a3630",
-        scrollbar=ScrollbarConfig(
-            color="#5a5a6e",
-            color_hover="#7b8794",
-            color_active="#d4a574",
-            background="#2d2a24",
-            scroll_speed=_DEFAULT_SCROLL_SPEED,
-        ),
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# bladerunner — cyberpunk neon on dark
+# decker — cyberpunk neon on dark
 # ---------------------------------------------------------------------------
 DECKER_THEME = Theme(
     name="decker",
@@ -397,5 +408,5 @@ SLEEK_THEME = Theme(
 )
 
 BUILTIN_THEMES: dict[str, Theme] = {
-    t.name: t for t in [DEFAULT_THEME, CLAUDE_THEME, DECKER_THEME, SLEEK_THEME]
+    t.name: t for t in [BERNSTEIN_THEME, CLASSIC_THEME, DECKER_THEME, SLEEK_THEME]
 }
