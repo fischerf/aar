@@ -23,6 +23,29 @@ class BadgeColors(BaseModel):
     external: str = "magenta"
 
 
+class HeaderStyle(BaseModel):
+    """Style definition for the fixed header bar."""
+
+    background: str = "on #1a1a2e"
+    text_style: str = "bold white"
+    separator_style: str = "dim"
+    provider_style: str = "bold cyan"
+    tokens_style: str = "dim green"
+    session_style: str = "dim"
+    state_style: str = "bold yellow"
+
+
+class FooterStyle(BaseModel):
+    """Style definition for the fixed footer bar."""
+
+    background: str = "on #1a1a2e"
+    text_style: str = "bold white"
+    separator_style: str = "dim"
+    step_style: str = "dim cyan"
+    theme_style: str = "dim magenta"
+    input_style: str = "bold blue"
+
+
 class Theme(BaseModel):
     """Complete theme definition for the TUI renderer."""
 
@@ -47,9 +70,7 @@ class Theme(BaseModel):
         )
     )
     reasoning: PanelStyle = Field(
-        default_factory=lambda: PanelStyle(
-            title_style="dim", border_style="dim", padding=(0, 2)
-        )
+        default_factory=lambda: PanelStyle(title_style="dim", border_style="dim", padding=(0, 2))
     )
     error: PanelStyle = Field(
         default_factory=lambda: PanelStyle(
@@ -71,6 +92,10 @@ class Theme(BaseModel):
 
     # Side-effect badges
     badges: BadgeColors = Field(default_factory=BadgeColors)
+
+    # Fixed-bar styles (used by tui_fixed mode)
+    header: HeaderStyle = Field(default_factory=HeaderStyle)
+    footer: FooterStyle = Field(default_factory=FooterStyle)
 
 
 class SectionConfig(BaseModel):

@@ -1,6 +1,6 @@
 # Themes & Layout
 
-Aar's TUI supports switchable color themes and configurable layout sections. Themes control every color in the interface — panel borders, text styles, badges, the input prompt. Layout controls which sections are visible.
+Aar's TUI supports switchable color themes and configurable layout sections. Themes control every color in the interface — panel borders, text styles, badges, the input prompt, and the fixed status bars. Layout controls which sections are visible.
 
 ## Quick start
 
@@ -8,6 +8,10 @@ Aar's TUI supports switchable color themes and configurable layout sections. The
 # launch with a specific theme
 aar tui --theme claude
 aar tui --theme decker
+
+# launch in full-screen mode with fixed header/footer bars
+aar tui --fixed
+aar tui --fixed --theme decker
 
 # switch themes at runtime (inside the TUI)
 /theme              # list available themes
@@ -125,6 +129,24 @@ Every configurable field with its default value:
     "execute": "red",
     "network": "blue",
     "external": "magenta"
+  },
+
+  "header": {
+    "background": "on #1a1a2e",
+    "text_style": "bold white",
+    "separator_style": "dim",
+    "provider_style": "bold cyan",
+    "tokens_style": "dim green",
+    "session_style": "dim",
+    "state_style": "bold yellow"
+  },
+  "footer": {
+    "background": "on #1a1a2e",
+    "text_style": "bold white",
+    "separator_style": "dim",
+    "step_style": "dim cyan",
+    "theme_style": "dim magenta",
+    "input_style": "bold blue"
   }
 }
 ```
@@ -222,6 +244,81 @@ Extensions can register custom panels. Control their visibility via the `extensi
   }
 }
 ```
+
+## Full-screen mode (fixed bars)
+
+Pass `--fixed` to launch the TUI with a persistent header and footer bar:
+
+```bash
+aar tui --fixed
+aar tui --fixed --theme claude --verbose
+```
+
+### Layout
+
+```
++------------------------------------------------------------------+
+| Header bar (fixed, 2 lines)                                      |
+| provider: ollama / llama3 | tokens: 1234in/567out | session: abc |
++------------------------------------------------------------------+
+|                                                                   |
+| Scrollable conversation body                                      |
+| (assistant messages, tool calls, results, reasoning, errors)      |
+|                                                                   |
++------------------------------------------------------------------+
+| Footer bar (fixed, 2 lines)                                      |
+| step: 5 | theme: claude | working...                             |
++------------------------------------------------------------------+
+```
+
+The header shows the current provider/model, cumulative token counts, session ID, and agent state. The footer shows the step count, active theme, and input status.
+
+All `/theme`, `/status`, `/tools`, `/policy`, `/clear`, and `/quit` commands work in fixed mode.
+
+### Header styles
+
+| Field | What it styles |
+|-------|---------------|
+| `background` | Header bar background color |
+| `text_style` | General header text |
+| `separator_style` | Horizontal separator line |
+| `provider_style` | Provider and model name |
+| `tokens_style` | Token count display |
+| `session_style` | Session ID |
+| `state_style` | Agent state (idle, running, etc.) |
+
+### Footer styles
+
+| Field | What it styles |
+|-------|---------------|
+| `background` | Footer bar background color |
+| `text_style` | General footer text |
+| `separator_style` | Horizontal separator line |
+| `step_style` | Step counter |
+| `theme_style` | Theme name display |
+| `input_style` | Input status text |
+
+### Custom theme with header/footer
+
+```json
+{
+  "name": "mytheme",
+  "header": {
+    "background": "on #1a1a2e",
+    "provider_style": "bold cyan",
+    "tokens_style": "dim green",
+    "state_style": "bold yellow"
+  },
+  "footer": {
+    "background": "on #1a1a2e",
+    "step_style": "dim cyan",
+    "theme_style": "dim magenta",
+    "input_style": "bold blue"
+  }
+}
+```
+
+Header and footer styles are optional — if omitted, the defaults (dark background with colored text) are used.
 
 ## Theme resolution order
 

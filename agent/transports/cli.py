@@ -667,9 +667,17 @@ def tui(
         "-t",
         help="TUI theme name (default, claude, bladerunner) or path to theme JSON",
     ),
+    fixed: bool = typer.Option(
+        False,
+        "--fixed",
+        help="Use full-screen mode with fixed header/footer status bars",
+    ),
 ) -> None:
     """Launch the rich TUI interface."""
-    from agent.transports.tui import run_tui
+    if fixed:
+        from agent.transports.tui_fixed import run_tui_fixed as _run_tui
+    else:
+        from agent.transports.tui import run_tui as _run_tui
 
     config = _build_config(
         model=model,
@@ -688,7 +696,7 @@ def tui(
     _configure_logging(config)
     asyncio.run(
         _run_with_mcp(
-            lambda agent: run_tui(
+            lambda agent: _run_tui(
                 config, agent=agent, verbose=verbose, session_id=session_id, theme_name=theme
             ),
             config,
@@ -806,8 +814,7 @@ def init(
     example_theme = _json.loads(DECKER_THEME.model_dump_json())
     example_theme["name"] = "example"
     example_theme["description"] = (
-        "Example custom theme (copy of decker). "
-        "Rename and edit to create your own."
+        "Example custom theme (copy of decker). Rename and edit to create your own."
     )
 
     theme_schema = Theme.model_json_schema()

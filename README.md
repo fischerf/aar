@@ -91,6 +91,10 @@ aar tools
 # Launch the rich TUI
 aar tui
 
+# Full-screen TUI with fixed header/footer status bars
+aar tui --fixed
+aar tui --fixed --theme decker
+
 # Start the HTTP/SSE web server
 aar serve --host 0.0.0.0 --port 8080
 ```
@@ -150,6 +154,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
+| [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |

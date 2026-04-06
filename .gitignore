@@ -2,3 +2,5 @@
 !.agent/rules.md
 tools/game_mcp/
 .claude/
+agent/transports/.web_mcp_cache/
+.web_mcp_cache/

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.transports.themes.models import BadgeColors, PanelStyle, Theme
+from agent.transports.themes.models import BadgeColors, FooterStyle, HeaderStyle, PanelStyle, Theme
 
 # ---------------------------------------------------------------------------
 # default — matches the original hardcoded TUI styles exactly
@@ -56,6 +56,23 @@ DEFAULT_THEME = Theme(
         execute="red",
         network="blue",
         external="magenta",
+    ),
+    header=HeaderStyle(
+        background="on #1a1a2e",
+        text_style="bold white",
+        separator_style="dim",
+        provider_style="bold cyan",
+        tokens_style="dim green",
+        session_style="dim",
+        state_style="bold yellow",
+    ),
+    footer=FooterStyle(
+        background="on #1a1a2e",
+        text_style="bold white",
+        separator_style="dim",
+        step_style="dim cyan",
+        theme_style="dim magenta",
+        input_style="bold blue",
     ),
 )
 
@@ -112,6 +129,23 @@ CLAUDE_THEME = Theme(
         network="#6b9e78",
         external="#5a5a6e",
     ),
+    header=HeaderStyle(
+        background="on #2d2a24",
+        text_style="bold #d4a574",
+        separator_style="#5a5a6e",
+        provider_style="bold #6b9e78",
+        tokens_style="#7b8794",
+        session_style="#7b8794",
+        state_style="bold #d4a574",
+    ),
+    footer=FooterStyle(
+        background="on #2d2a24",
+        text_style="bold #d4a574",
+        separator_style="#5a5a6e",
+        step_style="#7b8794",
+        theme_style="#5a5a6e",
+        input_style="bold #d4a574",
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -167,8 +201,23 @@ DECKER_THEME = Theme(
         network="#39ff14",
         external="#9d00ff",
     ),
+    header=HeaderStyle(
+        background="on #0a0a1a",
+        text_style="bold #00fff7",
+        separator_style="#9d00ff",
+        provider_style="bold #39ff14",
+        tokens_style="#ff6e27",
+        session_style="#ff2d95",
+        state_style="bold #00fff7",
+    ),
+    footer=FooterStyle(
+        background="on #0a0a1a",
+        text_style="bold #00fff7",
+        separator_style="#9d00ff",
+        step_style="#ff6e27",
+        theme_style="#9d00ff",
+        input_style="bold #00fff7",
+    ),
 )
 
-BUILTIN_THEMES: dict[str, Theme] = {
-    t.name: t for t in [DEFAULT_THEME, CLAUDE_THEME, DECKER_THEME]
-}
+BUILTIN_THEMES: dict[str, Theme] = {t.name: t for t in [DEFAULT_THEME, CLAUDE_THEME, DECKER_THEME]}
