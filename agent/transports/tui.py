@@ -347,8 +347,11 @@ async def run_tui(
             # Handle TUI commands
             if stripped.lower() in {"/quit", "/exit", "/q"}:
                 break
-            elif stripped.lower() == "/status" and session:
-                renderer.render_status_bar(session)
+            elif stripped.lower() == "/status":
+                if session:
+                    renderer.render_status_bar(session)
+                else:
+                    renderer.console.print("[dim]No active session.[/dim]")
                 continue
             elif stripped.lower() == "/tools":
                 for spec in agent.registry.list_tools():

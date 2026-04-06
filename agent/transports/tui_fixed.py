@@ -1030,18 +1030,21 @@ class AarFixedApp(App):
         if stripped.lower() in {"/quit", "/exit", "/q"}:
             self.exit()
             return
-        elif stripped.lower() == "/status" and self._session:
+        elif stripped.lower() == "/status":
             t = self._renderer.theme
-            status = Table.grid(padding=(0, 2))
-            status.add_column(justify="left")
-            status.add_column(justify="center")
-            status.add_column(justify="right")
-            status.add_row(
-                f"[{t.dim_text}]Session: {self._session.session_id[:8]}...[/]",
-                f"[{t.dim_text}]Steps: {self._session.step_count}[/]",
-                f"[{t.dim_text}]State: {self._session.state.value}[/]",
-            )
-            log.write(status)
+            if not self._session:
+                log.write(f"[{t.dim_text}]No active session.[/]")
+            else:
+                status = Table.grid(padding=(0, 2))
+                status.add_column(justify="left")
+                status.add_column(justify="center")
+                status.add_column(justify="right")
+                status.add_row(
+                    f"[{t.dim_text}]Session: {self._session.session_id[:8]}...[/]",
+                    f"[{t.dim_text}]Steps: {self._session.step_count}[/]",
+                    f"[{t.dim_text}]State: {self._session.state.value}[/]",
+                )
+                log.write(status)
             return
         elif stripped.lower() == "/tools":
             t = self._renderer.theme
