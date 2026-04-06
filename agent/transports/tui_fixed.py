@@ -692,7 +692,7 @@ class FixedTUIRenderer:
             return
         t = self.theme
         welcome_text = (
-            "[bold]Aar Agent TUI (Fixed)[/]\n\n"
+            "[bold]Aar Agent TUI (Textual)[/]\n\n"
             "Type your message and press Enter.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
             "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
@@ -709,7 +709,7 @@ class FixedTUIRenderer:
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
-            raw="Aar Agent TUI (Fixed) — welcome",
+            raw="Aar Agent TUI (Textual) — welcome",
             kind="welcome",
         )
 
@@ -720,7 +720,7 @@ class FixedTUIRenderer:
 
 
 class AarFixedApp(App):
-    """Full-screen Textual application for the fixed TUI mode."""
+    """Full-screen Textual application for the Textual TUI mode."""
 
     BINDINGS = [
         Binding("pageup", "scroll_up", "Page Up", show=False),
