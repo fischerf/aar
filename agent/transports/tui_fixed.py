@@ -12,17 +12,21 @@ Requires the ``tui-fixed`` optional extra::
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 from typing import Callable
 
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
+    from textual.containers import Horizontal
     from textual.events import Click
-    from textual.widgets import Input, RichLog, Static
+    from textual.widgets import Button, Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "The fixed TUI requires the 'textual' package. "
@@ -46,10 +50,25 @@ from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
+from agent.safety.permissions import ApprovalResult
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
 from agent.transports.tui import _format_args, _side_effect_badge
+
+# ---------------------------------------------------------------------------
+# Block — tracks raw content for each rendered block
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Block:
+    """A single rendered block in the scrollable body."""
+
+    raw: str  # raw text / markdown (what gets copied)
+    kind: str = ""  # "assistant", "tool_call", "tool_result", "reasoning", "error", etc.
+    line_start: int = 0  # first line index in the RichLog
+    line_count: int = 0  # how many lines this block occupies
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +148,6 @@ class FooterBar(Static):
             ("  |  ", f.separator_style),
             (f"theme: {self.theme_name}", f.theme_style),
             ("  |  ", f.separator_style),
-            ("Esc", f.step_style),
-            (" quit  ", f.separator_style),
             ("Ctrl+T", f.step_style),
             (" theme  ", f.separator_style),
             ("Ctrl+K", f.step_style),
@@ -138,7 +155,9 @@ class FooterBar(Static):
             ("Ctrl+L", f.step_style),
             (" clear  ", f.separator_style),
             ("Ctrl+Y", f.step_style),
-            (" copy", f.separator_style),
+            (" copy  ", f.separator_style),
+            ("Ctrl+Q", f.step_style),
+            (" exit", f.separator_style),
         )
 
 
@@ -157,6 +176,101 @@ class SeparatorBar(Static):
 
     def render(self) -> Text:  # type: ignore[override]
         return Text("─" * self.size.width, style=self._style)
+
+
+# ---------------------------------------------------------------------------
+# ApprovalBar — inline prompt for tool approval (yes / no / always)
+# ---------------------------------------------------------------------------
+
+
+class ApprovalBar(Static):
+    """Inline approval prompt shown when a tool requires user consent."""
+
+    DEFAULT_CSS = """
+    ApprovalBar {
+        height: auto;
+        max-height: 12;
+        padding: 0 1;
+        display: none;
+    }
+    ApprovalBar.visible {
+        display: block;
+    }
+    ApprovalBar .approval-buttons {
+        height: 3;
+    }
+    ApprovalBar Button {
+        min-width: 16;
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._tool_text: str = ""
+        self._result_event: asyncio.Event | None = None
+        self._result: ApprovalResult = ApprovalResult.DENIED
+
+    def compose(self) -> ComposeResult:  # type: ignore[override]
+        yield Static("", id="approval-text")
+        with Horizontal(classes="approval-buttons"):
+            yield Button("(y) Yes", id="approval-yes", variant="success")
+            yield Button("(n) No", id="approval-no", variant="error")
+            yield Button("(a) Always", id="approval-always", variant="warning")
+
+    def show_prompt(self, tool_name: str, args_text: str) -> asyncio.Event:
+        """Display an approval prompt. Returns an asyncio.Event that is set when answered."""
+        self._result_event = asyncio.Event()
+        self._result = ApprovalResult.DENIED
+        text_widget = self.query_one("#approval-text", Static)
+        text_widget.update(
+            f"[bold red]Approval Required[/]\n[bold]{tool_name}[/]\n{args_text}\n[bold]Allow?[/]"
+        )
+        self.add_class("visible")
+        # Focus the Yes button by default
+        try:
+            self.query_one("#approval-yes", Button).focus()
+        except Exception:
+            pass
+        return self._result_event
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button clicks for approval decisions."""
+        if event.button.id == "approval-yes":
+            self._resolve(ApprovalResult.APPROVED)
+        elif event.button.id == "approval-always":
+            self._resolve(ApprovalResult.APPROVED_ALWAYS)
+        else:
+            self._resolve(ApprovalResult.DENIED)
+
+    async def on_key(self, event: object) -> None:
+        """Allow y/n/a keyboard shortcuts when visible."""
+        if "visible" not in self.classes:
+            return
+        key = getattr(event, "character", "")
+        if key == "y":
+            self._resolve(ApprovalResult.APPROVED)
+        elif key == "n":
+            self._resolve(ApprovalResult.DENIED)
+        elif key == "a":
+            self._resolve(ApprovalResult.APPROVED_ALWAYS)
+        else:
+            return
+        if hasattr(event, "prevent_default"):
+            event.prevent_default()  # type: ignore[union-attr]
+        if hasattr(event, "stop"):
+            event.stop()  # type: ignore[union-attr]
+
+    def _resolve(self, result: ApprovalResult) -> None:
+        """Set the result, hide the bar, and signal completion."""
+        self._result = result
+        self.remove_class("visible")
+        if self._result_event:
+            self._result_event.set()
+
+    @property
+    def result(self) -> ApprovalResult:
+        return self._result
 
 
 # ---------------------------------------------------------------------------
@@ -223,17 +337,51 @@ class HistoryInput(Input):
 
 
 # ---------------------------------------------------------------------------
-# SelectableRichLog — RichLog with block selection and copy support
+# SelectableRichLog — RichLog with block selection, highlighting, and copy
 # ---------------------------------------------------------------------------
 
 
 class SelectableRichLog(RichLog):
-    """RichLog that tracks rendered blocks and supports click-to-select + copy."""
+    """RichLog that tracks rendered blocks and supports click-to-select + copy.
+
+    Each ``write()`` call is paired with a raw text string via ``write_block()``.
+    Left-click selects and highlights a block; right-click copies and deselects.
+    """
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         super().__init__(*args, **kwargs)
-        self._blocks: list[str] = []  # plain-text per block
+        self._blocks: list[_Block] = []
         self._selected_block: int | None = None
+        self._total_lines: int = 0
+        self._selected_style: str = "on #2a2a3a"  # overridden by theme
+
+    def write_block(
+        self,
+        content: object,
+        raw: str,
+        kind: str = "",
+        **kwargs,  # noqa: ANN003
+    ) -> SelectableRichLog:
+        """Write a renderable to the log and track its raw text for copy."""
+        line_start = self._total_lines
+        result = self.write(content, **kwargs)
+        # Estimate lines by measuring the rendered content
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=False, width=max(self.size.width - 4, 40))
+        try:
+            console.print(content)
+        except Exception:
+            buf.write(str(content))
+        line_count = max(buf.getvalue().count("\n"), 1)
+        self._blocks.append(
+            _Block(raw=raw, kind=kind, line_start=line_start, line_count=line_count)
+        )
+        self._total_lines += line_count
+        return result  # type: ignore[return-value]
 
     def write(  # type: ignore[override]
         self,
@@ -244,18 +392,7 @@ class SelectableRichLog(RichLog):
         scroll_end: bool | None = None,
         animate: bool = False,
     ) -> SelectableRichLog:
-        """Write content and track its plain text for copy support."""
-        from io import StringIO
-
-        from rich.console import Console
-
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=False, width=200, no_color=True)
-        try:
-            console.print(content)
-        except Exception:
-            buf.write(str(content))
-        self._blocks.append(buf.getvalue().strip())
+        """Write content (used internally by Textual deferred renders)."""
         return super().write(  # type: ignore[return-value]
             content,
             width=width,
@@ -268,36 +405,58 @@ class SelectableRichLog(RichLog):
     def clear(self) -> None:
         self._blocks.clear()
         self._selected_block = None
+        self._total_lines = 0
         super().clear()
 
-    def get_last_block_text(self) -> str:
-        """Get the plain text of the most recent block."""
+    def _block_at_y(self, click_y: int) -> int | None:
+        """Find which block index contains the given Y coordinate."""
+        if not self._blocks:
+            return None
+        y = click_y + self.scroll_offset.y
+        total = max(self.virtual_size.height, 1)
+        ratio = y / total
+        idx = int(ratio * len(self._blocks))
+        return max(0, min(idx, len(self._blocks) - 1))
+
+    def select_block(self, idx: int | None) -> None:
+        """Select a block by index (or deselect with None)."""
+        old = self._selected_block
+        self._selected_block = idx
+        # Re-render affected blocks to show/hide highlight
+        if old is not None or idx is not None:
+            self.refresh()
+
+    async def on_click(self, event: Click) -> None:
+        """Left-click selects a block; right-click copies and deselects."""
+        idx = self._block_at_y(event.y)
+        if event.button == 3:  # right-click
+            if self._selected_block is not None:
+                # Copy will be handled by the app's action
+                app = self.app
+                if hasattr(app, "_do_copy_selected"):
+                    app._do_copy_selected()  # type: ignore[attr-defined]
+            return
+        # Left-click — select or deselect
+        if idx == self._selected_block:
+            self.select_block(None)
+        else:
+            self.select_block(idx)
+
+    def get_selected_raw(self) -> str:
+        """Return the raw text of the currently selected block."""
+        if self._selected_block is not None and 0 <= self._selected_block < len(self._blocks):
+            return self._blocks[self._selected_block].raw
+        return ""
+
+    def get_last_raw(self) -> str:
+        """Return the raw text of the most recent block."""
         if self._blocks:
-            return self._blocks[-1]
+            return self._blocks[-1].raw
         return ""
 
     def get_all_text(self) -> str:
-        """Get all blocks as plain text, separated by newlines."""
-        return "\n\n".join(self._blocks)
-
-    async def on_click(self, event: Click) -> None:
-        """Select the block nearest to the click position for copy."""
-        if not self._blocks:
-            return
-        # Estimate which block was clicked based on Y offset within scroll region.
-        # Each block is roughly proportional: map click Y to block index.
-        total_lines = max(self.virtual_size.height, 1)
-        click_y = event.y + self.scroll_offset.y
-        ratio = click_y / total_lines
-        idx = int(ratio * len(self._blocks))
-        idx = max(0, min(idx, len(self._blocks) - 1))
-        self._selected_block = idx
-
-    def get_selected_block_text(self) -> str:
-        """Return the text of the currently selected block."""
-        if self._selected_block is not None and 0 <= self._selected_block < len(self._blocks):
-            return self._blocks[self._selected_block]
-        return ""
+        """Get all blocks' raw text, separated by newlines."""
+        return "\n\n".join(b.raw for b in self._blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +465,7 @@ class SelectableRichLog(RichLog):
 
 
 class FixedTUIRenderer:
-    """Renders agent events into a Textual :class:`RichLog` widget."""
+    """Renders agent events into a Textual :class:`SelectableRichLog` widget."""
 
     def __init__(
         self,
@@ -328,6 +487,13 @@ class FixedTUIRenderer:
         self._extension_panels: dict[str, Callable] = {}
         self._thinking_visible = True
 
+    def _write(self, content: object, raw: str = "", kind: str = "") -> None:
+        """Write to the log, using block tracking when available."""
+        if hasattr(self._log, "write_block") and raw:
+            self._log.write_block(content, raw=raw, kind=kind)
+        else:
+            self._log.write(content)
+
     # ------------------------------------------------------------------
     # Theme switching
     # ------------------------------------------------------------------
@@ -339,7 +505,11 @@ class FixedTUIRenderer:
         self._footer.theme = theme
         self._footer.theme_name = theme.name
         app.apply_theme(theme)
-        self._log.write(Text(f"Switched to theme: {theme.name}", style=theme.dim_text))
+        self._write(
+            Text(f"Switched to theme: {theme.name}", style=theme.dim_text),
+            raw=f"Switched to theme: {theme.name}",
+            kind="system",
+        )
 
     def cycle_theme(self, registry: ThemeRegistry, app: AarFixedApp) -> None:
         """Cycle to the next available theme."""
@@ -363,8 +533,10 @@ class FixedTUIRenderer:
         self._header.thinking_enabled = self._thinking_visible
         self._header.refresh()
         label = "enabled" if self._thinking_visible else "disabled"
-        self._log.write(
-            Text(f"Thinking display {label}", style=self.theme.dim_text)
+        self._write(
+            Text(f"Thinking display {label}", style=self.theme.dim_text),
+            raw=f"Thinking display {label}",
+            kind="system",
         )
         return self._thinking_visible
 
@@ -379,14 +551,16 @@ class FixedTUIRenderer:
         if isinstance(event, AssistantMessage) and event.content:
             if not self.layout.assistant.visible:
                 return
-            self._log.write(Text())
-            self._log.write(
+            self._log.write(Text())  # spacer
+            self._write(
                 Panel(
                     Markdown(event.content),
                     title=f"[{t.assistant.title_style}]Assistant[/]",
                     border_style=t.assistant.border_style,
                     padding=t.assistant.padding,
-                )
+                ),
+                raw=event.content,
+                kind="assistant",
             )
 
         elif isinstance(event, ToolCall):
@@ -408,13 +582,22 @@ class FixedTUIRenderer:
                     f"[{t.tool_call.title_style}]Tool: {event.tool_name}[/]"
                     f" [{t.dim_text}](step {self._step_count})[/]"
                 )
-            self._log.write(
+            # Raw text: tool name + arguments as readable string
+            import json
+
+            try:
+                raw_args = json.dumps(event.arguments, indent=2)
+            except Exception:
+                raw_args = str(event.arguments)
+            self._write(
                 Panel(
                     args_display,
                     title=title,
                     border_style=t.tool_call.border_style,
                     padding=t.tool_call.padding,
-                )
+                ),
+                raw=f"Tool: {event.tool_name}\n{raw_args}",
+                kind="tool_call",
             )
 
         elif isinstance(event, ToolResult):
@@ -431,8 +614,10 @@ class FixedTUIRenderer:
             title = f"[{ps.title_style}]Result: {event.tool_name}[/]{duration}"
             if event.is_error:
                 title += f" [{t.tool_error.border_style}]ERROR[/]"
-            self._log.write(
-                Panel(output, title=title, border_style=ps.border_style, padding=ps.padding)
+            self._write(
+                Panel(output, title=title, border_style=ps.border_style, padding=ps.padding),
+                raw=output,
+                kind="tool_result",
             )
 
         elif isinstance(event, ReasoningBlock) and event.content:
@@ -441,13 +626,15 @@ class FixedTUIRenderer:
             text = event.content
             if len(text) > 500:
                 text = text[:500] + "..."
-            self._log.write(
+            self._write(
                 Panel(
                     Text(text, style=f"italic {t.reasoning.border_style}"),
                     title=f"[{t.reasoning.title_style}]Thinking[/]",
                     border_style=t.reasoning.border_style,
                     padding=t.reasoning.padding,
-                )
+                ),
+                raw=text,
+                kind="reasoning",
             )
 
         elif isinstance(event, ErrorEvent):
@@ -456,13 +643,15 @@ class FixedTUIRenderer:
                 if event.recoverable
                 else ""
             )
-            self._log.write(
+            self._write(
                 Panel(
                     event.message + hint,
                     title=f"[{t.error.title_style}]Error[/]",
                     border_style=t.error.border_style,
                     padding=t.error.padding,
-                )
+                ),
+                raw=event.message,
+                kind="error",
             )
 
         elif isinstance(event, ProviderMeta):
@@ -475,38 +664,41 @@ class FixedTUIRenderer:
             self._header.refresh()
             if not self.layout.token_usage.visible:
                 return
-            self._log.write(
-                Text(
-                    f"  {u.get('input_tokens', 0)}in / {u.get('output_tokens', 0)}out "
-                    f"(total: {self._usage_total['input_tokens']}in"
-                    f" / {self._usage_total['output_tokens']}out)",
-                    style=t.usage_style,
-                )
+            usage_text = (
+                f"  {u.get('input_tokens', 0)}in / {u.get('output_tokens', 0)}out "
+                f"(total: {self._usage_total['input_tokens']}in"
+                f" / {self._usage_total['output_tokens']}out)"
+            )
+            self._write(
+                Text(usage_text, style=t.usage_style),
+                raw=usage_text.strip(),
+                kind="usage",
             )
 
     def render_welcome(self) -> None:
         if not self.layout.welcome.visible:
             return
         t = self.theme
-        self._log.write(
-            Panel(
-                "[bold]Aar Agent TUI (Fixed)[/]\n\n"
-                "Type your message and press Enter.\n"
-                "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
-                "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-                "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
-                "[bold]Shortcuts:[/]\n"
-                "  [bold]Ctrl+T[/]  cycle theme    "
-                "[bold]Ctrl+K[/]  toggle thinking\n"
-                "  [bold]Ctrl+L[/]  clear screen   "
-                "[bold]Ctrl+Y[/]  copy last block\n"
-                "  [bold]Escape[/]  quit           "
-                "[bold]PgUp/PgDn[/]  scroll\n"
-                "  [bold]↑ / ↓[/]   input history  "
-                "[bold]Click[/]  select block",
-                border_style=t.welcome.border_style,
-                padding=t.welcome.padding,
-            )
+        welcome_text = (
+            "[bold]Aar Agent TUI (Fixed)[/]\n\n"
+            "Type your message and press Enter.\n"
+            "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
+            "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
+            "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
+            "[bold]Shortcuts:[/]\n"
+            "  [bold]Ctrl+T[/]  cycle theme    "
+            "[bold]Ctrl+K[/]  toggle thinking\n"
+            "  [bold]Ctrl+L[/]  clear screen   "
+            "[bold]Ctrl+Y[/]  copy block (raw text)\n"
+            "  [bold]↑ / ↓[/]   input history  "
+            "[bold]PgUp/PgDn[/]  scroll\n"
+            "  [bold]Left click[/]  select block  "
+            "[bold]Right click[/]  copy + deselect"
+        )
+        self._write(
+            Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
+            raw="Aar Agent TUI (Fixed) — welcome",
+            kind="welcome",
         )
 
 
@@ -519,7 +711,6 @@ class AarFixedApp(App):
     """Full-screen Textual application for the fixed TUI mode."""
 
     BINDINGS = [
-        Binding("escape", "quit", "Quit"),
         Binding("pageup", "scroll_up", "Page Up", show=False),
         Binding("pagedown", "scroll_down", "Page Down", show=False),
         Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False),
@@ -580,6 +771,11 @@ class AarFixedApp(App):
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
 
+        # Build a size lookup from region config
+        region_sizes: dict[str, int | None] = {}
+        for region in fl.regions:
+            region_sizes[region.name] = region.size
+
         # Map region names to widget factories
         widget_map: dict[str, Callable[[], list]] = {
             "header": lambda: [
@@ -590,6 +786,7 @@ class AarFixedApp(App):
                 SelectableRichLog(id="body-log", wrap=True, markup=True, auto_scroll=True),
             ],
             "input": lambda: [
+                ApprovalBar(),
                 SeparatorBar(self._theme.footer.separator_style),
                 HistoryInput(placeholder="> type your message...", id="user-input"),
             ],
@@ -610,6 +807,19 @@ class AarFixedApp(App):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _make_approval_callback(self):
+        """Create an approval callback that shows the inline ApprovalBar."""
+        app = self
+
+        async def _approval(spec, tc) -> ApprovalResult:
+            args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items())
+            approval_bar = app.query_one(ApprovalBar)
+            done = approval_bar.show_prompt(tc.tool_name, args_text)
+            await done.wait()
+            return approval_bar.result
+
+        return _approval
+
     def on_mount(self) -> None:
         log = self.query_one("#body-log", SelectableRichLog)
         header = self.query_one(HeaderBar)
@@ -618,6 +828,9 @@ class AarFixedApp(App):
         # Populate header from config
         header.provider_name = self._config.provider.name
         header.model_name = self._config.provider.model
+
+        # Apply selected block highlight style from theme
+        log._selected_style = self._theme.fixed_layout.selected_block_style
 
         self._renderer = FixedTUIRenderer(
             log=log,
@@ -628,6 +841,11 @@ class AarFixedApp(App):
             layout=self._layout_config,
         )
         self._agent.on_event(self._renderer.render_event)
+
+        # Wire approval callback into the agent's permission manager
+        approval_cb = self._make_approval_callback()
+        if hasattr(self._agent, "executor") and hasattr(self._agent.executor, "permissions"):
+            self._agent.executor.permissions._approval_callback = approval_cb
 
         # Apply theme CSS
         self.apply_theme(self._theme)
@@ -658,6 +876,11 @@ class AarFixedApp(App):
         fl = theme.fixed_layout
         sb = fl.scrollbar
 
+        # Build region size lookup
+        region_sizes: dict[str, int | None] = {}
+        for region in fl.regions:
+            region_sizes[region.name] = region.size
+
         # Body log
         try:
             log = self.query_one("#body-log", SelectableRichLog)
@@ -669,6 +892,7 @@ class AarFixedApp(App):
             log.styles.scrollbar_background_hover = sb.background_hover
             log.styles.scrollbar_background_active = sb.background_active
             log.styles.scrollbar_size_vertical = sb.size
+            log._selected_style = fl.selected_block_style
         except Exception:
             pass
 
@@ -683,6 +907,9 @@ class AarFixedApp(App):
         try:
             header = self.query_one(HeaderBar)
             header.styles.background = theme.header.background.replace("on ", "")
+            header_size = region_sizes.get("header")
+            if header_size is not None:
+                header.styles.height = header_size
         except Exception:
             pass
 
@@ -690,6 +917,9 @@ class AarFixedApp(App):
         try:
             footer = self.query_one(FooterBar)
             footer.styles.background = theme.footer.background.replace("on ", "")
+            footer_size = region_sizes.get("footer")
+            if footer_size is not None:
+                footer.styles.height = footer_size
         except Exception:
             pass
 
@@ -697,11 +927,18 @@ class AarFixedApp(App):
     # Key binding actions
     # ------------------------------------------------------------------
 
+    def _scroll_speed(self) -> int:
+        return self._theme.fixed_layout.scrollbar.scroll_speed
+
     def action_scroll_up(self) -> None:
-        self.query_one("#body-log", SelectableRichLog).scroll_page_up()
+        self.query_one("#body-log", SelectableRichLog).scroll_up(
+            animate=False, duration=0, speed=self._scroll_speed()
+        )
 
     def action_scroll_down(self) -> None:
-        self.query_one("#body-log", SelectableRichLog).scroll_page_down()
+        self.query_one("#body-log", SelectableRichLog).scroll_down(
+            animate=False, duration=0, speed=self._scroll_speed()
+        )
 
     def action_cycle_theme(self) -> None:
         """Ctrl+T — cycle to the next theme."""
@@ -734,16 +971,23 @@ class AarFixedApp(App):
         self._renderer.render_welcome()
 
     def action_copy_block(self) -> None:
-        """Ctrl+Y — copy the selected (or last) block to the clipboard."""
+        """Ctrl+Y — copy the selected (or last) block's raw text to clipboard."""
+        self._do_copy_selected()
+
+    def _do_copy_selected(self) -> None:
+        """Copy selected block raw text, show feedback, deselect."""
         log = self.query_one("#body-log", SelectableRichLog)
-        text = log.get_selected_block_text()
+        text = log.get_selected_raw()
         if not text:
-            text = log.get_last_block_text()
+            text = log.get_last_raw()
         if text:
             self.copy_to_clipboard(text)
+            log.select_block(None)  # deselect
             if self._renderer:
-                self._renderer._log.write(
-                    Text("Copied to clipboard", style=self._renderer.theme.dim_text)
+                self._renderer._write(
+                    Text("Copied to clipboard", style=self._renderer.theme.dim_text),
+                    raw="Copied to clipboard",
+                    kind="system",
                 )
 
     # ------------------------------------------------------------------
@@ -788,46 +1032,61 @@ class AarFixedApp(App):
             return
         elif stripped.lower() == "/status" and self._session:
             t = self._renderer.theme
-            log.write(
-                Text(
-                    f"Session: {self._session.session_id[:8]}... | "
-                    f"Steps: {self._session.step_count} | "
-                    f"State: {self._session.state.value}",
-                    style=t.dim_text,
-                )
+            status = Table.grid(padding=(0, 2))
+            status.add_column(justify="left")
+            status.add_column(justify="center")
+            status.add_column(justify="right")
+            status.add_row(
+                f"[{t.dim_text}]Session: {self._session.session_id[:8]}...[/]",
+                f"[{t.dim_text}]Steps: {self._session.step_count}[/]",
+                f"[{t.dim_text}]State: {self._session.state.value}[/]",
             )
+            log.write(status)
             return
         elif stripped.lower() == "/tools":
+            t = self._renderer.theme
             for spec in self._agent.registry.list_tools():
                 effects = ", ".join(e.value for e in spec.side_effects)
-                log.write(Text(f"  {spec.name} ({effects})  {spec.description}"))
+                log.write(
+                    Text.from_markup(
+                        f"  [bold]{spec.name}[/]  [{t.dim_text}]({effects})[/]  {spec.description}"
+                    )
+                )
             return
         elif stripped.lower() == "/policy":
             sc = self._config.safety
-            log.write(Text("Safety Policy", style="bold"))
-            for line in [
-                f"  read_only: {sc.read_only}",
-                f"  require_approval_for_writes: {sc.require_approval_for_writes}",
-                f"  require_approval_for_execute: {sc.require_approval_for_execute}",
-                f"  sandbox: {sc.sandbox}",
-            ]:
-                log.write(Text(line))
+            t = Table(title="Safety Policy", show_header=True, header_style="bold")
+            t.add_column("Setting", style="bold")
+            t.add_column("Value")
+            t.add_row("read_only", "[red]yes[/]" if sc.read_only else "[green]no[/]")
+            t.add_row(
+                "require_approval_for_writes",
+                "[yellow]yes[/]" if sc.require_approval_for_writes else "[green]no[/]",
+            )
+            t.add_row(
+                "require_approval_for_execute",
+                "[yellow]yes[/]" if sc.require_approval_for_execute else "[green]no[/]",
+            )
+            t.add_row("sandbox", sc.sandbox)
+            t.add_row("log_all_commands", "yes" if sc.log_all_commands else "no")
+            allowed = (
+                ", ".join(sc.allowed_paths) if sc.allowed_paths else "[dim]all (no whitelist)[/]"
+            )
+            t.add_row("allowed_paths", allowed)
+            t.add_row("denied_paths", f"[dim]{len(sc.denied_paths)} patterns[/]")
+            log.write(t)
             return
         elif stripped.lower() == "/clear":
             self.action_clear_screen()
             return
         elif stripped.lower().startswith("/theme"):
             parts = stripped.split(maxsplit=1)
+            t = self._renderer.theme
             if len(parts) == 1:
-                log.write(
-                    Text(
-                        f"Current theme: {self._renderer.theme.name}",
-                        style=self._renderer.theme.dim_text,
-                    )
-                )
+                log.write(Text.from_markup(f"[{t.dim_text}]Current theme:[/] [bold]{t.name}[/]"))
                 for tname in self._theme_registry.list_names():
-                    marker = " *" if tname == self._renderer.theme.name else ""
-                    log.write(Text(f"  {tname}{marker}", style=self._renderer.theme.dim_text))
+                    marker = " *" if tname == t.name else ""
+                    log.write(Text.from_markup(f"  [{t.dim_text}]{tname}{marker}[/]"))
             else:
                 arg = parts[1].strip()
                 if arg == "next":
@@ -839,7 +1098,7 @@ class AarFixedApp(App):
                         log.write(
                             Text(
                                 f"Unknown theme: {arg}",
-                                style=self._renderer.theme.error.border_style,
+                                style=t.error.border_style,
                             )
                         )
             return
@@ -847,7 +1106,7 @@ class AarFixedApp(App):
             self._renderer.toggle_thinking()
             return
         elif stripped.lower() == "/copy":
-            self.action_copy_block()
+            self._do_copy_selected()
             return
 
         # --- Parse multimodal attachments --------------------------------
@@ -869,7 +1128,7 @@ class AarFixedApp(App):
                     )
                 )
 
-        # --- Run agent ---------------------------------------------------
+        # --- Run agent (in worker so the UI event loop stays responsive) ---
         header.state = "running"
         header.refresh()
         inp.placeholder = "working..."
@@ -877,14 +1136,46 @@ class AarFixedApp(App):
         # Re-enable auto-scroll when starting agent work
         log.auto_scroll = True
 
-        self._session = await self._agent.run(content, self._session)
+        self._run_agent_worker(content)
 
+    def _run_agent_worker(self, content: object) -> None:
+        """Launch the agent in a Textual worker so the event loop stays free."""
+
+        async def _do_run() -> Session:
+            return await self._agent.run(content, self._session)
+
+        self.run_worker(_do_run(), exclusive=True, name="agent-run")
+
+    def on_worker_state_changed(self, event: object) -> None:
+        """Handle agent worker completion."""
+        worker = getattr(event, "worker", None)
+        if worker is None or getattr(worker, "name", "") != "agent-run":
+            return
+
+        from textual.worker import WorkerState
+
+        if worker.state != WorkerState.SUCCESS:
+            # Worker cancelled or errored — re-enable input
+            if worker.state == WorkerState.ERROR:
+                try:
+                    log = self.query_one("#body-log", SelectableRichLog)
+                    err_msg = str(worker.error) if worker.error else "Agent run failed"
+                    log.write(Text(f"Error: {err_msg}", style=self._theme.error.border_style))
+                except Exception:
+                    pass
+            self._restore_input()
+            return
+
+        session = worker.result
+        if session is None:
+            self._restore_input()
+            return
+
+        self._session = session
+        header = self.query_one(HeaderBar)
         header.state = self._session.state.value
         header.session_id = self._session.session_id
         header.refresh()
-        inp.placeholder = "> type your message..."
-        inp.disabled = False
-        inp.focus()
 
         # Handle recoverable errors
         if self._session.state == AgentState.ERROR:
@@ -898,6 +1189,17 @@ class AarFixedApp(App):
                 header.refresh()
 
         self._store.save(self._session)
+        self._restore_input()
+
+    def _restore_input(self) -> None:
+        """Re-enable the input widget after the agent finishes."""
+        try:
+            inp = self.query_one("#user-input", HistoryInput)
+            inp.placeholder = "> type your message..."
+            inp.disabled = False
+            inp.focus()
+        except Exception:
+            pass
 
     def on_unmount(self) -> None:
         if self._session:

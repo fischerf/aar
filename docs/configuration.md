@@ -259,7 +259,7 @@ aar tui --fixed                 # full-screen mode with fixed bars, scrollable b
 aar tui --fixed --theme decker  # fixed mode with a specific theme
 ```
 
-Fixed mode includes keyboard shortcuts: **Ctrl+T** (cycle theme), **Ctrl+K** (toggle thinking), **Ctrl+L** (clear), **Ctrl+Y** (copy block), **↑/↓** (input history). See [Themes & Layout](themes.md) for the full list.
+Fixed mode includes keyboard shortcuts: **Ctrl+T** (cycle theme), **Ctrl+K** (toggle thinking), **Ctrl+L** (clear), **Ctrl+Y** (copy raw text), **↑/↓** (input history), left-click to select a block, right-click to copy. Use `/quit` to exit. See [Themes & Layout](themes.md) for the full list.
 
 **At runtime** (inside the TUI):
 

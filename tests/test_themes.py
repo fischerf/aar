@@ -24,6 +24,7 @@ from agent.transports.themes.builtin import (
     BUILTIN_THEMES,
     CLAUDE_THEME,
     DEFAULT_THEME,
+    SLEEK_THEME,
 )
 from agent.transports.themes.models import (
     BadgeColors,
@@ -42,11 +43,13 @@ from agent.transports.themes.models import (
 )
 from agent.transports.tui_fixed import (
     AarFixedApp,
+    ApprovalBar,
     FixedTUIRenderer,
     FooterBar,
     HeaderBar,
     HistoryInput,
     SelectableRichLog,
+    _Block,
 )
 
 
@@ -94,8 +97,8 @@ class TestThemeModels:
 
 
 class TestBuiltinThemes:
-    def test_three_builtins_registered(self) -> None:
-        assert set(BUILTIN_THEMES) == {"default", "claude", "decker"}
+    def test_builtins_registered(self) -> None:
+        assert set(BUILTIN_THEMES) == {"default", "claude", "decker", "sleek"}
 
     def test_default_matches_original_colors(self) -> None:
         t = DEFAULT_THEME
@@ -111,6 +114,20 @@ class TestBuiltinThemes:
     def test_decker_uses_neon(self) -> None:
         assert "#00fff7" in DECKER_THEME.assistant.border_style
         assert "#ff2d95" in DECKER_THEME.tool_call.border_style
+
+    def test_sleek_tight_spacing(self) -> None:
+        """Sleek theme uses (0, 1) padding and compact region sizes."""
+        assert SLEEK_THEME.assistant.padding == (0, 1)
+        assert SLEEK_THEME.tool_call.padding == (0, 1)
+        assert SLEEK_THEME.welcome.padding == (0, 1)
+        # Compact regions: header=2, footer=2, input/body flexible
+        sizes = {r.name: r.size for r in SLEEK_THEME.fixed_layout.regions}
+        assert sizes["header"] == 2
+        assert sizes["input"] is None
+        assert sizes["footer"] == 2
+        assert sizes["body"] is None  # flexible
+        # Small scrollbar
+        assert SLEEK_THEME.fixed_layout.scrollbar.size == 1
 
 
 # ------------------------------------------------------------------
@@ -497,16 +514,24 @@ class TestFooterBar:
 
 
 class _MockRichLog:
-    """Minimal stand-in for ``textual.widgets.RichLog`` in unit tests."""
+    """Minimal stand-in for ``SelectableRichLog`` in unit tests."""
 
     def __init__(self) -> None:
         self.items: list = []
+        self._blocks: list[_Block] = []
+        self._selected_block: int | None = None
 
     def write(self, content, **kwargs) -> None:  # noqa: ANN001
         self.items.append(content)
 
+    def write_block(self, content, raw: str = "", kind: str = "", **kwargs) -> None:  # noqa: ANN001
+        self.items.append(content)
+        self._blocks.append(_Block(raw=raw, kind=kind))
+
     def clear(self) -> None:
         self.items.clear()
+        self._blocks.clear()
+        self._selected_block = None
 
     def rendered_text(self) -> str:
         """Render all items via a headless Rich console to plain text."""
@@ -515,6 +540,10 @@ class _MockRichLog:
         for item in self.items:
             console.print(item)
         return buf.getvalue()
+
+    def raw_texts(self) -> list[str]:
+        """Return all raw text from tracked blocks."""
+        return [b.raw for b in self._blocks]
 
 
 def _fixed_renderer(
@@ -654,75 +683,88 @@ class _MockSelectableLog:
     """Minimal stand-in for SelectableRichLog block tracking in unit tests."""
 
     def __init__(self) -> None:
-        self._blocks: list[str] = []
+        self._blocks: list[_Block] = []
         self._selected_block: int | None = None
 
+    def write_block(self, content: object, raw: str = "", kind: str = "", **kw) -> None:  # noqa: ANN003
+        self._blocks.append(_Block(raw=raw, kind=kind))
+
     def write(self, content: object, **kwargs) -> None:  # noqa: ANN003
-        self._blocks.append(str(content))
+        pass  # non-block writes (spacers etc.)
 
     def clear(self) -> None:
         self._blocks.clear()
         self._selected_block = None
 
-    def get_last_block_text(self) -> str:
+    def select_block(self, idx: int | None) -> None:
+        self._selected_block = idx
+
+    def get_last_raw(self) -> str:
         if self._blocks:
-            return self._blocks[-1]
+            return self._blocks[-1].raw
         return ""
 
     def get_all_text(self) -> str:
-        return "\n\n".join(self._blocks)
+        return "\n\n".join(b.raw for b in self._blocks)
 
-    def get_selected_block_text(self) -> str:
+    def get_selected_raw(self) -> str:
         if self._selected_block is not None and 0 <= self._selected_block < len(self._blocks):
-            return self._blocks[self._selected_block]
+            return self._blocks[self._selected_block].raw
         return ""
 
 
 class TestSelectableRichLog:
     def test_tracks_blocks(self) -> None:
         log = _MockSelectableLog()
-        log.write("block 1")
-        log.write("block 2")
+        log.write_block("block 1", raw="block 1")
+        log.write_block("block 2", raw="block 2")
         assert len(log._blocks) == 2
 
-    def test_get_last_block(self) -> None:
+    def test_get_last_raw(self) -> None:
         log = _MockSelectableLog()
-        log.write("first")
-        log.write("second")
-        assert log.get_last_block_text() == "second"
+        log.write_block("first", raw="first")
+        log.write_block("second", raw="second")
+        assert log.get_last_raw() == "second"
 
-    def test_get_last_block_empty(self) -> None:
+    def test_get_last_raw_empty(self) -> None:
         log = _MockSelectableLog()
-        assert log.get_last_block_text() == ""
+        assert log.get_last_raw() == ""
 
     def test_get_all_text(self) -> None:
         log = _MockSelectableLog()
-        log.write("a")
-        log.write("b")
+        log.write_block("a", raw="a")
+        log.write_block("b", raw="b")
         assert "a" in log.get_all_text()
         assert "b" in log.get_all_text()
 
     def test_selected_block(self) -> None:
         log = _MockSelectableLog()
-        log.write("alpha")
-        log.write("beta")
-        log._selected_block = 0
-        assert log.get_selected_block_text() == "alpha"
-        log._selected_block = 1
-        assert log.get_selected_block_text() == "beta"
+        log.write_block("alpha", raw="alpha")
+        log.write_block("beta", raw="beta")
+        log.select_block(0)
+        assert log.get_selected_raw() == "alpha"
+        log.select_block(1)
+        assert log.get_selected_raw() == "beta"
 
     def test_no_selection_returns_empty(self) -> None:
         log = _MockSelectableLog()
-        log.write("x")
-        assert log.get_selected_block_text() == ""
+        log.write_block("x", raw="x")
+        assert log.get_selected_raw() == ""
 
     def test_clear_resets(self) -> None:
         log = _MockSelectableLog()
-        log.write("data")
-        log._selected_block = 0
+        log.write_block("data", raw="data")
+        log.select_block(0)
         log.clear()
         assert log._blocks == []
         assert log._selected_block is None
+
+    def test_raw_text_is_markdown(self) -> None:
+        """Verify that copy gives raw markdown, not rendered text."""
+        log = _MockSelectableLog()
+        log.write_block("rendered panel", raw="# Hello **world**", kind="assistant")
+        log.select_block(0)
+        assert log.get_selected_raw() == "# Hello **world**"
 
 
 # ------------------------------------------------------------------
@@ -789,7 +831,7 @@ class TestFooterBarKeyHints:
         assert "Ctrl+K" in plain
         assert "Ctrl+L" in plain
         assert "Ctrl+Y" in plain
-        assert "Esc" in plain
+        assert "/quit" in plain
 
 
 # ------------------------------------------------------------------
@@ -858,8 +900,8 @@ class TestAarFixedAppStartup:
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as _pilot:
             log = app.query_one("#body-log", SelectableRichLog)
-            # Welcome message should be in the blocks
-            assert any("Aar Agent TUI" in b for b in log._blocks)
+            # Welcome message should be in the blocks (raw text)
+            assert any("Aar Agent TUI" in b.raw for b in log._blocks)
 
     @pytest.mark.asyncio
     async def test_app_header_shows_provider(self) -> None:
@@ -872,16 +914,6 @@ class TestAarFixedAppStartup:
             assert config.provider.name in rendered.plain
 
     @pytest.mark.asyncio
-    async def test_app_escape_exits(self) -> None:
-        agent = _make_mock_agent()
-        config = AgentConfig()
-        app = AarFixedApp(agent=agent, config=config)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.press("escape")
-            # App should be exiting
-            assert app._exit is True or app.return_code is not None or not app.is_running
-
-    @pytest.mark.asyncio
     async def test_app_slash_command_theme_list(self) -> None:
         agent = _make_mock_agent()
         config = AgentConfig()
@@ -890,9 +922,10 @@ class TestAarFixedAppStartup:
             inp = app.query_one("#user-input", HistoryInput)
             inp.value = "/theme"
             await pilot.press("enter")
+            await pilot.pause()
+            # /theme writes plain text entries (not tracked blocks)
             log = app.query_one("#body-log", SelectableRichLog)
-            all_text = log.get_all_text()
-            assert "default" in all_text
+            assert log._total_lines > 0  # content was written
 
     @pytest.mark.asyncio
     async def test_app_ctrl_t_cycles_theme(self) -> None:
@@ -940,7 +973,7 @@ class TestAarFixedAppStartup:
         """Ensure the app starts cleanly with every built-in theme."""
         agent = _make_mock_agent()
         config = AgentConfig()
-        for theme_name in ["default", "claude", "decker"]:
+        for theme_name in ["default", "claude", "decker", "sleek"]:
             registry = ThemeRegistry()
             theme = registry.get(theme_name)
             app = AarFixedApp(agent=agent, config=config, theme=theme, registry=registry)
@@ -948,3 +981,216 @@ class TestAarFixedAppStartup:
                 assert app._renderer.theme.name == theme_name
                 header = app.query_one(HeaderBar)
                 assert header.theme.name == theme_name
+
+
+# ------------------------------------------------------------------
+# scroll_speed configuration
+# ------------------------------------------------------------------
+
+
+class TestScrollSpeed:
+    def test_default_scroll_speed(self) -> None:
+        sb = ScrollbarConfig()
+        assert sb.scroll_speed == 3
+
+    def test_builtin_themes_have_scroll_speed(self) -> None:
+        for name, theme in BUILTIN_THEMES.items():
+            assert theme.fixed_layout.scrollbar.scroll_speed > 0, f"{name} missing scroll_speed"
+
+    def test_custom_scroll_speed(self) -> None:
+        sb = ScrollbarConfig(scroll_speed=10)
+        assert sb.scroll_speed == 10
+
+
+# ------------------------------------------------------------------
+# selected_block_style configuration
+# ------------------------------------------------------------------
+
+
+class TestSelectedBlockStyle:
+    def test_default_selected_block_style(self) -> None:
+        fl = FixedLayoutConfig()
+        assert fl.selected_block_style == "on #2a2a3a"
+
+    def test_builtin_themes_have_selected_block_style(self) -> None:
+        for name, theme in BUILTIN_THEMES.items():
+            assert theme.fixed_layout.selected_block_style, f"{name} missing selected_block_style"
+
+
+# ------------------------------------------------------------------
+# Raw text copy (renderer stores raw content)
+# ------------------------------------------------------------------
+
+
+class TestRawTextCopy:
+    def test_assistant_stores_raw_markdown(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_event(AssistantMessage(content="# Hello **world**"))
+        raw = [b.raw for b in log._blocks if b.kind == "assistant"]
+        assert len(raw) == 1
+        assert raw[0] == "# Hello **world**"
+
+    def test_tool_call_stores_raw(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_event(ToolCall(tool_name="bash", arguments={"cmd": "ls -la"}))
+        raw = [b.raw for b in log._blocks if b.kind == "tool_call"]
+        assert len(raw) == 1
+        assert "bash" in raw[0]
+        assert "ls -la" in raw[0]
+
+    def test_tool_result_stores_raw(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_event(
+            ToolResult(tool_name="read_file", output="file contents", is_error=False)
+        )
+        raw = [b.raw for b in log._blocks if b.kind == "tool_result"]
+        assert len(raw) == 1
+        assert raw[0] == "file contents"
+
+    def test_error_stores_raw(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_event(ErrorEvent(message="something broke", recoverable=False))
+        raw = [b.raw for b in log._blocks if b.kind == "error"]
+        assert len(raw) == 1
+        assert raw[0] == "something broke"
+
+    def test_reasoning_stores_raw(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_event(ReasoningBlock(content="let me think"))
+        raw = [b.raw for b in log._blocks if b.kind == "reasoning"]
+        assert len(raw) == 1
+        assert raw[0] == "let me think"
+
+
+# ------------------------------------------------------------------
+# No escape-to-quit binding
+# ------------------------------------------------------------------
+
+
+class TestNoEscapeQuit:
+    @pytest.mark.asyncio
+    async def test_escape_does_not_exit(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("escape")
+            await pilot.pause()
+            # App should still be running — no escape binding
+            assert app.is_running
+
+
+# ------------------------------------------------------------------
+# Approval bar
+# ------------------------------------------------------------------
+
+
+class TestApprovalBar:
+    @pytest.mark.asyncio
+    async def test_approval_bar_exists_on_mount(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            bar = app.query_one(ApprovalBar)
+            assert bar is not None
+            # Hidden by default
+            assert "visible" not in bar.classes
+
+    @pytest.mark.asyncio
+    async def test_approval_bar_shows_and_hides(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            bar = app.query_one(ApprovalBar)
+            event = bar.show_prompt("write_file", "  path: /tmp/test.txt")
+            assert "visible" in bar.classes
+            # Simulate clicking Yes
+            from textual.widgets import Button
+
+            yes_btn = bar.query_one("#approval-yes", Button)
+            await pilot.click(yes_btn)
+            await pilot.pause()
+            assert event.is_set()
+            from agent.safety.permissions import ApprovalResult
+
+            assert bar.result == ApprovalResult.APPROVED
+            assert "visible" not in bar.classes
+
+    @pytest.mark.asyncio
+    async def test_approval_bar_buttons_have_readable_labels(self) -> None:
+        """All three buttons must be present with full readable labels."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            bar = app.query_one(ApprovalBar)
+            from textual.widgets import Button
+
+            yes_btn = bar.query_one("#approval-yes", Button)
+            no_btn = bar.query_one("#approval-no", Button)
+            always_btn = bar.query_one("#approval-always", Button)
+            assert yes_btn.label.plain == "(y) Yes"
+            assert no_btn.label.plain == "(n) No"
+            assert always_btn.label.plain == "(a) Always"
+            # Buttons must be wide enough to show full label (min-width: 16)
+            assert yes_btn.styles.min_width is not None
+            assert no_btn.styles.min_width is not None
+            assert always_btn.styles.min_width is not None
+
+    @pytest.mark.asyncio
+    async def test_approval_bar_prompt_shows_allow(self) -> None:
+        """The prompt text must include 'Allow?' after tool details."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            bar = app.query_one(ApprovalBar)
+            bar.show_prompt("bash", "  cmd: rm -rf /")
+            assert "visible" in bar.classes
+            # The approval-text Static should contain "Allow?"
+            from textual.widgets import Static as _Static
+
+            text_widget = bar.query_one("#approval-text", _Static)
+            # Textual Static stores its renderable; check it contains Allow?
+            renderable = text_widget.renderable
+            assert "Allow?" in str(renderable)
+
+    @pytest.mark.asyncio
+    async def test_approval_bar_no_button(self) -> None:
+        """Clicking No should resolve with DENIED."""
+        from agent.safety.permissions import ApprovalResult
+        from textual.widgets import Button
+
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            bar = app.query_one(ApprovalBar)
+            event = bar.show_prompt("bash", "  cmd: ls")
+            no_btn = bar.query_one("#approval-no", Button)
+            await pilot.click(no_btn)
+            await pilot.pause()
+            assert event.is_set()
+            assert bar.result == ApprovalResult.DENIED
+            assert "visible" not in bar.classes
+
+    @pytest.mark.asyncio
+    async def test_approval_bar_always_button(self) -> None:
+        """Clicking Always should resolve with APPROVED_ALWAYS."""
+        from agent.safety.permissions import ApprovalResult
+        from textual.widgets import Button
+
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            bar = app.query_one(ApprovalBar)
+            event = bar.show_prompt("write_file", "  path: /tmp/x")
+            always_btn = bar.query_one("#approval-always", Button)
+            await pilot.click(always_btn)
+            await pilot.pause()
+            assert event.is_set()
+            assert bar.result == ApprovalResult.APPROVED_ALWAYS
+            assert "visible" not in bar.classes

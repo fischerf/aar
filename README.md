@@ -95,7 +95,8 @@ aar tools
 aar tui
 
 # Full-screen TUI with fixed bars, scrollable body, mouse support
-# Shortcuts: Ctrl+T theme, Ctrl+K thinking, Ctrl+L clear, Ctrl+Y copy, ↑/↓ history
+# Shortcuts: Ctrl+T theme, Ctrl+K think, Ctrl+L clear, Ctrl+Y copy, ↑/↓ history
+# Left-click selects a block, right-click copies it. /quit to exit.
 aar tui --fixed
 aar tui --fixed --theme decker
 

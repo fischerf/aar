@@ -1,6 +1,6 @@
 {
   "name": "midnight",
-  "description": "Deep blue midnight with gold accents — all fields shown",
+  "description": "Deep blue midnight with gold accents — all fields shown (tui + tui --fixed)",
 
   "assistant": {
     "title_style": "bold #e0c097",
@@ -50,5 +50,46 @@
     "execute": "#e05561",
     "network": "#7ec49d",
     "external": "#c678dd"
+  },
+
+  "header": {
+    "background": "on #0d1117",
+    "text_style": "bold #e0c097",
+    "separator_style": "#5c6370",
+    "provider_style": "bold #7ec49d",
+    "tokens_style": "#6a8caf",
+    "session_style": "#5c6370",
+    "state_style": "bold #e0c097"
+  },
+  "footer": {
+    "background": "on #0d1117",
+    "text_style": "bold #e0c097",
+    "separator_style": "#5c6370",
+    "step_style": "#6a8caf",
+    "theme_style": "#c678dd",
+    "input_style": "bold #e0c097"
+  },
+
+  "fixed_layout": {
+    "regions": [
+      { "name": "header", "size": 3 },
+      { "name": "body", "size": null },
+      { "name": "input", "size": 3 },
+      { "name": "footer", "size": 3 }
+    ],
+    "body_background": "#0d1117",
+    "input_background": "#161b22",
+    "selected_block_style": "on #1f2937",
+    "scrollbar": {
+      "enabled": true,
+      "color": "#6a8caf",
+      "color_hover": "#e0c097",
+      "color_active": "#7ec49d",
+      "background": "#0d1117",
+      "background_hover": "#161b22",
+      "background_active": "#161b22",
+      "size": 2,
+      "scroll_speed": 3
+    }
   }
 }

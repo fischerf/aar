@@ -47,7 +47,7 @@ The `--theme` CLI flag overrides the config file, and `/theme` commands override
 Run `aar init` to set up `~/.aar/themes/` with:
 
 - **`example.json`** — a full template (copy of the decker theme) ready to rename and edit
-- **`theme.schema.json`** — the JSON schema for editor autocompletion
+- **`theme.schema.template`** — the JSON schema template for editor autocompletion
 
 Create a JSON file at `~/.aar/themes/<name>.json`. You only need to include the fields you want to override — everything else falls back to defaults.
 
@@ -259,12 +259,13 @@ Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io
 
 ### Features
 
-- **Scrollable body** with visual scrollbars
+- **Scrollable body** with visual scrollbars and configurable scroll speed
 - **Mouse wheel** scrolling (non-blocking — scroll while the LLM is working)
 - **Page Up / Page Down** keyboard scrolling
 - **Input widget** with full terminal input support (cursor, backspace, selection)
 - **Command history** — press **↑ / ↓** to cycle through previous inputs
-- **Block selection & copy** — click a block to select it, then **Ctrl+Y** to copy to clipboard
+- **Block selection** — left-click a block to highlight it; right-click to copy raw text and deselect
+- **Ctrl+Y** copies the selected (or last) block's raw text (markdown) to clipboard
 - **Fixed header** showing provider/model, token counts, session ID, agent state, thinking status
 - **Fixed footer** showing step count, theme name, and keyboard shortcut hints
 - **Configurable layout** — reorder, resize, or hide regions per theme
@@ -273,13 +274,14 @@ Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io
 
 | Shortcut | Action |
 |----------|--------|
-| **Escape** | Quit |
 | **Ctrl+T** | Cycle to next theme |
 | **Ctrl+K** | Toggle thinking/reasoning display |
 | **Ctrl+L** | Clear screen and reset counters |
-| **Ctrl+Y** | Copy selected (or last) block to clipboard |
+| **Ctrl+Y** | Copy selected (or last) block's raw text to clipboard |
 | **Page Up / Page Down** | Scroll the conversation body |
 | **↑ / ↓** (in input) | Navigate command history |
+| **Left click** (body) | Select/highlight a block |
+| **Right click** (body) | Copy selected block and deselect |
 
 ### Slash commands
 
@@ -314,7 +316,7 @@ All commands from the scrollable TUI also work in fixed mode:
 | > type your message... (↑/↓ for history)                                |
 +────────────────────────────────────────────────────────────────────────+
 | Footer bar (fixed)                                                      |
-| step: 5 | theme: claude | Esc quit  Ctrl+T theme  Ctrl+K think  ...    |
+| step: 5 | theme: claude | Ctrl+T theme  Ctrl+K think  Ctrl+Y copy ...  |
 +------------------------------------------------------------------------+
 ```
 
@@ -359,6 +361,7 @@ The `fixed_layout` section in a theme controls the full-screen TUI's region orde
     ],
     "body_background": "#0e0e0e",
     "input_background": "#111118",
+    "selected_block_style": "on #2a2a3a",
     "scrollbar": {
       "enabled": true,
       "color": "#444444",
@@ -367,7 +370,8 @@ The `fixed_layout` section in a theme controls the full-screen TUI's region orde
       "background": "#1a1a1a",
       "background_hover": "#222222",
       "background_active": "#222222",
-      "size": 2
+      "size": 2,
+      "scroll_speed": 3
     }
   }
 }
@@ -409,6 +413,14 @@ Or hide the header entirely:
 }
 ```
 
+#### Body styles
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `body_background` | string | Background color for the scrollable body region |
+| `input_background` | string | Background color for the input widget |
+| `selected_block_style` | string | Rich style applied to the selected block highlight (default: `on #2a2a3a`) |
+
 #### Scrollbar
 
 | Field | Type | Description |
@@ -421,6 +433,7 @@ Or hide the header entirely:
 | `background_hover` | string | Track color on hover |
 | `background_active` | string | Track color while dragging |
 | `size` | int | Scrollbar width in characters |
+| `scroll_speed` | int | Lines per scroll tick — mouse wheel and PgUp/PgDn (default: `3`) |
 
 Header/footer styles and fixed_layout are all optional — if omitted, the defaults are used.
 
@@ -431,6 +444,22 @@ When Aar looks up a theme name, it checks in order:
 1. Built-in themes (`default`, `claude`, `decker`)
 2. User themes at `~/.aar/themes/<name>.json`
 3. Direct file path (absolute or relative)
+
+## Theme compatibility: `aar tui` vs `aar tui --fixed`
+
+Theme files are shared between the scrollable TUI (`aar tui`) and the full-screen fixed TUI (`aar tui --fixed`), but each mode uses different subsets of the theme:
+
+| Theme section | `aar tui` (scrollable) | `aar tui --fixed` (full-screen) |
+|---------------|:----------------------:|:-------------------------------:|
+| Panel styles (`assistant`, `tool_call`, etc.) | yes | yes |
+| Text styles (`prompt_style`, `dim_text`, etc.) | yes | yes |
+| Badge colors | yes | yes |
+| `header` / `footer` bar styles | no | yes |
+| `fixed_layout` (regions, scrollbar, backgrounds) | no | yes |
+
+A theme designed for `aar tui` will work in `--fixed` mode — the `header`, `footer`, and `fixed_layout` fields simply fall back to defaults. Conversely, a theme with `fixed_layout` works in scrollable mode — those fields are silently ignored.
+
+To create a theme that looks great in both modes, include all sections. See `data/themes/example_full.json` for a complete template.
 
 ## Tips
 

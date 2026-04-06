@@ -120,6 +120,7 @@ class ScrollbarConfig(BaseModel):
     background_hover: str = "#222222"
     background_active: str = "#222222"
     size: int = 2
+    scroll_speed: int = 3  # lines per scroll tick (mouse wheel / PgUp / PgDn)
 
 
 class FixedLayoutConfig(BaseModel):
@@ -138,6 +139,7 @@ class FixedLayoutConfig(BaseModel):
     )
     body_background: str = "#0e0e0e"
     input_background: str = "#111118"
+    selected_block_style: str = "on #2a2a3a"  # highlight color for selected blocks
     scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
 
 

@@ -819,7 +819,7 @@ def init(
 
     theme_schema = Theme.model_json_schema()
 
-    _USER_THEME_SCHEMA = _USER_THEMES_DIR / "theme.schema.json"
+    _USER_THEME_SCHEMA = _USER_THEMES_DIR / "theme.schema.template"
 
     created: list[str] = []
     skipped: list[str] = []
