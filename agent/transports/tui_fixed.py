@@ -214,9 +214,9 @@ class ApprovalBar(Static):
     def compose(self) -> ComposeResult:  # type: ignore[override]
         yield Static("", id="approval-text")
         with Horizontal(classes="approval-buttons"):
-            yield Button("(y) Yes", id="approval-yes", variant="success")
-            yield Button("(n) No", id="approval-no", variant="error")
-            yield Button("(a) Always", id="approval-always", variant="warning")
+            yield Button("(y) Yes", id="approval-yes", flat=True, variant="success")
+            yield Button("(n) No", id="approval-no", flat=True, variant="error")
+            yield Button("(a) Always", id="approval-always", flat=True, variant="warning")
 
     def show_prompt(self, tool_name: str, args_text: str) -> asyncio.Event:
         """Display an approval prompt. Returns an asyncio.Event that is set when answered."""
