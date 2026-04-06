@@ -97,6 +97,49 @@ class Theme(BaseModel):
     header: HeaderStyle = Field(default_factory=HeaderStyle)
     footer: FooterStyle = Field(default_factory=FooterStyle)
 
+    # Full-screen fixed layout (used by tui_fixed mode)
+    fixed_layout: FixedLayoutConfig = Field(default_factory=lambda: FixedLayoutConfig())
+
+
+class FixedLayoutRegion(BaseModel):
+    """A single region in the fixed TUI layout."""
+
+    name: str
+    size: int | None = None  # None = flexible (fills remaining space)
+    visible: bool = True
+
+
+class ScrollbarConfig(BaseModel):
+    """Scrollbar appearance for the fixed TUI body region."""
+
+    enabled: bool = True
+    color: str = "#444444"
+    color_hover: str = "#666666"
+    color_active: str = "#888888"
+    background: str = "#1a1a1a"
+    background_hover: str = "#222222"
+    background_active: str = "#222222"
+    size: int = 2
+
+
+class FixedLayoutConfig(BaseModel):
+    """Layout configuration for the full-screen fixed TUI.
+
+    Controls region order, sizes, scrollbar appearance, and body background.
+    """
+
+    regions: list[FixedLayoutRegion] = Field(
+        default_factory=lambda: [
+            FixedLayoutRegion(name="header", size=3),
+            FixedLayoutRegion(name="body"),
+            FixedLayoutRegion(name="input", size=3),
+            FixedLayoutRegion(name="footer", size=3),
+        ]
+    )
+    body_background: str = "#0e0e0e"
+    input_background: str = "#111118"
+    scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
+
 
 class SectionConfig(BaseModel):
     """Visibility and ordering for a single TUI section."""

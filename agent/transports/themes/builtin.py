@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from agent.transports.themes.models import BadgeColors, FooterStyle, HeaderStyle, PanelStyle, Theme
+from agent.transports.themes.models import (
+    BadgeColors,
+    FixedLayoutConfig,
+    FooterStyle,
+    HeaderStyle,
+    PanelStyle,
+    ScrollbarConfig,
+    Theme,
+)
 
 # ---------------------------------------------------------------------------
 # default — matches the original hardcoded TUI styles exactly
@@ -73,6 +81,16 @@ DEFAULT_THEME = Theme(
         step_style="dim cyan",
         theme_style="dim magenta",
         input_style="bold blue",
+    ),
+    fixed_layout=FixedLayoutConfig(
+        body_background="#0e0e0e",
+        input_background="#111118",
+        scrollbar=ScrollbarConfig(
+            color="#444444",
+            color_hover="#666666",
+            color_active="#888888",
+            background="#1a1a1a",
+        ),
     ),
 )
 
@@ -146,6 +164,16 @@ CLAUDE_THEME = Theme(
         theme_style="#5a5a6e",
         input_style="bold #d4a574",
     ),
+    fixed_layout=FixedLayoutConfig(
+        body_background="#1e1b16",
+        input_background="#2d2a24",
+        scrollbar=ScrollbarConfig(
+            color="#5a5a6e",
+            color_hover="#7b8794",
+            color_active="#d4a574",
+            background="#2d2a24",
+        ),
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -217,6 +245,16 @@ DECKER_THEME = Theme(
         step_style="#ff6e27",
         theme_style="#9d00ff",
         input_style="bold #00fff7",
+    ),
+    fixed_layout=FixedLayoutConfig(
+        body_background="#050510",
+        input_background="#0a0a1a",
+        scrollbar=ScrollbarConfig(
+            color="#9d00ff",
+            color_hover="#ff2d95",
+            color_active="#00fff7",
+            background="#0a0a1a",
+        ),
     ),
 )
 

@@ -670,7 +670,7 @@ def tui(
     fixed: bool = typer.Option(
         False,
         "--fixed",
-        help="Use full-screen mode with fixed header/footer status bars",
+        help="Full-screen mode with fixed bars, scrollable body, and mouse support (requires textual)",
     ),
 ) -> None:
     """Launch the rich TUI interface."""

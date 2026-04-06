@@ -30,6 +30,9 @@ pip install "aar-agent[generic]"
 # With MCP support
 pip install "aar-agent[ollama,mcp]"
 
+# Full-screen TUI with fixed bars (requires textual)
+pip install "aar-agent[tui-fixed]"
+
 # Core only (no LLM provider)
 pip install aar-agent
 ```
@@ -91,7 +94,7 @@ aar tools
 # Launch the rich TUI
 aar tui
 
-# Full-screen TUI with fixed header/footer status bars
+# Full-screen TUI with fixed bars, scrollable body, mouse support
 aar tui --fixed
 aar tui --fixed --theme decker
 

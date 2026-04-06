@@ -6,9 +6,24 @@ import json
 from pathlib import Path
 
 from agent.transports.themes.builtin import BUILTIN_THEMES
-from agent.transports.themes.models import FooterStyle, HeaderStyle, LayoutConfig, Theme
+from agent.transports.themes.models import (
+    FixedLayoutConfig,
+    FooterStyle,
+    HeaderStyle,
+    LayoutConfig,
+    ScrollbarConfig,
+    Theme,
+)
 
-__all__ = ["FooterStyle", "HeaderStyle", "LayoutConfig", "Theme", "ThemeRegistry"]
+__all__ = [
+    "FixedLayoutConfig",
+    "FooterStyle",
+    "HeaderStyle",
+    "LayoutConfig",
+    "ScrollbarConfig",
+    "Theme",
+    "ThemeRegistry",
+]
 
 
 class ThemeRegistry:

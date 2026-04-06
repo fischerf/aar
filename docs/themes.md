@@ -247,31 +247,45 @@ Extensions can register custom panels. Control their visibility via the `extensi
 
 ## Full-screen mode (fixed bars)
 
-Pass `--fixed` to launch the TUI with a persistent header and footer bar:
+Pass `--fixed` to launch the TUI with a persistent header and footer bar, scrollable body with scrollbars, mouse support, and a proper input widget:
 
 ```bash
+pip install "aar-agent[tui-fixed]"    # install textual dependency
 aar tui --fixed
 aar tui --fixed --theme claude --verbose
 ```
+
+Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io)).
+
+### Features
+
+- **Scrollable body** with visual scrollbars
+- **Mouse wheel** scrolling
+- **Page Up / Page Down** keyboard scrolling
+- **Input widget** with full terminal input support (cursor, backspace, selection)
+- **Fixed header** showing provider/model, token counts, session ID, agent state
+- **Fixed footer** showing step count and theme name
+- **Configurable layout** — reorder, resize, or hide regions per theme
+- **Escape** to quit
 
 ### Layout
 
 ```
 +------------------------------------------------------------------+
-| Header bar (fixed, 2 lines)                                      |
+| Header bar (fixed)                                                |
 | provider: ollama / llama3 | tokens: 1234in/567out | session: abc |
-+------------------------------------------------------------------+
-|                                                                   |
-| Scrollable conversation body                                      |
-| (assistant messages, tool calls, results, reasoning, errors)      |
-|                                                                   |
-+------------------------------------------------------------------+
-| Footer bar (fixed, 2 lines)                                      |
-| step: 5 | theme: claude | working...                             |
++──────────────────────────────────────────────────────────────────+
+|                                                                  ┃|
+| Scrollable conversation body (with scrollbar)                    ┃|
+| (assistant messages, tool calls, results, reasoning, errors)     ┃|
+|                                                                  ┃|
++──────────────────────────────────────────────────────────────────+
+| > type your message...                                            |
++──────────────────────────────────────────────────────────────────+
+| Footer bar (fixed)                                                |
+| step: 5 | theme: claude                                          |
 +------------------------------------------------------------------+
 ```
-
-The header shows the current provider/model, cumulative token counts, session ID, and agent state. The footer shows the step count, active theme, and input status.
 
 All `/theme`, `/status`, `/tools`, `/policy`, `/clear`, and `/quit` commands work in fixed mode.
 
@@ -298,27 +312,86 @@ All `/theme`, `/status`, `/tools`, `/policy`, `/clear`, and `/quit` commands wor
 | `theme_style` | Theme name display |
 | `input_style` | Input status text |
 
-### Custom theme with header/footer
+### Fixed layout configuration
+
+The `fixed_layout` section in a theme controls the full-screen TUI's region order, sizes, colors, and scrollbar appearance. This is the single source of truth for both layout structure and visual styling.
 
 ```json
 {
   "name": "mytheme",
-  "header": {
-    "background": "on #1a1a2e",
-    "provider_style": "bold cyan",
-    "tokens_style": "dim green",
-    "state_style": "bold yellow"
-  },
-  "footer": {
-    "background": "on #1a1a2e",
-    "step_style": "dim cyan",
-    "theme_style": "dim magenta",
-    "input_style": "bold blue"
+  "fixed_layout": {
+    "regions": [
+      { "name": "header", "size": 3 },
+      { "name": "body", "size": null },
+      { "name": "input", "size": 3 },
+      { "name": "footer", "size": 3 }
+    ],
+    "body_background": "#0e0e0e",
+    "input_background": "#111118",
+    "scrollbar": {
+      "enabled": true,
+      "color": "#444444",
+      "color_hover": "#666666",
+      "color_active": "#888888",
+      "background": "#1a1a1a",
+      "background_hover": "#222222",
+      "background_active": "#222222",
+      "size": 2
+    }
   }
 }
 ```
 
-Header and footer styles are optional — if omitted, the defaults (dark background with colored text) are used.
+#### Regions
+
+Each region has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Region name: `header`, `body`, `input`, `footer` |
+| `size` | int or null | Fixed height in lines. `null` = flexible (fills remaining space) |
+| `visible` | bool | Whether to show this region (default: `true`) |
+
+You can reorder regions by changing the array order. For example, to put the footer above the input:
+
+```json
+{
+  "regions": [
+    { "name": "header", "size": 3 },
+    { "name": "body" },
+    { "name": "footer", "size": 3 },
+    { "name": "input", "size": 3 }
+  ]
+}
+```
+
+Or hide the header entirely:
+
+```json
+{
+  "regions": [
+    { "name": "header", "size": 3, "visible": false },
+    { "name": "body" },
+    { "name": "input", "size": 3 },
+    { "name": "footer", "size": 3 }
+  ]
+}
+```
+
+#### Scrollbar
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enabled` | bool | Show scrollbar on the body region |
+| `color` | string | Scrollbar thumb color |
+| `color_hover` | string | Thumb color on hover |
+| `color_active` | string | Thumb color while dragging |
+| `background` | string | Scrollbar track color |
+| `background_hover` | string | Track color on hover |
+| `background_active` | string | Track color while dragging |
+| `size` | int | Scrollbar width in characters |
+
+Header/footer styles and fixed_layout are all optional — if omitted, the defaults are used.
 
 ## Theme resolution order
 

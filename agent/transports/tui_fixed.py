@@ -1,23 +1,32 @@
-"""Full-screen TUI with fixed header/footer bars and scrollable conversation body.
+"""Full-screen TUI with fixed header/footer, scrollable body, and input widget.
 
-Uses Rich Layout + Live for a persistent UI with themed status bars.
-The scrollable TUI (tui.py) remains available as the default mode.
+Built on `textual <https://textual.textualize.io>`_ for native scrollbars,
+mouse wheel support, Page Up / Page Down, and a proper input line.  The
+scrollable TUI (``tui.py``) remains available as the default ``aar tui`` mode;
+pass ``--fixed`` to use this one.
+
+Requires the ``tui-fixed`` optional extra::
+
+    pip install "aar-agent[tui-fixed]"
 """
 
 from __future__ import annotations
 
-import asyncio
-import threading
-from collections import deque
 from typing import Callable
 
-from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
-from rich.layout import Layout
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
+
+try:
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.widgets import Input, RichLog, Static
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "The fixed TUI requires the 'textual' package. "
+        'Install it with: pip install "aar-agent[tui-fixed]"'
+    ) from exc
 
 from agent.core.agent import Agent
 from agent.core.config import AgentConfig
@@ -43,40 +52,23 @@ from agent.transports.tui import _format_args, _side_effect_badge
 
 
 # ---------------------------------------------------------------------------
-# ConversationBuffer — accumulates renderables for the scrollable body
+# Textual widgets
 # ---------------------------------------------------------------------------
 
 
-class ConversationBuffer:
-    """Accumulates rendered output for the scrollable body region.
+class HeaderBar(Static):
+    """Fixed header showing provider, tokens, session, and state."""
 
-    Implements ``__rich_console__`` so it can be used directly as a Rich
-    renderable inside a Layout region.
+    DEFAULT_CSS = """
+    HeaderBar {
+        dock: top;
+        height: 3;
+        padding: 0 1;
+    }
     """
 
-    def __init__(self, max_items: int = 5000) -> None:
-        self._items: deque[RenderableType] = deque(maxlen=max_items)
-
-    def append(self, renderable: RenderableType) -> None:
-        self._items.append(renderable)
-
-    def clear(self) -> None:
-        self._items.clear()
-
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        for item in self._items:
-            yield item
-
-
-# ---------------------------------------------------------------------------
-# HeaderBar — fixed top bar
-# ---------------------------------------------------------------------------
-
-
-class HeaderBar:
-    """Renderable header showing provider, tokens, session, and state."""
-
     def __init__(self, theme: Theme) -> None:
+        super().__init__()
         self.theme = theme
         self.provider_name: str = ""
         self.model_name: str = ""
@@ -89,85 +81,86 @@ class HeaderBar:
         self.input_tokens += usage.get("input_tokens", 0)
         self.output_tokens += usage.get("output_tokens", 0)
 
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+    def render(self) -> Text:  # type: ignore[override]
         h = self.theme.header
-        grid = Table.grid(padding=(0, 2), expand=True)
-        grid.add_column(ratio=1)
-        grid.add_column(ratio=1, justify="center")
-        grid.add_column(ratio=1, justify="right")
-
-        provider = f"[{h.provider_style}]{self.provider_name}"
+        provider = f"{self.provider_name}"
         if self.model_name:
             provider += f" / {self.model_name}"
-        provider += "[/]"
-
-        tokens = f"[{h.tokens_style}]tokens: {self.input_tokens}in / {self.output_tokens}out[/]"
-
-        right_parts: list[str] = []
-        if self.session_id:
-            right_parts.append(f"[{h.session_style}]{self.session_id[:8]}...[/]")
-        right_parts.append(f"[{h.state_style}]{self.state}[/]")
-
-        grid.add_row(provider, tokens, " | ".join(right_parts))
-        sep = Text("─" * options.max_width, style=h.separator_style)
-        yield grid
-        yield sep
-
-
-# ---------------------------------------------------------------------------
-# FooterBar — fixed bottom bar
-# ---------------------------------------------------------------------------
+        session = f"{self.session_id[:8]}..." if self.session_id else ""
+        parts = [
+            (provider, h.provider_style),
+            ("  |  ", h.separator_style),
+            (f"tokens: {self.input_tokens}in / {self.output_tokens}out", h.tokens_style),
+            ("  |  ", h.separator_style),
+        ]
+        if session:
+            parts.append((session, h.session_style))
+            parts.append(("  |  ", h.separator_style))
+        parts.append((self.state, h.state_style))
+        return Text.assemble(*parts)
 
 
-class FooterBar:
-    """Renderable footer showing step count, theme, and input status."""
+class FooterBar(Static):
+    """Fixed footer showing step count and theme name."""
+
+    DEFAULT_CSS = """
+    FooterBar {
+        dock: bottom;
+        height: 3;
+        padding: 0 1;
+    }
+    """
 
     def __init__(self, theme: Theme) -> None:
+        super().__init__()
         self.theme = theme
         self.step_count: int = 0
         self.theme_name: str = theme.name
-        self.status: str = ""
 
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+    def render(self) -> Text:  # type: ignore[override]
         f = self.theme.footer
-        sep = Text("─" * options.max_width, style=f.separator_style)
-        yield sep
+        return Text.assemble(
+            (f"step: {self.step_count}", f.step_style),
+            ("  |  ", f.separator_style),
+            (f"theme: {self.theme_name}", f.theme_style),
+        )
 
-        grid = Table.grid(padding=(0, 2), expand=True)
-        grid.add_column(ratio=1)
-        grid.add_column(ratio=1, justify="center")
-        grid.add_column(ratio=1, justify="right")
 
-        step = f"[{f.step_style}]step: {self.step_count}[/]"
-        theme_info = f"[{f.theme_style}]theme: {self.theme_name}[/]"
-        status = f"[{f.input_style}]{self.status}[/]" if self.status else ""
+class SeparatorBar(Static):
+    """A thin horizontal line separator."""
 
-        grid.add_row(step, theme_info, status)
-        yield grid
+    DEFAULT_CSS = """
+    SeparatorBar {
+        height: 1;
+    }
+    """
+
+    def __init__(self, style: str = "dim") -> None:
+        super().__init__()
+        self._style = style
+
+    def render(self) -> Text:  # type: ignore[override]
+        return Text("─" * self.size.width, style=self._style)
 
 
 # ---------------------------------------------------------------------------
-# FixedTUIRenderer — renders events into the ConversationBuffer
+# FixedTUIRenderer — renders events into a RichLog
 # ---------------------------------------------------------------------------
 
 
 class FixedTUIRenderer:
-    """Renders agent events into a :class:`ConversationBuffer` for the fixed TUI.
-
-    Reuses the same theme and layout system as :class:`TUIRenderer` but writes
-    to the buffer instead of directly to the console.
-    """
+    """Renders agent events into a Textual :class:`RichLog` widget."""
 
     def __init__(
         self,
-        buffer: ConversationBuffer,
+        log: RichLog,
         header: HeaderBar,
         footer: FooterBar,
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
     ) -> None:
-        self._buffer = buffer
+        self._log = log
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -175,21 +168,22 @@ class FixedTUIRenderer:
         self._step_count = 0
         self.theme = theme or DEFAULT_THEME
         self.layout = layout or LayoutConfig()
-        self._extension_panels: dict[str, Callable[[ConversationBuffer], None]] = {}
+        self._extension_panels: dict[str, Callable] = {}
 
     # ------------------------------------------------------------------
     # Theme switching
     # ------------------------------------------------------------------
 
-    def set_theme(self, theme: Theme) -> None:
-        """Switch to a new theme."""
+    def set_theme(self, theme: Theme, app: AarFixedApp) -> None:
+        """Switch to a new theme and update all widgets."""
         self.theme = theme
         self._header.theme = theme
         self._footer.theme = theme
         self._footer.theme_name = theme.name
-        self._buffer.append(Text(f"Switched to theme: {theme.name}", style=theme.dim_text))
+        app.apply_theme(theme)
+        self._log.write(Text(f"Switched to theme: {theme.name}", style=theme.dim_text))
 
-    def cycle_theme(self, registry: ThemeRegistry) -> None:
+    def cycle_theme(self, registry: ThemeRegistry, app: AarFixedApp) -> None:
         """Cycle to the next available theme."""
         names = registry.list_names()
         if not names:
@@ -199,21 +193,21 @@ class FixedTUIRenderer:
             next_name = names[(idx + 1) % len(names)]
         except ValueError:
             next_name = names[0]
-        self.set_theme(registry.get(next_name))
+        self.set_theme(registry.get(next_name), app)
 
     # ------------------------------------------------------------------
-    # Event rendering (into buffer)
+    # Event rendering (into RichLog)
     # ------------------------------------------------------------------
 
     def render_event(self, event: Event) -> None:
-        """Render a single event into the conversation buffer."""
+        """Render a single event into the RichLog widget."""
         t = self.theme
 
         if isinstance(event, AssistantMessage) and event.content:
             if not self.layout.assistant.visible:
                 return
-            self._buffer.append(Text())  # blank line
-            self._buffer.append(
+            self._log.write(Text())
+            self._log.write(
                 Panel(
                     Markdown(event.content),
                     title=f"[{t.assistant.title_style}]Assistant[/]",
@@ -225,6 +219,7 @@ class FixedTUIRenderer:
         elif isinstance(event, ToolCall):
             self._step_count += 1
             self._footer.step_count = self._step_count
+            self._footer.refresh()
             if not self.layout.tool_call.visible:
                 return
             args_display = _format_args(event.arguments, verbose=self._verbose, theme=t)
@@ -240,7 +235,7 @@ class FixedTUIRenderer:
                     f"[{t.tool_call.title_style}]Tool: {event.tool_name}[/]"
                     f" [{t.dim_text}](step {self._step_count})[/]"
                 )
-            self._buffer.append(
+            self._log.write(
                 Panel(
                     args_display,
                     title=title,
@@ -263,7 +258,7 @@ class FixedTUIRenderer:
             title = f"[{ps.title_style}]Result: {event.tool_name}[/]{duration}"
             if event.is_error:
                 title += f" [{t.tool_error.border_style}]ERROR[/]"
-            self._buffer.append(
+            self._log.write(
                 Panel(output, title=title, border_style=ps.border_style, padding=ps.padding)
             )
 
@@ -273,7 +268,7 @@ class FixedTUIRenderer:
             text = event.content
             if len(text) > 500:
                 text = text[:500] + "..."
-            self._buffer.append(
+            self._log.write(
                 Panel(
                     Text(text, style=f"italic {t.reasoning.border_style}"),
                     title=f"[{t.reasoning.title_style}]Thinking[/]",
@@ -288,7 +283,7 @@ class FixedTUIRenderer:
                 if event.recoverable
                 else ""
             )
-            self._buffer.append(
+            self._log.write(
                 Panel(
                     event.message + hint,
                     title=f"[{t.error.title_style}]Error[/]",
@@ -304,9 +299,10 @@ class FixedTUIRenderer:
             self._header.update_tokens(u)
             self._header.provider_name = event.provider
             self._header.model_name = event.model
+            self._header.refresh()
             if not self.layout.token_usage.visible:
                 return
-            self._buffer.append(
+            self._log.write(
                 Text(
                     f"  {u.get('input_tokens', 0)}in / {u.get('output_tokens', 0)}out "
                     f"(total: {self._usage_total['input_tokens']}in"
@@ -319,13 +315,14 @@ class FixedTUIRenderer:
         if not self.layout.welcome.visible:
             return
         t = self.theme
-        self._buffer.append(
+        self._log.write(
             Panel(
                 "[bold]Aar Agent TUI (Fixed)[/]\n\n"
                 "Type your message and press Enter.\n"
                 "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
                 "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-                "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]",
+                "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n"
+                "Scroll: mouse wheel, Page Up/Down, arrow keys",
                 border_style=t.welcome.border_style,
                 padding=t.welcome.padding,
             )
@@ -333,33 +330,339 @@ class FixedTUIRenderer:
 
 
 # ---------------------------------------------------------------------------
-# Threaded input helper
+# Textual App
 # ---------------------------------------------------------------------------
 
 
-def _threaded_input(
-    prompt: str, queue: asyncio.Queue[str | None], loop: asyncio.AbstractEventLoop
-) -> None:
-    """Read a line from stdin in a background thread and put it on *queue*."""
-    try:
-        line = input(prompt)
-        loop.call_soon_threadsafe(queue.put_nowait, line)
-    except (EOFError, KeyboardInterrupt):
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+class AarFixedApp(App):
+    """Full-screen Textual application for the fixed TUI mode."""
 
+    BINDINGS = [
+        Binding("escape", "quit", "Quit"),
+        Binding("pageup", "scroll_up", "Page Up", show=False),
+        Binding("pagedown", "scroll_down", "Page Down", show=False),
+    ]
 
-async def _get_input(prompt: str) -> str | None:
-    """Get user input without blocking the event loop."""
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
-    thread = threading.Thread(target=_threaded_input, args=(prompt, queue, loop), daemon=True)
-    thread.start()
-    result = await queue.get()
-    return result
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+    #header-sep {
+        height: 1;
+    }
+    #body-log {
+        min-height: 4;
+    }
+    #input-sep {
+        height: 1;
+    }
+    #user-input {
+        height: 3;
+        padding: 0 1;
+    }
+    #footer-sep {
+        height: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        agent: Agent,
+        config: AgentConfig,
+        renderer: FixedTUIRenderer | None = None,
+        theme: Theme | None = None,
+        layout_config: LayoutConfig | None = None,
+        registry: ThemeRegistry | None = None,
+        verbose: bool = False,
+        session_id: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._agent = agent
+        self._config = config
+        self._theme = theme or DEFAULT_THEME
+        self._layout_config = layout_config or LayoutConfig()
+        self._theme_registry = registry or ThemeRegistry()
+        self._verbose = verbose
+        self._session_id = session_id
+        self._session: Session | None = None
+        self._store = SessionStore(config.session_dir)
+        self._renderer: FixedTUIRenderer | None = renderer
+
+    # ------------------------------------------------------------------
+    # Compose the widget tree from theme layout config
+    # ------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        fl = self._theme.fixed_layout
+
+        # Map region names to widget factories
+        widget_map: dict[str, Callable[[], list]] = {
+            "header": lambda: [
+                HeaderBar(self._theme),
+                SeparatorBar(self._theme.header.separator_style),
+            ],
+            "body": lambda: [RichLog(id="body-log", wrap=True, markup=True)],
+            "input": lambda: [
+                SeparatorBar(self._theme.footer.separator_style),
+                Input(placeholder="> type your message...", id="user-input"),
+            ],
+            "footer": lambda: [
+                SeparatorBar(self._theme.footer.separator_style),
+                FooterBar(self._theme),
+            ],
+        }
+
+        for region in fl.regions:
+            if not region.visible:
+                continue
+            factory = widget_map.get(region.name)
+            if factory:
+                yield from factory()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def on_mount(self) -> None:
+        log = self.query_one("#body-log", RichLog)
+        header = self.query_one(HeaderBar)
+        footer = self.query_one(FooterBar)
+
+        # Populate header from config
+        header.provider_name = self._config.provider.name
+        header.model_name = self._config.provider.model
+
+        self._renderer = FixedTUIRenderer(
+            log=log,
+            header=header,
+            footer=footer,
+            verbose=self._verbose,
+            theme=self._theme,
+            layout=self._layout_config,
+        )
+        self._agent.on_event(self._renderer.render_event)
+
+        # Apply theme CSS
+        self.apply_theme(self._theme)
+
+        # Resume session if requested
+        if self._session_id:
+            try:
+                self._session = self._store.load(self._session_id)
+                header.session_id = self._session.session_id
+                header.refresh()
+                log.write(Text(f"Resumed session {self._session_id}", style=self._theme.dim_text))
+            except FileNotFoundError:
+                log.write(
+                    Text(
+                        f"Session {self._session_id} not found",
+                        style=self._theme.error.border_style,
+                    )
+                )
+
+        self._renderer.render_welcome()
+
+        # Focus the input
+        self.query_one("#user-input", Input).focus()
+
+    def apply_theme(self, theme: Theme) -> None:
+        """Apply theme colors to Textual widget styles."""
+        self._theme = theme
+        fl = theme.fixed_layout
+        sb = fl.scrollbar
+
+        # Body log
+        try:
+            log = self.query_one("#body-log", RichLog)
+            log.styles.background = fl.body_background
+            log.styles.scrollbar_color = sb.color
+            log.styles.scrollbar_color_hover = sb.color_hover
+            log.styles.scrollbar_color_active = sb.color_active
+            log.styles.scrollbar_background = sb.background
+            log.styles.scrollbar_background_hover = sb.background_hover
+            log.styles.scrollbar_background_active = sb.background_active
+            log.styles.scrollbar_size_vertical = sb.size
+        except Exception:
+            pass
+
+        # Input
+        try:
+            inp = self.query_one("#user-input", Input)
+            inp.styles.background = fl.input_background
+        except Exception:
+            pass
+
+        # Header
+        try:
+            header = self.query_one(HeaderBar)
+            header.styles.background = theme.header.background.replace("on ", "")
+        except Exception:
+            pass
+
+        # Footer
+        try:
+            footer = self.query_one(FooterBar)
+            footer.styles.background = theme.footer.background.replace("on ", "")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Key bindings
+    # ------------------------------------------------------------------
+
+    def action_scroll_up(self) -> None:
+        self.query_one("#body-log", RichLog).scroll_page_up()
+
+    def action_scroll_down(self) -> None:
+        self.query_one("#body-log", RichLog).scroll_page_down()
+
+    # ------------------------------------------------------------------
+    # Input handling
+    # ------------------------------------------------------------------
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle user input from the Input widget."""
+        user_input = event.value
+        event.input.value = ""
+        stripped = user_input.strip()
+        if not stripped:
+            return
+
+        assert self._renderer is not None
+        log = self.query_one("#body-log", RichLog)
+        header = self.query_one(HeaderBar)
+        footer = self.query_one(FooterBar)
+
+        # Echo input
+        log.write(Text(f"  > {stripped}", style=self._renderer.theme.prompt_style))
+
+        # --- TUI commands ------------------------------------------------
+        if stripped.lower() in {"/quit", "/exit", "/q"}:
+            self.exit()
+            return
+        elif stripped.lower() == "/status" and self._session:
+            t = self._renderer.theme
+            log.write(
+                Text(
+                    f"Session: {self._session.session_id[:8]}... | "
+                    f"Steps: {self._session.step_count} | "
+                    f"State: {self._session.state.value}",
+                    style=t.dim_text,
+                )
+            )
+            return
+        elif stripped.lower() == "/tools":
+            for spec in self._agent.registry.list_tools():
+                effects = ", ".join(e.value for e in spec.side_effects)
+                log.write(Text(f"  {spec.name} ({effects})  {spec.description}"))
+            return
+        elif stripped.lower() == "/policy":
+            sc = self._config.safety
+            log.write(Text("Safety Policy", style="bold"))
+            for line in [
+                f"  read_only: {sc.read_only}",
+                f"  require_approval_for_writes: {sc.require_approval_for_writes}",
+                f"  require_approval_for_execute: {sc.require_approval_for_execute}",
+                f"  sandbox: {sc.sandbox}",
+            ]:
+                log.write(Text(line))
+            return
+        elif stripped.lower() == "/clear":
+            log.clear()
+            self._session = None
+            header.session_id = ""
+            header.input_tokens = 0
+            header.output_tokens = 0
+            header.state = "idle"
+            header.refresh()
+            footer.step_count = 0
+            footer.refresh()
+            self._renderer._step_count = 0
+            self._renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
+            self._renderer.render_welcome()
+            return
+        elif stripped.lower().startswith("/theme"):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 1:
+                log.write(
+                    Text(
+                        f"Current theme: {self._renderer.theme.name}",
+                        style=self._renderer.theme.dim_text,
+                    )
+                )
+                for tname in self._theme_registry.list_names():
+                    marker = " *" if tname == self._renderer.theme.name else ""
+                    log.write(Text(f"  {tname}{marker}", style=self._renderer.theme.dim_text))
+            else:
+                arg = parts[1].strip()
+                if arg == "next":
+                    self._renderer.cycle_theme(self._theme_registry, self)
+                else:
+                    try:
+                        self._renderer.set_theme(self._theme_registry.get(arg), self)
+                    except KeyError:
+                        log.write(
+                            Text(
+                                f"Unknown theme: {arg}",
+                                style=self._renderer.theme.error.border_style,
+                            )
+                        )
+            return
+
+        # --- Parse multimodal attachments --------------------------------
+        content = parse_multimodal_input(stripped)
+        if isinstance(content, list):
+            has_audio = False
+            for block in content:
+                if isinstance(block, ImageURLBlock):
+                    log.write(Text("  Attached: image", style=self._renderer.theme.dim_text))
+                elif isinstance(block, AudioBlock):
+                    log.write(Text("  Attached: audio", style=self._renderer.theme.dim_text))
+                    has_audio = True
+            if has_audio and not self._agent.provider.supports_audio:
+                log.write(
+                    Text(
+                        f"Warning: audio input is not supported by "
+                        f"{self._agent.provider.name}. Audio will be dropped.",
+                        style=self._renderer.theme.badges.write,
+                    )
+                )
+
+        # --- Run agent ---------------------------------------------------
+        header.state = "running"
+        header.refresh()
+        event.input.placeholder = "working..."
+        event.input.disabled = True
+
+        self._session = await self._agent.run(content, self._session)
+
+        header.state = self._session.state.value
+        header.session_id = self._session.session_id
+        header.refresh()
+        event.input.placeholder = "> type your message..."
+        event.input.disabled = False
+        event.input.focus()
+
+        # Handle recoverable errors
+        if self._session.state == AgentState.ERROR:
+            last_error = next(
+                (e for e in reversed(self._session.events) if isinstance(e, ErrorEvent)),
+                None,
+            )
+            if last_error and last_error.recoverable:
+                self._session.state = AgentState.COMPLETED
+                header.state = "completed"
+                header.refresh()
+
+        self._store.save(self._session)
+
+    def on_unmount(self) -> None:
+        if self._session:
+            self._store.save(self._session)
 
 
 # ---------------------------------------------------------------------------
-# run_tui_fixed — full-screen entry point
+# Entry point
 # ---------------------------------------------------------------------------
 
 
@@ -370,14 +673,9 @@ async def run_tui_fixed(
     session_id: str | None = None,
     theme_name: str | None = None,
 ) -> None:
-    """Launch the full-screen TUI with fixed header/footer bars.
-
-    This mode uses Rich's ``Layout`` + ``Live`` for a persistent UI with
-    a scrollable conversation body and themed status bars.
-    """
+    """Launch the full-screen TUI with fixed header/footer bars."""
     config = config or AgentConfig()
 
-    # Resolve theme
     registry = ThemeRegistry()
     name = theme_name or config.tui.theme
     try:
@@ -385,210 +683,19 @@ async def run_tui_fixed(
     except KeyError:
         theme = DEFAULT_THEME
 
-    # Resolve layout
     layout_config = (
         LayoutConfig.model_validate(config.tui.layout) if config.tui.layout else LayoutConfig()
     )
 
     agent = agent or Agent(config=config)
-    console = Console()
 
-    # Build UI components
-    buffer = ConversationBuffer()
-    header = HeaderBar(theme)
-    footer = FooterBar(theme)
-
-    # Populate header from config
-    header.provider_name = config.provider.name
-    header.model_name = config.provider.model
-
-    renderer = FixedTUIRenderer(
-        buffer=buffer,
-        header=header,
-        footer=footer,
-        verbose=verbose,
+    app = AarFixedApp(
+        agent=agent,
+        config=config,
         theme=theme,
-        layout=layout_config,
+        layout_config=layout_config,
+        registry=registry,
+        verbose=verbose,
+        session_id=session_id,
     )
-
-    store = SessionStore(config.session_dir)
-    session: Session | None = None
-
-    if session_id:
-        try:
-            session = store.load(session_id)
-            header.session_id = session.session_id
-            buffer.append(Text(f"Resumed session {session_id}", style=theme.dim_text))
-        except FileNotFoundError:
-            buffer.append(Text(f"Session {session_id} not found", style=theme.error.border_style))
-            return
-
-    agent.on_event(renderer.render_event)
-    renderer.render_welcome()
-
-    # Build the three-region layout
-    ui_layout = Layout()
-    ui_layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=3),
-    )
-
-    def _refresh_layout() -> None:
-        ui_layout["header"].update(header)
-        ui_layout["body"].update(buffer)
-        ui_layout["footer"].update(footer)
-
-    _refresh_layout()
-
-    try:
-        with Live(
-            ui_layout,
-            console=console,
-            screen=True,
-            auto_refresh=True,
-            refresh_per_second=8,
-        ):
-            while True:
-                # Update footer prompt status
-                footer.status = "> waiting for input..."
-                _refresh_layout()
-
-                # Get input via threaded reader (Live owns the screen)
-                user_input = await _get_input("> ")
-                if user_input is None:
-                    break
-
-                stripped = user_input.strip()
-                if not stripped:
-                    continue
-
-                footer.status = ""
-
-                # Handle TUI commands
-                if stripped.lower() in {"/quit", "/exit", "/q"}:
-                    break
-                elif stripped.lower() == "/status" and session:
-                    t = renderer.theme
-                    buffer.append(
-                        Text(
-                            f"Session: {session.session_id[:8]}... | "
-                            f"Steps: {session.step_count} | "
-                            f"State: {session.state.value}",
-                            style=t.dim_text,
-                        )
-                    )
-                    _refresh_layout()
-                    continue
-                elif stripped.lower() == "/tools":
-                    for spec in agent.registry.list_tools():
-                        effects = ", ".join(e.value for e in spec.side_effects)
-                        buffer.append(Text(f"  {spec.name} ({effects})  {spec.description}"))
-                    _refresh_layout()
-                    continue
-                elif stripped.lower() == "/policy":
-                    sc = config.safety
-                    lines = [
-                        f"  read_only: {sc.read_only}",
-                        f"  require_approval_for_writes: {sc.require_approval_for_writes}",
-                        f"  require_approval_for_execute: {sc.require_approval_for_execute}",
-                        f"  sandbox: {sc.sandbox}",
-                    ]
-                    buffer.append(Text("Safety Policy", style="bold"))
-                    for line in lines:
-                        buffer.append(Text(line))
-                    _refresh_layout()
-                    continue
-                elif stripped.lower() == "/clear":
-                    buffer.clear()
-                    session = None
-                    header.session_id = ""
-                    header.input_tokens = 0
-                    header.output_tokens = 0
-                    header.state = "idle"
-                    footer.step_count = 0
-                    renderer._step_count = 0
-                    renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
-                    renderer.render_welcome()
-                    _refresh_layout()
-                    continue
-                elif stripped.lower().startswith("/theme"):
-                    parts = stripped.split(maxsplit=1)
-                    if len(parts) == 1:
-                        buffer.append(
-                            Text(
-                                f"Current theme: {renderer.theme.name}",
-                                style=renderer.theme.dim_text,
-                            )
-                        )
-                        for tname in registry.list_names():
-                            marker = " *" if tname == renderer.theme.name else ""
-                            buffer.append(Text(f"  {tname}{marker}", style=renderer.theme.dim_text))
-                    else:
-                        arg = parts[1].strip()
-                        if arg == "next":
-                            renderer.cycle_theme(registry)
-                        else:
-                            try:
-                                renderer.set_theme(registry.get(arg))
-                            except KeyError:
-                                buffer.append(
-                                    Text(
-                                        f"Unknown theme: {arg}",
-                                        style=renderer.theme.error.border_style,
-                                    )
-                                )
-                    _refresh_layout()
-                    continue
-
-                # Parse multimodal attachments (@file syntax)
-                content = parse_multimodal_input(stripped)
-                if isinstance(content, list):
-                    has_audio = False
-                    for block in content:
-                        if isinstance(block, ImageURLBlock):
-                            buffer.append(Text("  Attached: image", style=renderer.theme.dim_text))
-                        elif isinstance(block, AudioBlock):
-                            buffer.append(Text("  Attached: audio", style=renderer.theme.dim_text))
-                            has_audio = True
-                    if has_audio and not agent.provider.supports_audio:
-                        buffer.append(
-                            Text(
-                                f"Warning: audio input is not supported by "
-                                f"{agent.provider.name}. Audio will be dropped.",
-                                style=renderer.theme.badges.write,
-                            )
-                        )
-
-                # Show working indicator
-                header.state = "running"
-                footer.status = "working..."
-                _refresh_layout()
-
-                # Run the agent
-                session = await agent.run(content, session)
-                header.state = session.state.value
-                header.session_id = session.session_id
-
-                # Handle recoverable errors
-                if session.state == AgentState.ERROR:
-                    last_error = next(
-                        (e for e in reversed(session.events) if isinstance(e, ErrorEvent)),
-                        None,
-                    )
-                    if last_error and last_error.recoverable:
-                        session.state = AgentState.COMPLETED
-                        header.state = "completed"
-
-                store.save(session)
-                footer.status = ""
-                _refresh_layout()
-
-    except KeyboardInterrupt:
-        pass
-
-    # Restore terminal and show final message
-    if session:
-        store.save(session)
-        console.print(f"\nSession saved: {session.session_id}")
-    console.print("Goodbye.")
+    await app.run_async()

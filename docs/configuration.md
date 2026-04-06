@@ -255,7 +255,7 @@ The `tui` section controls the TUI's visual appearance and section visibility. S
 ```bash
 aar tui --theme decker
 aar tui -t claude
-aar tui --fixed                 # full-screen mode with fixed header/footer bars
+aar tui --fixed                 # full-screen mode with fixed bars, scrollable body, mouse support
 aar tui --fixed --theme decker  # fixed mode with a specific theme
 ```
 

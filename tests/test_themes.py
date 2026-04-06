@@ -8,8 +8,6 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
-from rich.text import Text
-
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
@@ -35,8 +33,12 @@ from agent.transports.themes.models import (
     Theme,
 )
 from agent.transports.tui import TUIRenderer
+from agent.transports.themes.models import (
+    FixedLayoutConfig,
+    FixedLayoutRegion,
+    ScrollbarConfig,
+)
 from agent.transports.tui_fixed import (
-    ConversationBuffer,
     FixedTUIRenderer,
     FooterBar,
     HeaderBar,
@@ -354,56 +356,90 @@ class TestBarStyleModels:
 
 
 # ------------------------------------------------------------------
-# ConversationBuffer
+# FixedLayoutConfig models
 # ------------------------------------------------------------------
 
 
-class TestConversationBuffer:
-    def test_append_and_render(self) -> None:
-        buf = ConversationBuffer()
-        buf.append(Text("hello"))
-        buf.append(Text("world"))
-        console = Console(file=StringIO(), force_terminal=True, width=80)
-        console.print(buf)
-        output = console.file.getvalue()
-        assert "hello" in output
-        assert "world" in output
+class TestFixedLayoutConfig:
+    def test_default_regions(self) -> None:
+        fl = FixedLayoutConfig()
+        names = [r.name for r in fl.regions]
+        assert names == ["header", "body", "input", "footer"]
 
-    def test_clear(self) -> None:
-        buf = ConversationBuffer()
-        buf.append(Text("data"))
-        buf.clear()
-        console = Console(file=StringIO(), force_terminal=True, width=80)
-        console.print(buf)
-        assert "data" not in console.file.getvalue()
+    def test_body_region_is_flexible(self) -> None:
+        fl = FixedLayoutConfig()
+        body = next(r for r in fl.regions if r.name == "body")
+        assert body.size is None
 
-    def test_max_items(self) -> None:
-        buf = ConversationBuffer(max_items=3)
-        for i in range(5):
-            buf.append(Text(f"item-{i}"))
-        console = Console(file=StringIO(), force_terminal=True, width=80)
-        console.print(buf)
-        output = console.file.getvalue()
-        assert "item-0" not in output
-        assert "item-1" not in output
-        assert "item-4" in output
+    def test_header_has_fixed_size(self) -> None:
+        fl = FixedLayoutConfig()
+        header = next(r for r in fl.regions if r.name == "header")
+        assert header.size == 3
+
+    def test_scrollbar_defaults(self) -> None:
+        sb = ScrollbarConfig()
+        assert sb.enabled is True
+        assert sb.size == 2
+
+    def test_builtin_themes_have_fixed_layout(self) -> None:
+        for name, theme in BUILTIN_THEMES.items():
+            assert isinstance(theme.fixed_layout, FixedLayoutConfig), f"{name} missing fixed_layout"
+            assert theme.fixed_layout.body_background != ""
+
+    def test_custom_region_order(self) -> None:
+        fl = FixedLayoutConfig(
+            regions=[
+                FixedLayoutRegion(name="footer", size=2),
+                FixedLayoutRegion(name="body"),
+                FixedLayoutRegion(name="header", size=2),
+            ]
+        )
+        assert [r.name for r in fl.regions] == ["footer", "body", "header"]
+
+    def test_region_visibility(self) -> None:
+        fl = FixedLayoutConfig(
+            regions=[
+                FixedLayoutRegion(name="header", size=3, visible=False),
+                FixedLayoutRegion(name="body"),
+                FixedLayoutRegion(name="input", size=3),
+                FixedLayoutRegion(name="footer", size=3),
+            ]
+        )
+        visible = [r.name for r in fl.regions if r.visible]
+        assert "header" not in visible
+
+    def test_decker_scrollbar_colors(self) -> None:
+        sb = DECKER_THEME.fixed_layout.scrollbar
+        assert sb.color == "#9d00ff"
+        assert sb.color_active == "#00fff7"
+
+    def test_claude_body_background(self) -> None:
+        assert CLAUDE_THEME.fixed_layout.body_background == "#1e1b16"
+
+    def test_theme_json_roundtrip(self, tmp_path: Path) -> None:
+        """Ensure fixed_layout survives JSON serialization."""
+        data = DEFAULT_THEME.model_dump()
+        p = tmp_path / "test_theme.json"
+        p.write_text(json.dumps(data))
+        loaded = Theme.model_validate(json.loads(p.read_text()))
+        assert loaded.fixed_layout.body_background == DEFAULT_THEME.fixed_layout.body_background
+        assert len(loaded.fixed_layout.regions) == 4
+        assert loaded.fixed_layout.scrollbar.enabled is True
 
 
 # ------------------------------------------------------------------
-# HeaderBar
+# HeaderBar (Textual widget — render() returns Text)
 # ------------------------------------------------------------------
 
 
 class TestHeaderBar:
-    def test_renders_provider_info(self) -> None:
+    def test_render_contains_provider(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.provider_name = "ollama"
         bar.model_name = "llama3"
-        console = Console(file=StringIO(), force_terminal=True, width=120)
-        console.print(bar)
-        output = console.file.getvalue()
-        assert "ollama" in output
-        assert "llama3" in output
+        rendered = bar.render()
+        assert "ollama" in rendered.plain
+        assert "llama3" in rendered.plain
 
     def test_update_tokens(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
@@ -414,98 +450,112 @@ class TestHeaderBar:
         assert bar.input_tokens == 300
         assert bar.output_tokens == 80
 
-    def test_renders_session_id(self) -> None:
+    def test_render_contains_session_id(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.session_id = "abcdef1234567890"
-        console = Console(file=StringIO(), force_terminal=True, width=120)
-        console.print(bar)
-        assert "abcdef12..." in console.file.getvalue()
+        rendered = bar.render()
+        assert "abcdef12..." in rendered.plain
 
-    def test_renders_state(self) -> None:
+    def test_render_contains_state(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.state = "running"
-        console = Console(file=StringIO(), force_terminal=True, width=120)
-        console.print(bar)
-        assert "running" in console.file.getvalue()
+        rendered = bar.render()
+        assert "running" in rendered.plain
 
 
 # ------------------------------------------------------------------
-# FooterBar
+# FooterBar (Textual widget — render() returns Text)
 # ------------------------------------------------------------------
 
 
 class TestFooterBar:
-    def test_renders_step_count(self) -> None:
+    def test_render_contains_step(self) -> None:
         bar = FooterBar(DEFAULT_THEME)
         bar.step_count = 42
-        console = Console(file=StringIO(), force_terminal=True, width=120)
-        console.print(bar)
-        assert "42" in console.file.getvalue()
+        rendered = bar.render()
+        assert "42" in rendered.plain
 
-    def test_renders_theme_name(self) -> None:
+    def test_render_contains_theme_name(self) -> None:
         bar = FooterBar(CLAUDE_THEME)
-        console = Console(file=StringIO(), force_terminal=True, width=120)
-        console.print(bar)
-        assert "claude" in console.file.getvalue()
+        rendered = bar.render()
+        assert "claude" in rendered.plain
 
-    def test_renders_status(self) -> None:
-        bar = FooterBar(DEFAULT_THEME)
-        bar.status = "working..."
-        console = Console(file=StringIO(), force_terminal=True, width=120)
-        console.print(bar)
-        assert "working..." in console.file.getvalue()
+    def test_render_contains_decker(self) -> None:
+        bar = FooterBar(DECKER_THEME)
+        rendered = bar.render()
+        assert "decker" in rendered.plain
 
 
 # ------------------------------------------------------------------
-# FixedTUIRenderer
+# FixedTUIRenderer (uses a mock RichLog for testing)
 # ------------------------------------------------------------------
+
+
+class _MockRichLog:
+    """Minimal stand-in for ``textual.widgets.RichLog`` in unit tests."""
+
+    def __init__(self) -> None:
+        self.items: list = []
+
+    def write(self, content, **kwargs) -> None:  # noqa: ANN001
+        self.items.append(content)
+
+    def clear(self) -> None:
+        self.items.clear()
+
+    def rendered_text(self) -> str:
+        """Render all items via a headless Rich console to plain text."""
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=120)
+        for item in self.items:
+            console.print(item)
+        return buf.getvalue()
 
 
 def _fixed_renderer(
     theme: Theme | None = None, layout: LayoutConfig | None = None
-) -> tuple[FixedTUIRenderer, ConversationBuffer]:
+) -> tuple[FixedTUIRenderer, _MockRichLog]:
     theme = theme or DEFAULT_THEME
-    buf = ConversationBuffer()
+    log = _MockRichLog()
     header = HeaderBar(theme)
     footer = FooterBar(theme)
     renderer = FixedTUIRenderer(
-        buffer=buf, header=header, footer=footer, verbose=True, theme=theme, layout=layout
+        log=log,  # type: ignore[arg-type]
+        header=header,
+        footer=footer,
+        verbose=True,
+        theme=theme,
+        layout=layout,
     )
-    return renderer, buf
-
-
-def _render_buf(buf: ConversationBuffer) -> str:
-    console = Console(file=StringIO(), force_terminal=True, width=120)
-    console.print(buf)
-    return console.file.getvalue()
+    return renderer, log
 
 
 class TestFixedTUIRenderer:
     def test_assistant_message(self) -> None:
-        renderer, buf = _fixed_renderer()
+        renderer, log = _fixed_renderer()
         renderer.render_event(AssistantMessage(content="hello fixed"))
-        output = _render_buf(buf)
+        output = log.rendered_text()
         assert "Assistant" in output
         assert "hello fixed" in output
 
     def test_tool_call_increments_footer_step(self) -> None:
-        renderer, buf = _fixed_renderer()
+        renderer, log = _fixed_renderer()
         renderer.render_event(ToolCall(tool_name="bash", arguments={"cmd": "ls"}))
         assert renderer._footer.step_count == 1
-        output = _render_buf(buf)
-        assert "bash" in output
+        assert "bash" in log.rendered_text()
 
     def test_tool_result(self) -> None:
-        renderer, buf = _fixed_renderer()
+        renderer, log = _fixed_renderer()
         renderer.render_event(ToolResult(tool_name="read_file", output="contents", is_error=False))
-        output = _render_buf(buf)
-        assert "Result: read_file" in output
+        assert "Result: read_file" in log.rendered_text()
 
     def test_provider_meta_updates_header(self) -> None:
-        renderer, buf = _fixed_renderer()
+        renderer, log = _fixed_renderer()
         renderer.render_event(
             ProviderMeta(
-                model="llama3", provider="ollama", usage={"input_tokens": 10, "output_tokens": 5}
+                model="llama3",
+                provider="ollama",
+                usage={"input_tokens": 10, "output_tokens": 5},
             )
         )
         assert renderer._header.provider_name == "ollama"
@@ -514,32 +564,35 @@ class TestFixedTUIRenderer:
 
     def test_hidden_reasoning_suppressed(self) -> None:
         layout = LayoutConfig(reasoning=SectionConfig(visible=False))
-        renderer, buf = _fixed_renderer(layout=layout)
+        renderer, log = _fixed_renderer(layout=layout)
         renderer.render_event(ReasoningBlock(content="secret thought"))
-        assert "secret thought" not in _render_buf(buf)
+        assert "secret thought" not in log.rendered_text()
 
     def test_error_event(self) -> None:
-        renderer, buf = _fixed_renderer()
+        renderer, log = _fixed_renderer()
         renderer.render_event(ErrorEvent(message="boom", recoverable=True))
-        output = _render_buf(buf)
+        output = log.rendered_text()
         assert "Error" in output
         assert "boom" in output
 
     def test_welcome(self) -> None:
-        renderer, buf = _fixed_renderer()
+        renderer, log = _fixed_renderer()
         renderer.render_welcome()
-        output = _render_buf(buf)
-        assert "Aar Agent TUI (Fixed)" in output
+        assert "Aar Agent TUI (Fixed)" in log.rendered_text()
 
-    def test_set_theme_updates_bars(self) -> None:
-        renderer, buf = _fixed_renderer(DEFAULT_THEME)
-        renderer.set_theme(DECKER_THEME)
-        assert renderer.theme.name == "decker"
-        assert renderer._header.theme.name == "decker"
-        assert renderer._footer.theme_name == "decker"
+    def test_tool_error_uses_error_style(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_event(ToolResult(tool_name="bash", output="fail", is_error=True))
+        assert "ERROR" in log.rendered_text()
 
-    def test_cycle_theme(self) -> None:
-        reg = ThemeRegistry()
-        renderer, buf = _fixed_renderer(DEFAULT_THEME)
-        renderer.cycle_theme(reg)
-        assert renderer.theme.name != "default"
+    def test_hidden_token_usage(self) -> None:
+        layout = LayoutConfig(token_usage=SectionConfig(visible=False))
+        renderer, log = _fixed_renderer(layout=layout)
+        renderer.render_event(
+            ProviderMeta(
+                model="test", provider="test", usage={"input_tokens": 99, "output_tokens": 1}
+            )
+        )
+        # Tokens still tracked in header but usage line not written to log
+        assert renderer._header.input_tokens == 99
+        assert "99" not in log.rendered_text()
