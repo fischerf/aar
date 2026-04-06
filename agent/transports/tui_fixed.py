@@ -287,6 +287,17 @@ class HistoryInput(Input):
         self._history: list[str] = []
         self._history_index: int = -1
         self._draft: str = ""  # preserves in-progress input when navigating
+        self._border_type: str = "tall"
+        self._border_color: str = "#444444"
+        self._border_color_focus: str = "#888888"
+
+    def on_focus(self) -> None:
+        """Switch to the focused border color."""
+        self.styles.border = (self._border_type, self._border_color_focus)
+
+    def on_blur(self) -> None:
+        """Switch back to the unfocused border color."""
+        self.styles.border = (self._border_type, self._border_color)
 
     def add_to_history(self, text: str) -> None:
         """Add a command to the history (deduplicates consecutive)."""
@@ -910,6 +921,13 @@ class AarFixedApp(App):
         try:
             inp = self.query_one("#user-input", HistoryInput)
             inp.styles.background = fl.input_background
+            ifield = fl.input_field
+            inp.styles.border = (ifield.border_type, ifield.border_color)
+            inp.styles.color = ifield.text_color
+            # Store focus color for on_focus / on_blur
+            inp._border_color = ifield.border_color
+            inp._border_color_focus = ifield.border_color_focus
+            inp._border_type = ifield.border_type
         except Exception:
             pass
 

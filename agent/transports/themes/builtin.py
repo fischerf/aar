@@ -8,6 +8,7 @@ from agent.transports.themes.models import (
     FixedLayoutRegion,
     FooterStyle,
     HeaderStyle,
+    InputFieldStyle,
     PanelStyle,
     ScrollbarConfig,
     SeparatorStyle,
@@ -91,6 +92,13 @@ DEFAULT_THEME = Theme(
     fixed_layout=FixedLayoutConfig(
         body_background="#0e0e0e",
         input_background="#111118",
+        input_field=InputFieldStyle(
+            border_color="#444444",
+            border_color_focus="#888888",
+            cursor_background="#cccccc",
+            cursor_foreground="#000000",
+            text_color="#ffffff",
+        ),
         selected_block_style="on #1a2a3a",
         scrollbar=ScrollbarConfig(
             color="#444444",
@@ -177,6 +185,13 @@ CLAUDE_THEME = Theme(
     fixed_layout=FixedLayoutConfig(
         body_background="#1e1b16",
         input_background="#2d2a24",
+        input_field=InputFieldStyle(
+            border_color="#5a5a6e",
+            border_color_focus="#d4a574",
+            cursor_background="#d4a574",
+            cursor_foreground="#1e1b16",
+            text_color="#d4a574",
+        ),
         selected_block_style="on #3a3630",
         scrollbar=ScrollbarConfig(
             color="#5a5a6e",
@@ -263,6 +278,13 @@ DECKER_THEME = Theme(
     fixed_layout=FixedLayoutConfig(
         body_background="#050510",
         input_background="#0a0a1a",
+        input_field=InputFieldStyle(
+            border_color="#9d00ff",
+            border_color_focus="#00fff7",
+            cursor_background="#00fff7",
+            cursor_foreground="#050510",
+            text_color="#00fff7",
+        ),
         selected_block_style="on #1a0a2e",
         scrollbar=ScrollbarConfig(
             color="#9d00ff",
@@ -355,6 +377,13 @@ SLEEK_THEME = Theme(
         ],
         body_background="#0d1117",
         input_background="#16161e",
+        input_field=InputFieldStyle(
+            border_color="#3a3a4a",
+            border_color_focus="#a0d2db",
+            cursor_background="#a0d2db",
+            cursor_foreground="#0d1117",
+            text_color="#a0d2db",
+        ),
         selected_block_style="on #1e2430",
         scrollbar=ScrollbarConfig(
             color="#3a3a4a",

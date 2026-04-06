@@ -132,6 +132,18 @@ class ScrollbarConfig(BaseModel):
     scroll_speed: int = 3  # lines per scroll tick (mouse wheel / PgUp / PgDn)
 
 
+class InputFieldStyle(BaseModel):
+    """Style for the input text field in the fixed TUI."""
+
+    border_type: str = "tall"  # tall, round, solid, heavy, none, etc.
+    border_color: str = "#444444"
+    border_color_focus: str = "#888888"
+    placeholder_color: str = "#555555"
+    cursor_background: str = "#cccccc"
+    cursor_foreground: str = "#000000"
+    text_color: str = "#ffffff"
+
+
 class FixedLayoutConfig(BaseModel):
     """Layout configuration for the full-screen fixed TUI.
 
@@ -148,6 +160,7 @@ class FixedLayoutConfig(BaseModel):
     )
     body_background: str = "#0e0e0e"
     input_background: str = "#111118"
+    input_field: InputFieldStyle = Field(default_factory=InputFieldStyle)
     selected_block_style: str = "on #2a2a3a"  # highlight color for selected blocks
     scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
 
