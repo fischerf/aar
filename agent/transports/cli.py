@@ -665,7 +665,7 @@ def tui(
         None,
         "--theme",
         "-t",
-        help="TUI theme name (bernstein, default, decker, sleek) or path to theme JSON",
+        help="TUI theme name (default, contrast, decker, sleek) or path to theme JSON",
     ),
     fixed: bool = typer.Option(
         False,

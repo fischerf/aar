@@ -1,4 +1,4 @@
-"""Built-in theme definitions: bernstein (default), default, decker, sleek."""
+"""Built-in theme definitions: default (bernstein), contrast, decker, sleek."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ from agent.transports.themes.models import (
 _DEFAULT_SCROLL_SPEED = 3
 
 # ---------------------------------------------------------------------------
-# bernstein — slim, warm amber palette (default)
+# default — slim, warm amber palette (bernstein)
 # ---------------------------------------------------------------------------
 BERNSTEIN_THEME = Theme(
-    name="bernstein",
+    name="default",
     description="A slim, modern theme inspired by the warm, sophisticated Bernstein amber palette.",
     assistant=PanelStyle(
         title_style="bold #ffb30f",
@@ -122,10 +122,10 @@ BERNSTEIN_THEME = Theme(
 DEFAULT_THEME = BERNSTEIN_THEME
 
 # ---------------------------------------------------------------------------
-# classic — matches the original hardcoded TUI styles exactly
+# contrast — matches the original hardcoded TUI styles exactly
 # ---------------------------------------------------------------------------
 CLASSIC_THEME = Theme(
-    name="default",
+    name="contrast",
     description="Classic Aar palette — green, yellow, cyan, red",
     assistant=PanelStyle(
         title_style="bold green",

@@ -129,7 +129,7 @@ class SafetyConfig(BaseModel):
 
 
 class TUIConfig(BaseModel):
-    theme: str = "bernstein"
+    theme: str = "default"
     layout: dict = Field(default_factory=dict)
 
 
