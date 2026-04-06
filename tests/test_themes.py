@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from agent.core.agent import Agent
+from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
@@ -39,9 +41,12 @@ from agent.transports.themes.models import (
     ScrollbarConfig,
 )
 from agent.transports.tui_fixed import (
+    AarFixedApp,
     FixedTUIRenderer,
     FooterBar,
     HeaderBar,
+    HistoryInput,
+    SelectableRichLog,
 )
 
 
@@ -596,3 +601,350 @@ class TestFixedTUIRenderer:
         # Tokens still tracked in header but usage line not written to log
         assert renderer._header.input_tokens == 99
         assert "99" not in log.rendered_text()
+
+
+# ------------------------------------------------------------------
+# HistoryInput — command history with up/down arrows
+# ------------------------------------------------------------------
+
+
+class TestHistoryInput:
+    """Test the HistoryInput widget's history management (no Textual app needed)."""
+
+    def _make_input(self) -> HistoryInput:
+        """Create a detached HistoryInput for unit testing."""
+        inp = HistoryInput.__new__(HistoryInput)
+        inp._history = []
+        inp._history_index = -1
+        inp._draft = ""
+        return inp
+
+    def test_add_to_history(self) -> None:
+        inp = self._make_input()
+        inp.add_to_history("hello")
+        inp.add_to_history("world")
+        assert inp._history == ["hello", "world"]
+
+    def test_add_deduplicates_consecutive(self) -> None:
+        inp = self._make_input()
+        inp.add_to_history("same")
+        inp.add_to_history("same")
+        assert inp._history == ["same"]
+
+    def test_add_empty_ignored(self) -> None:
+        inp = self._make_input()
+        inp.add_to_history("")
+        inp.add_to_history("   ")
+        assert inp._history == []
+
+    def test_history_resets_index_on_add(self) -> None:
+        inp = self._make_input()
+        inp.add_to_history("first")
+        inp._history_index = 0
+        inp.add_to_history("second")
+        assert inp._history_index == -1
+
+
+# ------------------------------------------------------------------
+# SelectableRichLog — block tracking and copy support
+# ------------------------------------------------------------------
+
+
+class _MockSelectableLog:
+    """Minimal stand-in for SelectableRichLog block tracking in unit tests."""
+
+    def __init__(self) -> None:
+        self._blocks: list[str] = []
+        self._selected_block: int | None = None
+
+    def write(self, content: object, **kwargs) -> None:  # noqa: ANN003
+        self._blocks.append(str(content))
+
+    def clear(self) -> None:
+        self._blocks.clear()
+        self._selected_block = None
+
+    def get_last_block_text(self) -> str:
+        if self._blocks:
+            return self._blocks[-1]
+        return ""
+
+    def get_all_text(self) -> str:
+        return "\n\n".join(self._blocks)
+
+    def get_selected_block_text(self) -> str:
+        if self._selected_block is not None and 0 <= self._selected_block < len(self._blocks):
+            return self._blocks[self._selected_block]
+        return ""
+
+
+class TestSelectableRichLog:
+    def test_tracks_blocks(self) -> None:
+        log = _MockSelectableLog()
+        log.write("block 1")
+        log.write("block 2")
+        assert len(log._blocks) == 2
+
+    def test_get_last_block(self) -> None:
+        log = _MockSelectableLog()
+        log.write("first")
+        log.write("second")
+        assert log.get_last_block_text() == "second"
+
+    def test_get_last_block_empty(self) -> None:
+        log = _MockSelectableLog()
+        assert log.get_last_block_text() == ""
+
+    def test_get_all_text(self) -> None:
+        log = _MockSelectableLog()
+        log.write("a")
+        log.write("b")
+        assert "a" in log.get_all_text()
+        assert "b" in log.get_all_text()
+
+    def test_selected_block(self) -> None:
+        log = _MockSelectableLog()
+        log.write("alpha")
+        log.write("beta")
+        log._selected_block = 0
+        assert log.get_selected_block_text() == "alpha"
+        log._selected_block = 1
+        assert log.get_selected_block_text() == "beta"
+
+    def test_no_selection_returns_empty(self) -> None:
+        log = _MockSelectableLog()
+        log.write("x")
+        assert log.get_selected_block_text() == ""
+
+    def test_clear_resets(self) -> None:
+        log = _MockSelectableLog()
+        log.write("data")
+        log._selected_block = 0
+        log.clear()
+        assert log._blocks == []
+        assert log._selected_block is None
+
+
+# ------------------------------------------------------------------
+# Thinking toggle
+# ------------------------------------------------------------------
+
+
+class TestThinkingToggle:
+    def test_toggle_disables_reasoning(self) -> None:
+        renderer, log = _fixed_renderer()
+        assert renderer._thinking_visible is True
+        result = renderer.toggle_thinking()
+        assert result is False
+        assert renderer._thinking_visible is False
+        # Reasoning events should now be suppressed
+        renderer.render_event(ReasoningBlock(content="hidden thought"))
+        assert "hidden thought" not in log.rendered_text()
+
+    def test_toggle_re_enables_reasoning(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.toggle_thinking()  # off
+        renderer.toggle_thinking()  # on
+        assert renderer._thinking_visible is True
+        renderer.render_event(ReasoningBlock(content="visible thought"))
+        assert "Thinking" in log.rendered_text()
+
+    def test_toggle_updates_header(self) -> None:
+        renderer, _ = _fixed_renderer()
+        assert renderer._header.thinking_enabled is True
+        renderer.toggle_thinking()
+        assert renderer._header.thinking_enabled is False
+
+
+# ------------------------------------------------------------------
+# HeaderBar with thinking indicator
+# ------------------------------------------------------------------
+
+
+class TestHeaderBarThinking:
+    def test_render_shows_thinking_on(self) -> None:
+        bar = HeaderBar(DEFAULT_THEME)
+        bar.thinking_enabled = True
+        rendered = bar.render()
+        assert "think:on" in rendered.plain
+
+    def test_render_shows_thinking_off(self) -> None:
+        bar = HeaderBar(DEFAULT_THEME)
+        bar.thinking_enabled = False
+        rendered = bar.render()
+        assert "think:off" in rendered.plain
+
+
+# ------------------------------------------------------------------
+# FooterBar shows key hints
+# ------------------------------------------------------------------
+
+
+class TestFooterBarKeyHints:
+    def test_footer_shows_keybindings(self) -> None:
+        bar = FooterBar(DEFAULT_THEME)
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "Ctrl+T" in plain
+        assert "Ctrl+K" in plain
+        assert "Ctrl+L" in plain
+        assert "Ctrl+Y" in plain
+        assert "Esc" in plain
+
+
+# ------------------------------------------------------------------
+# Welcome message includes shortcut hints
+# ------------------------------------------------------------------
+
+
+class TestWelcomeShortcuts:
+    def test_welcome_lists_shortcuts(self) -> None:
+        renderer, log = _fixed_renderer()
+        renderer.render_welcome()
+        output = log.rendered_text()
+        assert "Ctrl+T" in output
+        assert "Ctrl+K" in output
+        assert "input history" in output
+
+
+# ------------------------------------------------------------------
+# AarFixedApp integration tests (Textual app startup)
+# ------------------------------------------------------------------
+
+
+def _make_mock_agent() -> Agent:
+    """Create a minimal Agent with a stub provider for testing."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agent.core.config import AgentConfig
+
+    config = AgentConfig()
+    provider = MagicMock()
+    provider.name = "test"
+    provider.supports_audio = False
+    provider.supports_reasoning = False
+    provider.supports_vision = False
+    registry = MagicMock()
+    registry.names.return_value = []
+    registry.list_tools.return_value = []
+    agent = MagicMock(spec=Agent)
+    agent.config = config
+    agent.provider = provider
+    agent.registry = registry
+    agent.on_event = MagicMock()
+    agent.run = AsyncMock()
+    return agent
+
+
+class TestAarFixedAppStartup:
+    """Integration tests: the Textual app actually mounts and renders."""
+
+    @pytest.mark.asyncio
+    async def test_app_starts_and_has_widgets(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            # App mounted — check core widgets exist
+            assert app.query_one(HeaderBar) is not None
+            assert app.query_one(FooterBar) is not None
+            assert app.query_one(SelectableRichLog) is not None
+            assert app.query_one(HistoryInput) is not None
+
+    @pytest.mark.asyncio
+    async def test_app_renders_welcome(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            log = app.query_one("#body-log", SelectableRichLog)
+            # Welcome message should be in the blocks
+            assert any("Aar Agent TUI" in b for b in log._blocks)
+
+    @pytest.mark.asyncio
+    async def test_app_header_shows_provider(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            header = app.query_one(HeaderBar)
+            rendered = header.render()
+            assert config.provider.name in rendered.plain
+
+    @pytest.mark.asyncio
+    async def test_app_escape_exits(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("escape")
+            # App should be exiting
+            assert app._exit is True or app.return_code is not None or not app.is_running
+
+    @pytest.mark.asyncio
+    async def test_app_slash_command_theme_list(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", HistoryInput)
+            inp.value = "/theme"
+            await pilot.press("enter")
+            log = app.query_one("#body-log", SelectableRichLog)
+            all_text = log.get_all_text()
+            assert "default" in all_text
+
+    @pytest.mark.asyncio
+    async def test_app_ctrl_t_cycles_theme(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            initial_theme = app._renderer.theme.name
+            await pilot.press("ctrl+t")
+            assert app._renderer.theme.name != initial_theme
+
+    @pytest.mark.asyncio
+    async def test_app_ctrl_k_toggles_thinking(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            assert app._renderer._thinking_visible is True
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            assert app._renderer._thinking_visible is False
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            assert app._renderer._thinking_visible is True
+
+    @pytest.mark.asyncio
+    async def test_app_input_history(self) -> None:
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", HistoryInput)
+            # Type and submit two slash commands (these don't trigger agent.run)
+            inp.value = "/theme"
+            await pilot.press("enter")
+            await pilot.pause()
+            inp.value = "/tools"
+            await pilot.press("enter")
+            await pilot.pause()
+            # History should have two entries
+            assert inp._history == ["/theme", "/tools"]
+
+    @pytest.mark.asyncio
+    async def test_app_with_each_builtin_theme(self) -> None:
+        """Ensure the app starts cleanly with every built-in theme."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        for theme_name in ["default", "claude", "decker"]:
+            registry = ThemeRegistry()
+            theme = registry.get(theme_name)
+            app = AarFixedApp(agent=agent, config=config, theme=theme, registry=registry)
+            async with app.run_test(size=(120, 40)) as _pilot:
+                assert app._renderer.theme.name == theme_name
+                header = app.query_one(HeaderBar)
+                assert header.theme.name == theme_name

@@ -260,31 +260,62 @@ Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io
 ### Features
 
 - **Scrollable body** with visual scrollbars
-- **Mouse wheel** scrolling
+- **Mouse wheel** scrolling (non-blocking — scroll while the LLM is working)
 - **Page Up / Page Down** keyboard scrolling
 - **Input widget** with full terminal input support (cursor, backspace, selection)
-- **Fixed header** showing provider/model, token counts, session ID, agent state
-- **Fixed footer** showing step count and theme name
+- **Command history** — press **↑ / ↓** to cycle through previous inputs
+- **Block selection & copy** — click a block to select it, then **Ctrl+Y** to copy to clipboard
+- **Fixed header** showing provider/model, token counts, session ID, agent state, thinking status
+- **Fixed footer** showing step count, theme name, and keyboard shortcut hints
 - **Configurable layout** — reorder, resize, or hide regions per theme
-- **Escape** to quit
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Escape** | Quit |
+| **Ctrl+T** | Cycle to next theme |
+| **Ctrl+K** | Toggle thinking/reasoning display |
+| **Ctrl+L** | Clear screen and reset counters |
+| **Ctrl+Y** | Copy selected (or last) block to clipboard |
+| **Page Up / Page Down** | Scroll the conversation body |
+| **↑ / ↓** (in input) | Navigate command history |
+
+### Slash commands
+
+All commands from the scrollable TUI also work in fixed mode:
+
+| Command | Action |
+|---------|--------|
+| `/quit`, `/exit`, `/q` | Quit |
+| `/status` | Show session info |
+| `/tools` | List available tools |
+| `/policy` | Show safety policy |
+| `/theme` | List themes |
+| `/theme <name>` | Switch theme |
+| `/theme next` | Cycle theme |
+| `/think` | Toggle thinking display |
+| `/copy` | Copy selected block to clipboard |
+| `/clear` | Clear screen |
 
 ### Layout
 
 ```
-+------------------------------------------------------------------+
-| Header bar (fixed)                                                |
-| provider: ollama / llama3 | tokens: 1234in/567out | session: abc |
-+──────────────────────────────────────────────────────────────────+
-|                                                                  ┃|
-| Scrollable conversation body (with scrollbar)                    ┃|
-| (assistant messages, tool calls, results, reasoning, errors)     ┃|
-|                                                                  ┃|
-+──────────────────────────────────────────────────────────────────+
-| > type your message...                                            |
-+──────────────────────────────────────────────────────────────────+
-| Footer bar (fixed)                                                |
-| step: 5 | theme: claude                                          |
-+------------------------------------------------------------------+
++------------------------------------------------------------------------+
+| Header bar (fixed)                                                      |
+| ollama / llama3 | tokens: 1234in/567out | abc… | idle | think:on       |
++────────────────────────────────────────────────────────────────────────+
+|                                                                        ┃|
+| Scrollable conversation body (with scrollbar)                          ┃|
+| (assistant messages, tool calls, results, reasoning, errors)           ┃|
+| Click a block to select it for copy                                    ┃|
+|                                                                        ┃|
++────────────────────────────────────────────────────────────────────────+
+| > type your message... (↑/↓ for history)                                |
++────────────────────────────────────────────────────────────────────────+
+| Footer bar (fixed)                                                      |
+| step: 5 | theme: claude | Esc quit  Ctrl+T theme  Ctrl+K think  ...    |
++------------------------------------------------------------------------+
 ```
 
 All `/theme`, `/status`, `/tools`, `/policy`, `/clear`, and `/quit` commands work in fixed mode.

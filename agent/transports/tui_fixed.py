@@ -21,6 +21,7 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
+    from textual.events import Click
     from textual.widgets import Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -76,6 +77,7 @@ class HeaderBar(Static):
         self.output_tokens: int = 0
         self.session_id: str = ""
         self.state: str = "idle"
+        self.thinking_enabled: bool = True
 
     def update_tokens(self, usage: dict[str, int]) -> None:
         self.input_tokens += usage.get("input_tokens", 0)
@@ -87,6 +89,7 @@ class HeaderBar(Static):
         if self.model_name:
             provider += f" / {self.model_name}"
         session = f"{self.session_id[:8]}..." if self.session_id else ""
+        thinking_label = "think:on" if self.thinking_enabled else "think:off"
         parts = [
             (provider, h.provider_style),
             ("  |  ", h.separator_style),
@@ -97,11 +100,13 @@ class HeaderBar(Static):
             parts.append((session, h.session_style))
             parts.append(("  |  ", h.separator_style))
         parts.append((self.state, h.state_style))
+        parts.append(("  |  ", h.separator_style))
+        parts.append((thinking_label, h.tokens_style))
         return Text.assemble(*parts)
 
 
 class FooterBar(Static):
-    """Fixed footer showing step count and theme name."""
+    """Fixed footer showing step count, theme name, and key hints."""
 
     DEFAULT_CSS = """
     FooterBar {
@@ -123,6 +128,17 @@ class FooterBar(Static):
             (f"step: {self.step_count}", f.step_style),
             ("  |  ", f.separator_style),
             (f"theme: {self.theme_name}", f.theme_style),
+            ("  |  ", f.separator_style),
+            ("Esc", f.step_style),
+            (" quit  ", f.separator_style),
+            ("Ctrl+T", f.step_style),
+            (" theme  ", f.separator_style),
+            ("Ctrl+K", f.step_style),
+            (" think  ", f.separator_style),
+            ("Ctrl+L", f.step_style),
+            (" clear  ", f.separator_style),
+            ("Ctrl+Y", f.step_style),
+            (" copy", f.separator_style),
         )
 
 
@@ -144,6 +160,147 @@ class SeparatorBar(Static):
 
 
 # ---------------------------------------------------------------------------
+# HistoryInput — Input widget with command history (up/down arrows)
+# ---------------------------------------------------------------------------
+
+
+class HistoryInput(Input):
+    """Input widget with command history navigation via up/down arrow keys."""
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self._history: list[str] = []
+        self._history_index: int = -1
+        self._draft: str = ""  # preserves in-progress input when navigating
+
+    def add_to_history(self, text: str) -> None:
+        """Add a command to the history (deduplicates consecutive)."""
+        text = text.strip()
+        if text and (not self._history or self._history[-1] != text):
+            self._history.append(text)
+        self._history_index = -1
+        self._draft = ""
+
+    def _key_up(self, _event: object) -> None:
+        """Navigate to the previous history entry."""
+        if not self._history:
+            return
+        if self._history_index == -1:
+            self._draft = self.value
+            self._history_index = len(self._history) - 1
+        elif self._history_index > 0:
+            self._history_index -= 1
+        self.value = self._history[self._history_index]
+        self.cursor_position = len(self.value)
+
+    def _key_down(self, _event: object) -> None:
+        """Navigate to the next history entry or back to the draft."""
+        if self._history_index == -1:
+            return
+        if self._history_index < len(self._history) - 1:
+            self._history_index += 1
+            self.value = self._history[self._history_index]
+        else:
+            self._history_index = -1
+            self.value = self._draft
+        self.cursor_position = len(self.value)
+
+    async def _on_key(self, event: object) -> None:
+        """Intercept up/down keys for history navigation."""
+        key = getattr(event, "key", "")
+        if key == "up":
+            self._key_up(event)
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+        elif key == "down":
+            self._key_down(event)
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# SelectableRichLog — RichLog with block selection and copy support
+# ---------------------------------------------------------------------------
+
+
+class SelectableRichLog(RichLog):
+    """RichLog that tracks rendered blocks and supports click-to-select + copy."""
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self._blocks: list[str] = []  # plain-text per block
+        self._selected_block: int | None = None
+
+    def write(  # type: ignore[override]
+        self,
+        content: object,
+        width: int | None = None,
+        expand: bool = False,
+        shrink: bool = True,
+        scroll_end: bool | None = None,
+        animate: bool = False,
+    ) -> SelectableRichLog:
+        """Write content and track its plain text for copy support."""
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=False, width=200, no_color=True)
+        try:
+            console.print(content)
+        except Exception:
+            buf.write(str(content))
+        self._blocks.append(buf.getvalue().strip())
+        return super().write(  # type: ignore[return-value]
+            content,
+            width=width,
+            expand=expand,
+            shrink=shrink,
+            scroll_end=scroll_end,
+            animate=animate,
+        )
+
+    def clear(self) -> None:
+        self._blocks.clear()
+        self._selected_block = None
+        super().clear()
+
+    def get_last_block_text(self) -> str:
+        """Get the plain text of the most recent block."""
+        if self._blocks:
+            return self._blocks[-1]
+        return ""
+
+    def get_all_text(self) -> str:
+        """Get all blocks as plain text, separated by newlines."""
+        return "\n\n".join(self._blocks)
+
+    async def on_click(self, event: Click) -> None:
+        """Select the block nearest to the click position for copy."""
+        if not self._blocks:
+            return
+        # Estimate which block was clicked based on Y offset within scroll region.
+        # Each block is roughly proportional: map click Y to block index.
+        total_lines = max(self.virtual_size.height, 1)
+        click_y = event.y + self.scroll_offset.y
+        ratio = click_y / total_lines
+        idx = int(ratio * len(self._blocks))
+        idx = max(0, min(idx, len(self._blocks) - 1))
+        self._selected_block = idx
+
+    def get_selected_block_text(self) -> str:
+        """Return the text of the currently selected block."""
+        if self._selected_block is not None and 0 <= self._selected_block < len(self._blocks):
+            return self._blocks[self._selected_block]
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # FixedTUIRenderer — renders events into a RichLog
 # ---------------------------------------------------------------------------
 
@@ -153,7 +310,7 @@ class FixedTUIRenderer:
 
     def __init__(
         self,
-        log: RichLog,
+        log: RichLog | SelectableRichLog,
         header: HeaderBar,
         footer: FooterBar,
         verbose: bool = False,
@@ -169,6 +326,7 @@ class FixedTUIRenderer:
         self.theme = theme or DEFAULT_THEME
         self.layout = layout or LayoutConfig()
         self._extension_panels: dict[str, Callable] = {}
+        self._thinking_visible = True
 
     # ------------------------------------------------------------------
     # Theme switching
@@ -194,6 +352,21 @@ class FixedTUIRenderer:
         except ValueError:
             next_name = names[0]
         self.set_theme(registry.get(next_name), app)
+
+    # ------------------------------------------------------------------
+    # Thinking toggle
+    # ------------------------------------------------------------------
+
+    def toggle_thinking(self) -> bool:
+        """Toggle reasoning block visibility. Returns the new state."""
+        self._thinking_visible = not self._thinking_visible
+        self._header.thinking_enabled = self._thinking_visible
+        self._header.refresh()
+        label = "enabled" if self._thinking_visible else "disabled"
+        self._log.write(
+            Text(f"Thinking display {label}", style=self.theme.dim_text)
+        )
+        return self._thinking_visible
 
     # ------------------------------------------------------------------
     # Event rendering (into RichLog)
@@ -263,7 +436,7 @@ class FixedTUIRenderer:
             )
 
         elif isinstance(event, ReasoningBlock) and event.content:
-            if not self.layout.reasoning.visible:
+            if not self.layout.reasoning.visible or not self._thinking_visible:
                 return
             text = event.content
             if len(text) > 500:
@@ -321,8 +494,16 @@ class FixedTUIRenderer:
                 "Type your message and press Enter.\n"
                 "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
                 "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-                "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n"
-                "Scroll: mouse wheel, Page Up/Down, arrow keys",
+                "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
+                "[bold]Shortcuts:[/]\n"
+                "  [bold]Ctrl+T[/]  cycle theme    "
+                "[bold]Ctrl+K[/]  toggle thinking\n"
+                "  [bold]Ctrl+L[/]  clear screen   "
+                "[bold]Ctrl+Y[/]  copy last block\n"
+                "  [bold]Escape[/]  quit           "
+                "[bold]PgUp/PgDn[/]  scroll\n"
+                "  [bold]↑ / ↓[/]   input history  "
+                "[bold]Click[/]  select block",
                 border_style=t.welcome.border_style,
                 padding=t.welcome.padding,
             )
@@ -341,6 +522,10 @@ class AarFixedApp(App):
         Binding("escape", "quit", "Quit"),
         Binding("pageup", "scroll_up", "Page Up", show=False),
         Binding("pagedown", "scroll_down", "Page Down", show=False),
+        Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False),
+        Binding("ctrl+k", "toggle_thinking", "Toggle thinking", show=False, priority=True),
+        Binding("ctrl+l", "clear_screen", "Clear screen", show=False),
+        Binding("ctrl+y", "copy_block", "Copy selected block", show=False),
     ]
 
     CSS = """
@@ -401,10 +586,12 @@ class AarFixedApp(App):
                 HeaderBar(self._theme),
                 SeparatorBar(self._theme.header.separator_style),
             ],
-            "body": lambda: [RichLog(id="body-log", wrap=True, markup=True)],
+            "body": lambda: [
+                SelectableRichLog(id="body-log", wrap=True, markup=True, auto_scroll=True),
+            ],
             "input": lambda: [
                 SeparatorBar(self._theme.footer.separator_style),
-                Input(placeholder="> type your message...", id="user-input"),
+                HistoryInput(placeholder="> type your message...", id="user-input"),
             ],
             "footer": lambda: [
                 SeparatorBar(self._theme.footer.separator_style),
@@ -424,7 +611,7 @@ class AarFixedApp(App):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
-        log = self.query_one("#body-log", RichLog)
+        log = self.query_one("#body-log", SelectableRichLog)
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
 
@@ -463,7 +650,7 @@ class AarFixedApp(App):
         self._renderer.render_welcome()
 
         # Focus the input
-        self.query_one("#user-input", Input).focus()
+        self.query_one("#user-input", HistoryInput).focus()
 
     def apply_theme(self, theme: Theme) -> None:
         """Apply theme colors to Textual widget styles."""
@@ -473,7 +660,7 @@ class AarFixedApp(App):
 
         # Body log
         try:
-            log = self.query_one("#body-log", RichLog)
+            log = self.query_one("#body-log", SelectableRichLog)
             log.styles.background = fl.body_background
             log.styles.scrollbar_color = sb.color
             log.styles.scrollbar_color_hover = sb.color_hover
@@ -487,7 +674,7 @@ class AarFixedApp(App):
 
         # Input
         try:
-            inp = self.query_one("#user-input", Input)
+            inp = self.query_one("#user-input", HistoryInput)
             inp.styles.background = fl.input_background
         except Exception:
             pass
@@ -507,14 +694,70 @@ class AarFixedApp(App):
             pass
 
     # ------------------------------------------------------------------
-    # Key bindings
+    # Key binding actions
     # ------------------------------------------------------------------
 
     def action_scroll_up(self) -> None:
-        self.query_one("#body-log", RichLog).scroll_page_up()
+        self.query_one("#body-log", SelectableRichLog).scroll_page_up()
 
     def action_scroll_down(self) -> None:
-        self.query_one("#body-log", RichLog).scroll_page_down()
+        self.query_one("#body-log", SelectableRichLog).scroll_page_down()
+
+    def action_cycle_theme(self) -> None:
+        """Ctrl+T — cycle to the next theme."""
+        if self._renderer:
+            self._renderer.cycle_theme(self._theme_registry, self)
+
+    def action_toggle_thinking(self) -> None:
+        """Ctrl+K — toggle reasoning/thinking block visibility."""
+        if self._renderer:
+            self._renderer.toggle_thinking()
+
+    def action_clear_screen(self) -> None:
+        """Ctrl+L — clear the scrollback and reset counters."""
+        if not self._renderer:
+            return
+        log = self.query_one("#body-log", SelectableRichLog)
+        header = self.query_one(HeaderBar)
+        footer = self.query_one(FooterBar)
+        log.clear()
+        self._session = None
+        header.session_id = ""
+        header.input_tokens = 0
+        header.output_tokens = 0
+        header.state = "idle"
+        header.refresh()
+        footer.step_count = 0
+        footer.refresh()
+        self._renderer._step_count = 0
+        self._renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
+        self._renderer.render_welcome()
+
+    def action_copy_block(self) -> None:
+        """Ctrl+Y — copy the selected (or last) block to the clipboard."""
+        log = self.query_one("#body-log", SelectableRichLog)
+        text = log.get_selected_block_text()
+        if not text:
+            text = log.get_last_block_text()
+        if text:
+            self.copy_to_clipboard(text)
+            if self._renderer:
+                self._renderer._log.write(
+                    Text("Copied to clipboard", style=self._renderer.theme.dim_text)
+                )
+
+    # ------------------------------------------------------------------
+    # Scroll-aware auto_scroll: pause on manual scroll, resume at bottom
+    # ------------------------------------------------------------------
+
+    def on_rich_log_scroll(self) -> None:
+        """When the user scrolls, pause auto-scroll if not at the bottom."""
+        try:
+            log = self.query_one("#body-log", SelectableRichLog)
+            at_bottom = log.scroll_offset.y >= (log.virtual_size.height - log.size.height - 2)
+            log.auto_scroll = at_bottom
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Input handling
@@ -523,15 +766,18 @@ class AarFixedApp(App):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input from the Input widget."""
         user_input = event.value
-        event.input.value = ""
+        inp = self.query_one("#user-input", HistoryInput)
+        inp.value = ""
         stripped = user_input.strip()
         if not stripped:
             return
 
+        # Add to input history
+        inp.add_to_history(stripped)
+
         assert self._renderer is not None
-        log = self.query_one("#body-log", RichLog)
+        log = self.query_one("#body-log", SelectableRichLog)
         header = self.query_one(HeaderBar)
-        footer = self.query_one(FooterBar)
 
         # Echo input
         log.write(Text(f"  > {stripped}", style=self._renderer.theme.prompt_style))
@@ -568,18 +814,7 @@ class AarFixedApp(App):
                 log.write(Text(line))
             return
         elif stripped.lower() == "/clear":
-            log.clear()
-            self._session = None
-            header.session_id = ""
-            header.input_tokens = 0
-            header.output_tokens = 0
-            header.state = "idle"
-            header.refresh()
-            footer.step_count = 0
-            footer.refresh()
-            self._renderer._step_count = 0
-            self._renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
-            self._renderer.render_welcome()
+            self.action_clear_screen()
             return
         elif stripped.lower().startswith("/theme"):
             parts = stripped.split(maxsplit=1)
@@ -608,6 +843,12 @@ class AarFixedApp(App):
                             )
                         )
             return
+        elif stripped.lower() == "/think":
+            self._renderer.toggle_thinking()
+            return
+        elif stripped.lower() == "/copy":
+            self.action_copy_block()
+            return
 
         # --- Parse multimodal attachments --------------------------------
         content = parse_multimodal_input(stripped)
@@ -631,17 +872,19 @@ class AarFixedApp(App):
         # --- Run agent ---------------------------------------------------
         header.state = "running"
         header.refresh()
-        event.input.placeholder = "working..."
-        event.input.disabled = True
+        inp.placeholder = "working..."
+        inp.disabled = True
+        # Re-enable auto-scroll when starting agent work
+        log.auto_scroll = True
 
         self._session = await self._agent.run(content, self._session)
 
         header.state = self._session.state.value
         header.session_id = self._session.session_id
         header.refresh()
-        event.input.placeholder = "> type your message..."
-        event.input.disabled = False
-        event.input.focus()
+        inp.placeholder = "> type your message..."
+        inp.disabled = False
+        inp.focus()
 
         # Handle recoverable errors
         if self._session.state == AgentState.ERROR:
