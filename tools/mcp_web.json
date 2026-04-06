@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "web",
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, 'tools'); from web_mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
+      "prefix_tools": true
+    }
+  ]
+}

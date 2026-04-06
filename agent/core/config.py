@@ -6,11 +6,12 @@ import json
 import os
 import platform
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-def _default_system_prompt() -> str:
+def _default_system_prompt(shell_path: str = "") -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
     os_name = platform.system()  # "Windows", "Linux", "Darwin"
     cwd = str(Path.cwd())
@@ -22,7 +23,9 @@ def _default_system_prompt() -> str:
         f"Working directory: {cwd}",
     ]
 
-    if os.name == "nt":
+    if shell_path:
+        lines.append(f"Shell: {shell_path}")
+    elif os.name == "nt":
         lines += [
             "",
             "Shell: commands run via Git Bash (bash -c). Standard bash/Unix commands work (ls, cat, grep, find, pwd, …).",
@@ -36,21 +39,25 @@ def _default_system_prompt() -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(
+    shell_path: str = "",
+    project_rules_dir: Path | None = None,
+) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
     Layers (all optional except base):
       1. Base     — runtime facts (OS, cwd, shell)
       2. Global   — ~/.aar/rules.md (user-wide preferences)
-      3. Project  — .agent/rules.md (project-specific instructions)
+      3. Project  — <project_rules_dir>/rules.md (project-specific instructions)
     """
-    sections = [_default_system_prompt()]
+    sections = [_default_system_prompt(shell_path=shell_path)]
 
     global_rules = Path.home() / ".aar" / "rules.md"
     if global_rules.is_file():
         sections.append(global_rules.read_text(encoding="utf-8").strip())
 
-    project_rules = Path.cwd() / ".agent" / "rules.md"
+    rules_dir = project_rules_dir if project_rules_dir is not None else Path(".agent")
+    project_rules = Path.cwd() / rules_dir / "rules.md"
     if project_rules.is_file():
         sections.append(project_rules.read_text(encoding="utf-8").strip())
 
@@ -129,7 +136,18 @@ class AgentConfig(BaseModel):
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
-    system_prompt: str = Field(default_factory=build_system_prompt)
+    shell_path: str = ""
+    project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
+    system_prompt: str = ""
+    log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+
+    def model_post_init(self, __context: Any) -> None:
+        """Build the system prompt from config if not explicitly provided."""
+        if not self.system_prompt:
+            self.system_prompt = build_system_prompt(
+                shell_path=self.shell_path,
+                project_rules_dir=self.project_rules_dir,
+            )
 
 
 def load_config(path: Path) -> AgentConfig:

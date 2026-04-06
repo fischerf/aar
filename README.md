@@ -2,7 +2,7 @@
 
 [![Website](https://img.shields.io/badge/website-fischerf.github.io%2Faar-blue?style=flat-square)](https://fischerf.github.io/aar/)
 
-A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports. **Aar** stands for *Adaptive Action & Reasoning*.
+A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
 
 ## Design goals
 
@@ -11,9 +11,9 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint without changing agent code
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
-- **Persistent sessions** — every run is saved as JSONL and resumable; long sessions can be compacted
+- **Persistent sessions** — every run is saved as JSONL and resumable
 - **Observable** — every provider call and tool execution is timed; sessions carry a `trace_id`
-- **Cancellable** — cooperative (`asyncio.Event`) and hard (`CancelledError`) cancellation built in
+- **Cancellable** — cooperative and hard cancellation built in
 
 ## Installation
 
@@ -21,51 +21,37 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 # Everything at once
 pip install "aar-agent[all,dev]"
 
-# or provider specific
+# Provider-specific
 pip install "aar-agent[anthropic]"
 pip install "aar-agent[openai]"
-pip install "aar-agent[ollama]"   # Ollama uses httpx, already a core dep
-pip install "aar-agent[generic]"  # Generic uses httpx, already a core dep
+pip install "aar-agent[ollama]"
+pip install "aar-agent[generic]"
 
-# or with Ollama provider + MCP support
+# With MCP support
 pip install "aar-agent[ollama,mcp]"
 
 # Core only (no LLM provider)
 pip install aar-agent
 ```
 
-> **Note:** `aar-agent` is not published to PyPI.  
-> Use the **from-source install** instructions below.
+> **Note:** `aar-agent` is not published to PyPI.
+> Use the **from-source install** below.
 
-### Installing from source (development)
-
-Clone the repo and install in *editable* mode so that changes to the source
-files take effect immediately without reinstalling:
+### Installing from source
 
 ```bash
-git clone https://github.com/your-org/aar.git
+git clone https://github.com/fischerf/aar.git
 cd aar
 
-# Full dev setup — includes pytest, pytest-asyncio, and ruff
+# Full dev setup
 pip install -e ".[all,dev]"
 
-# Core only
-pip install -e .
-
-# With a provider and MCP support
-pip install -e ".[anthropic,mcp]"
+# Verify
+aar --help
+pytest tests/ -v
 ```
 
-The `-e` flag creates a live link from `site-packages` back to the source
-tree. Editing any file under `agent/` is reflected instantly in the
-installed package — no `pip install` step needed between changes.
-
-To verify the install:
-
-```bash
-aar --help          # CLI entry-point should be on your PATH
-pytest tests/ -v      # run the full test suite (214 tests, no API keys required)
-```
+The `-e` flag creates a live link — editing files under `agent/` is reflected instantly without reinstalling.
 
 ## Quick start
 
@@ -74,8 +60,7 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 ## CLI
 
 ```bash
-# Interactive chat (workspace sandbox on by default — asks before write/execute,
-# file tools restricted to cwd)
+# Interactive chat (asks before write/execute, file tools restricted to cwd)
 aar chat
 
 # Chat with a specific provider/model
@@ -85,17 +70,17 @@ aar chat --provider ollama --model llama3
 # Disable the workspace sandbox for full access
 aar chat --no-require-approval --no-restrict-to-cwd
 
-# Run a one-shot task (permissive by default — no approval prompts)
+# One-shot task
 aar run "Refactor main.py to use async/await"
 
-# Run with workspace sandbox (opt-in for automated mode)
-aar run --require-approval --restrict-to-cwd "Delete unused imports"
+# Skip approval prompts for scripted / CI use
+aar run --no-require-approval "Refactor main.py to use async/await"
 
 # Load full config from a JSON file
 aar chat --config aar.json
 
 # Resume a previous session
-aar resume <session-id>
+aar chat --session <session-id>
 
 # List saved sessions
 aar sessions
@@ -103,7 +88,7 @@ aar sessions
 # List available tools
 aar tools
 
-# Launch the rich TUI (workspace sandbox on, like chat)
+# Launch the rich TUI
 aar tui
 
 # Start the HTTP/SSE web server
@@ -112,605 +97,14 @@ aar serve --host 0.0.0.0 --port 8080
 
 ### Verbose mode
 
-Pass `--verbose` (or `-v`) to `chat`, `run`, `resume`, or `tui` to enable richer
-operation feedback:
-
-- **Side-effect badge** before each tool name — `[read]`, `[write]`, `[exec]`, `[net]`, `[ext]`
-- **Path highlighting** — file paths in tool arguments are shown in blue
-- **Timing** — execution duration is appended to each result panel title (e.g. `Result: edit_file 42ms`)
+Pass `--verbose` (or `-v`) to enable richer feedback: side-effect badges (`[read]`, `[write]`, `[exec]`), path highlighting, and execution timing.
 
 ```bash
 aar chat --verbose
-aar run "refactor src/main.py" --verbose
-aar tui --verbose
-aar tui --verbose --mcp-config tools/mcp_servers.json --provider ollama --model qwen3.5:9b
-```
-
-or programmatic:
-
-```python
-import asyncio
-from agent import Agent, AgentConfig, ProviderConfig
-
-config = AgentConfig(
-    provider=ProviderConfig(name="anthropic", model="claude-sonnet-4-20250514"),
-    system_prompt="You are a helpful coding assistant.",
-)
-
-agent = Agent(config=config)
-
-async def main():
-    session = await agent.run("List all Python files in the current directory")
-    print(session.state)  # AgentState.COMPLETED
-
-asyncio.run(main())
-```
-
-## Configuration
-
-```python
-from agent import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
-
-config = AgentConfig(
-    provider=ProviderConfig(
-        name="anthropic",                          # "anthropic" | "openai" | "ollama" | "generic"
-        model="claude-sonnet-4-20250514",
-        api_key="...",                             # or set via env var
-        max_tokens=4096,
-        temperature=0.0,
-    ),
-    tools=ToolConfig(
-        enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
-        command_timeout=30,                        # seconds
-        max_output_chars=50_000,
-    ),
-    safety=SafetyConfig(
-        read_only=False,                           # block all writes
-        require_approval_for_writes=False,         # ask before every write
-        require_approval_for_execute=False,        # ask before every shell command
-        denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
-        allowed_paths=[],                          # whitelist (empty = allow all non-denied)
-        sandbox="local",                           # "local" | "subprocess"
-    ),
-    max_steps=50,
-    timeout=300.0,                                 # seconds
-    system_prompt="You are a helpful assistant.",
-    session_dir=".agent/sessions",
-)
-```
-
-### Configurable system prompt
-
-By default, the system prompt is assembled automatically from up to three layers:
-
-| Layer | Source | Purpose |
-|-------|--------|---------|
-| **Base** | built-in | Runtime facts — OS, working directory, shell |
-| **Global rules** | `~/.aar/rules.md` | Personal preferences that apply to all projects |
-| **Project rules** | `.agent/rules.md` | Project-specific instructions (checked into git) |
-
-Each layer is optional. If no rules files exist, the agent behaves exactly as before — only the base prompt is used. When present, the layers are concatenated in order, separated by `---`.
-
-**Global rules** — create `~/.aar/rules.md` for preferences that follow you across projects:
-
-```markdown
-# My rules
-- Always use type hints on public functions.
-- Prefer pathlib over os.path.
-- Use ruff for formatting.
-```
-
-**Project rules** — create `.agent/rules.md` for instructions specific to the current repo:
-
-```markdown
-# Project rules
-- This is a FastAPI app. Use pytest-asyncio for async tests.
-- Follow the existing service pattern in app/services/.
-```
-
-**Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
-
-## Providers
-
-### Anthropic
-
-```python
-from agent import AgentConfig, ProviderConfig
-
-config = AgentConfig(provider=ProviderConfig(
-    name="anthropic",
-    model="claude-sonnet-4-20250514",
-    api_key="sk-ant-...",         # or ANTHROPIC_API_KEY env var
-))
-```
-
-Supports: tools, streaming, extended thinking (reasoning blocks).
-
-### OpenAI
-
-```python
-config = AgentConfig(provider=ProviderConfig(
-    name="openai",
-    model="gpt-4o",
-    api_key="sk-...",             # or OPENAI_API_KEY env var
-))
-```
-
-Compatible with any OpenAI-compatible API (Azure, Together, etc.) via `base_url`.
-
-### Ollama
-
-```python
-config = AgentConfig(provider=ProviderConfig(
-    name="ollama",
-    model="llama3.2",
-    base_url="http://localhost:11434",   # default
-    extra={"keep_alive": "10m"},
-))
-```
-
-Enable reasoning extraction for models like `deepseek-r1`:
-
-```python
-ProviderConfig(name="ollama", model="deepseek-r1", extra={"supports_reasoning": True})
-```
-
-### Generic (OpenAI-compatible)
-
-Any OpenAI-compatible HTTP endpoint, using a custom `api-key` header for authentication.
-
-```python
-config = AgentConfig(provider=ProviderConfig(
-    name="generic",
-    model="gpt-4o-2024-08-06",
-    api_key="...",           # or GENERIC_API_KEY env var
-    extra={
-        "endpoint": "https://api.provider.com/gpt/gpt-5.1",
-        # Optional overrides:
-        # "extra_headers": {"X-Trace-Id": "abc123"},
-        # "timeout": 120.0,
-        # "response_format": "json_object",  # "text" | "json_object" | "json_schema"
-    },
-))
-```
-
-The endpoint URL can also be set via the `GENERIC_ENDPOINT` environment variable.
-Supports: tools, streaming, structured output (`json_object` / `json_schema`).
-
-Install: `pip install aar-agent[generic]` (uses `httpx`, already included in the base install).
-
-## Tool system
-
-### Built-in tools
-
-| Tool | Side effect | Description |
-|---|---|---|
-| `read_file` | read | Read a file with line numbers |
-| `write_file` | write | Write a file, creating directories as needed |
-| `edit_file` | write | Replace an exact string in a file (must be unique) |
-| `list_directory` | read | List files and directories |
-| `bash` | execute | Run a shell command, return stdout + stderr |
-
-All built-ins are opt-in via `ToolConfig.enabled_builtins`.
-
-### Custom tools
-
-```python
-from agent import Agent
-from agent.tools.schema import SideEffect, ToolSpec
-
-agent = Agent()
-
-# Decorator style
-@agent.registry.register(
-    name="fetch_url",
-    description="Fetch the contents of a URL",
-    side_effects=[SideEffect.NETWORK],
-)
-async def fetch_url(url: str) -> str:
-    import httpx
-    async with httpx.AsyncClient() as client:
-        r = await client.get(url)
-        return r.text
-
-# Or explicit ToolSpec
-agent.registry.add(ToolSpec(
-    name="count_lines",
-    description="Count the lines in a file",
-    input_schema={
-        "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"],
-    },
-    side_effects=[SideEffect.READ],
-    handler=lambda path: str(sum(1 for _ in open(path))),
-))
-```
-
-## Safety
-
-Aar has a layered safety system with sensible defaults. See [`docs/safety.md`](docs/safety.md) for the full reference, including the complete list of denied paths/commands, per-transport defaults, CLI flags, sandbox modes, and the approval callback API.
-
-**Key features at a glance:**
-
-- **Workspace sandbox** — `aar chat` and `aar tui` restrict file tools to the current directory and require approval before writes/shell commands. `aar run` is permissive for automation. Toggle with `--[no-]require-approval` and `--[no-]restrict-to-cwd`.
-- **Built-in deny lists** — credential files, key material, `.env` files, and dangerous shell commands (25+ path patterns, 20+ command patterns) are always blocked.
-- **Human approval** — supply a custom `ApprovalCallback` that returns `APPROVED`, `DENIED`, or `APPROVED_ALWAYS`.
-- **Configurable policy** — set via CLI flags, a JSON config file (see [Configuration](#configuration)), or a `SafetyConfig` object.
-
-```python
-from agent import SafetyConfig
-
-SafetyConfig(read_only=True)                        # block all writes and shell commands
-SafetyConfig(require_approval_for_writes=True)       # prompt before writes
-SafetyConfig(allowed_paths=["/my/project/**"])        # restrict file access
-```
-
-## Sessions and persistence
-
-Sessions are automatically saved as JSONL files. Every event (messages, tool calls, results, metadata) is persisted. Each session carries a `session_id`, a `run_id` (refreshed on resume), and a `trace_id` (stable for the lifetime of the session object).
-
-```python
-from agent import Agent
-from agent.memory.session_store import SessionStore
-
-agent = Agent()
-store = SessionStore(".agent/sessions")
-
-# First run
-session = await agent.run("Write a Python script that sorts a CSV")
-store.save(session)
-print(session.session_id)  # e.g. "a3f1b2c4d5e6f7a8"
-print(session.trace_id)    # stable identifier for logging / tracing
-
-# Resume later
-session = store.load("a3f1b2c4d5e6f7a8")
-session = await agent.run("Now add error handling", session=session)
-
-# List all sessions
-print(store.list_sessions())
-
-# Compact a long session to its most recent 200 events
-store.compact("a3f1b2c4d5e6f7a8", max_events=200)
-```
-
-## Event model
-
-The agent emits typed events you can subscribe to:
-
-```python
-from agent.core.events import AssistantMessage, ToolCall, ToolResult, EventType
-
-def on_event(event):
-    if isinstance(event, ToolCall):
-        print(f"→ {event.tool_name}({event.arguments})")
-    elif isinstance(event, ToolResult) and event.is_error:
-        print(f"✗ {event.tool_name}: {event.output}")
-    elif isinstance(event, AssistantMessage):
-        print(event.content)
-
-agent.on_event(on_event)
-session = await agent.run("Do something")
-```
-
-Event types: `user_message`, `assistant_message`, `tool_call`, `tool_result`, `reasoning`, `provider_meta`, `error`, `session`.
-
-Timing fields are populated automatically by the runtime:
-- `ProviderMeta.duration_ms` — wall time for the provider API call
-- `ToolResult.duration_ms` — wall time for tool execution
-
-## Cancellation
-
-Pass an `asyncio.Event` to stop the loop cooperatively between steps:
-
-```python
-import asyncio
-from agent.core.loop import run_loop
-
-cancel = asyncio.Event()
-
-# Cancel from another coroutine or thread
-asyncio.get_event_loop().call_later(5.0, cancel.set)
-
-session = await run_loop(session, provider, executor, config, cancel_event=cancel)
-# session.state == AgentState.CANCELLED
-```
-
-Hard cancellation via `asyncio` task cancellation also works — the loop catches `CancelledError`, sets state to `CANCELLED`, and re-raises.
-
-## Observability
-
-Aggregate timing and token usage from any session:
-
-```python
-from agent.extensions.observability import session_metrics
-
-m = session_metrics(session)
-print(f"steps={m.total_steps}")
-print(f"tokens={m.total_tokens}  (in={m.total_input_tokens} out={m.total_output_tokens})")
-print(f"provider_ms={m.total_provider_duration_ms:.0f}")
-print(f"tool_ms={m.total_tool_duration_ms:.0f}  calls={m.total_tool_calls}")
-print(f"errors={m.total_errors}")
-
-# Per-step breakdown
-for step in m.steps:
-    print(f"  step {step.step}: provider={step.provider_duration_ms:.0f}ms  tools={step.total_tool_duration_ms:.0f}ms")
-```
-
-`session_metrics()` reads all events once; it does not require a live provider or executor.
-
-## MCP (Model Context Protocol)
-
-Aar can act as an **MCP host** — connecting to one or more external MCP servers and exposing their tools as native agent tools. The core loop sees them identically to built-in tools; no provider-specific plumbing is needed.
-
-```bash
-pip install "aar-agent[mcp]"
-```
-
-The MCP bridge keeps the server connections **alive for the full lifetime of the session** — across every turn in an interactive chat, across every tool call in a multi-step task. Connections are cleanly closed when the bridge context exits.
-
-### Quick start — CLI with a config file
-
-The fastest way to attach MCP servers to any command is `--mcp-config`:
-
-```bash
-# Interactive chat with a filesystem server
-aar chat --mcp-config mcp.json
-
-# One-shot task
-aar run "List the Python files in /tmp" --mcp-config mcp.json
-
-# Resume a session and keep the same MCP tools available
-aar resume <session-id> --mcp-config mcp.json
-
-# See all registered tools (built-ins + MCP)
-aar tools --mcp-config mcp.json
-
-# Rich TUI with MCP tools
-aar tui --mcp-config mcp.json
-```
-
-`--mcp-config` is supported by `chat`, `run`, `resume`, `tools`, and `tui`. The bridge is opened before the first prompt and closed after the last response.
-
-### JSON config file format
-
-Create a JSON file that lists the servers. Both a bare array and a `{"servers": [...]}` wrapper are accepted:
-
-```json
-{
-  "servers": [
-    {
-      "name": "fs",
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["--prefer-offline", "@modelcontextprotocol/server-filesystem", "/tmp"]
-    },
-    {
-      "name": "github",
-      "transport": "stdio",
-      "command": "uvx",
-      "args": ["mcp-server-github"],
-      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."},
-      "prefix_tools": true
-    },
-    {
-      "name": "sentry",
-      "transport": "http",
-      "url": "https://mcp.sentry.io/mcp",
-      "headers": {"Authorization": "Bearer sntrys_..."}
-    }
-  ]
-}
-```
-
-All fields mirror `MCPServerConfig` exactly (see the reference table below).
-
-### Connect programmatically — multiple servers
-
-Use `MCPBridge` when you need full control over the lifecycle in application code:
-
-```python
-import asyncio
-from agent import Agent, AgentConfig, ProviderConfig
-from agent.extensions.mcp import MCPBridge, MCPServerConfig
-
-servers = [
-    MCPServerConfig(
-        name="fs",
-        transport="stdio",
-        command="npx",
-        args=["--prefer-offline", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    ),
-    MCPServerConfig(
-        name="github",
-        transport="stdio",
-        command="uvx",
-        args=["mcp-server-github"],
-        env={"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."},
-        prefix_tools=True,        # → "github__create_issue", "github__list_prs", …
-    ),
-]
-
-async def main():
-    config = AgentConfig(
-        provider=ProviderConfig(name="anthropic", model="claude-haiku-4-5-20251001")
-    )
-
-    async with MCPBridge(servers) as bridge:
-        from agent.tools.registry import ToolRegistry
-        registry = ToolRegistry()
-        n = await bridge.register_all(registry)
-        print(f"Registered {n} MCP tools")
-
-        agent = Agent(config=config, registry=registry)
-        agent.on_event(print)
-
-        # bridge stays open for all turns
-        session = await agent.run("List files in /tmp")
-        session = await agent.run("Now show only .py files", session)
-
-asyncio.run(main())
-```
-
-### Connect programmatically — single server
-
-For simpler cases, use `MCPClient` directly:
-
-```python
-from agent.extensions.mcp import MCPClient, MCPServerConfig
-
-cfg = MCPServerConfig(
-    name="fs",
-    transport="stdio",
-    command="npx",
-    args=["--prefer-offline", "@modelcontextprotocol/server-filesystem", "/tmp"],
-)
-
-async with MCPClient(cfg) as client:
-    specs = await client.list_tools()          # → list[ToolSpec]
-    print([s.name for s in specs])
-
-    output = await client.call_tool("list_directory", {"path": "/tmp"})
-    print(output)                              # plain string for the LLM
-```
-
-### Load config from a file in code
-
-```python
-from agent.extensions.mcp import load_mcp_config, MCPBridge
-
-servers = load_mcp_config("mcp.json")   # accepts {"servers":[…]} or bare […]
-
-async with MCPBridge(servers) as bridge:
-    ...
-```
-
-### Connect to a remote HTTP server
-
-```python
-MCPServerConfig(
-    name="myapi",
-    transport="http",
-    url="https://myserver.example.com/mcp",
-    headers={"Authorization": "Bearer sk-..."},
-)
-```
-
-### Avoid name collisions across servers
-
-If two servers expose a tool with the same name, set `prefix_tools=True` on one (or both) to namespace them:
-
-```python
-MCPServerConfig(name="github", transport="stdio", command="uvx",
-                args=["mcp-server-github"], prefix_tools=True)
-# registers tools as "github__create_issue", "github__list_prs", etc.
-```
-
-Without `prefix_tools`, a name collision raises `ValueError` immediately — it is never silently ignored.
-
-### MCPServerConfig reference
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `name` | `str` | — | Logical name; used as tool prefix when `prefix_tools=True` |
-| `transport` | `str` | `"stdio"` | `"stdio"` or `"http"` |
-| `command` | `str` | `""` | Executable to launch (stdio only, e.g. `"npx"`, `"uvx"`, `"node"`) |
-| `args` | `list[str]` | `[]` | Command-line arguments for the subprocess |
-| `env` | `dict[str,str]` | `{}` | Extra environment variables merged into the subprocess env |
-| `url` | `str` | `""` | Server URL (http only) |
-| `headers` | `dict[str,str]` | `{}` | HTTP headers sent with every request (e.g. `Authorization`) |
-| `prefix_tools` | `bool` | `False` | Prefix tool names with `"{name}__"` to avoid collisions |
-
-### Supported MCP transports
-
-| Transport | How it works | When to use |
-|---|---|---|
-| `stdio` | Spawns a local subprocess, communicates via stdin/stdout | Local tools (filesystem, git, databases) |
-| `http` | HTTP POST + optional SSE (Streamable HTTP) | Remote or shared servers |
-
-> **Windows / npx tip:** `npx -y` can stall on repeated calls when it tries to reach the npm
-> registry without network access. Prefer `npx --prefer-offline` once the package is cached, or
-> invoke `node <path-to-index.js>` directly to bypass the registry check entirely.
-
-### MCP content types
-
-MCP tool results can contain mixed content. Aar serializes all blocks to a plain string for the LLM:
-
-| MCP block type | Serialized as |
-|---|---|
-| `TextContent` | The text value |
-| `ImageContent` | `[image: mime/type]` |
-| `EmbeddedResource` (text) | The text value |
-| `EmbeddedResource` (blob) | `[blob resource: uri]` |
-
-### MCP tools and the web server
-
-The `serve` command does not yet support `--mcp-config`. To expose MCP tools over the web API, build the bridge and registry manually and pass them to `create_asgi_app`:
-
-```python
-import asyncio
-import uvicorn
-from agent.core.config import AgentConfig, ProviderConfig
-from agent.extensions.mcp import MCPBridge, load_mcp_config
-from agent.tools.registry import ToolRegistry
-from agent.transports.web import create_asgi_app
-
-async def main():
-    servers = load_mcp_config("mcp.json")
-    registry = ToolRegistry()
-
-    async with MCPBridge(servers) as bridge:
-        await bridge.register_all(registry)
-        config = AgentConfig(
-            provider=ProviderConfig(name="anthropic", model="claude-haiku-4-5-20251001")
-        )
-        app = create_asgi_app(config, registry=registry)
-        config_uvicorn = uvicorn.Config(app, host="0.0.0.0", port=8080)
-        server = uvicorn.Server(config_uvicorn)
-        await server.serve()   # bridge stays open for the server's lifetime
-
-asyncio.run(main())
-```
-
-## Web API
-
-```bash
-pip install uvicorn
-aar serve --port 8080
-```
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/health` | GET | Health check |
-| `/chat` | POST | Run a prompt, return full response |
-| `/chat/stream` | POST | Run a prompt, stream events via SSE |
-| `/sessions` | GET | List session IDs |
-| `/sessions/{id}` | GET | Session details |
-
-```bash
-curl -X POST http://localhost:8080/chat \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "List files in /tmp", "session_id": null}'
-
-# Stream events
-curl -N http://localhost:8080/chat/stream \
-  -X POST -H "Content-Type: application/json" \
-  -d '{"prompt": "Write hello.py"}'
-```
-
-Or embed the ASGI app directly:
-
-```python
-from agent.transports.web import create_asgi_app
-import uvicorn
-
-app = create_asgi_app(config)
-uvicorn.run(app, host="0.0.0.0", port=8080)
+aar tui --verbose --mcp-config tools/mcp_web.json --provider ollama --model qwen3.5:9b
 ```
 
 ## Architecture
-
-The project follows a modular design: a thin core loop, provider adapters, a tool registry with a safety pipeline, session persistence, and pluggable transports. See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough of every component, the core loop, the event emission order, provider internals, the tool execution pipeline, and the safety architecture.
 
 ```
 agent/
@@ -723,80 +117,7 @@ agent/
 └── transports/     # CLI, TUI, web, event stream
 ```
 
-## Testing
-
-```bash
-pip install "aar-agent[dev]"
-pytest tests/ -v
-```
-
-The test suite (236 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
-
-- Loop termination, max steps, timeout, cancellation (`asyncio.Event` + `CancelledError`), provider errors
-- Session persistence, resumption, compaction, `trace_id` round-trip, message conversion
-- Event serialization round-trips for all event types, including `duration_ms` fields
-- Provider normalization for Anthropic, OpenAI, and Ollama (mocked)
-- Tool registry, schema inference, execution (sync/async, timeout, truncation, timing)
-- Safety policy (command deny-list, path restrictions, read-only mode, approval gates)
-- Sandbox execution and timeout
-- `session_metrics()` aggregation (timing, tokens, errors, per-step breakdown)
-- MCP bridge: tool discovery, handler dispatch, content serialization, name collision detection, stdio/http transports (all mocked — no real MCP server required)
-
-### Live testing against real providers
-
-Live tests hit actual provider APIs and are skipped by default. Pass `--live` to enable them.
-
-#### Ollama (local, no API key required)
-
-```bash
-# Pull a model first
-ollama pull qwen3.5:9b
-
-# Run the live CLI tests
-pytest tests/test_cli.py -m live --live -v
-```
-
-The live test class (`TestLiveOllama`) uses `qwen3.5:9b` by default. To use a different model, edit the `MODEL` constant in `tests/test_cli.py` or run a one-off check via the CLI:
-
-```bash
-aar run "Reply with the word PONG." --provider ollama --model llama3.2
-```
-
-#### Anthropic
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-pytest tests/test_providers.py -m live --live -k Anthropic -v
-```
-
-Uses `claude-haiku-4-5-20251001` by default (cheapest model). Covers plain text, tool calls, stop-reason normalization, and provider meta. Quick smoke-test via CLI:
-
-```bash
-aar run "Reply with the word PONG." --provider anthropic --model claude-haiku-4-5-20251001
-```
-
-#### OpenAI (or any OpenAI-compatible endpoint)
-
-```bash
-export OPENAI_API_KEY=sk-...
-pytest tests/test_providers.py -m live --live -k OpenAI -v
-```
-
-Uses `gpt-4o-mini` by default. Compatible endpoints (Azure, Together, etc.) can be tested by setting `base_url` in `ProviderConfig`.
-
-#### Running all live tests together
-
-```bash
-# All providers (Anthropic + OpenAI + Ollama CLI tests)
-pytest tests/ -m live --live -v
-
-# Single provider
-pytest tests/test_providers.py -m live --live -k Anthropic -v
-pytest tests/test_providers.py -m live --live -k OpenAI -v
-pytest tests/test_cli.py -m live --live -v           # Ollama
-```
-
-Tests for providers whose API key is not set will fail with an authentication error rather than being skipped — only export keys for the providers you want to exercise.
+See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ## Requirements
 
@@ -806,6 +127,32 @@ Tests for providers whose API key is not set will fail with an authentication er
 - `typer >= 0.12`
 - `rich >= 13.0`
 - Provider SDK as needed: `anthropic`, `openai`
+
+### Windows — `bash` tool
+
+The `bash` built-in tool requires a Unix-compatible shell. **Either** is sufficient:
+
+| Option | Install | Notes |
+|--------|---------|-------|
+| **Git for Windows** (Git Bash) | [git-scm.com](https://git-scm.com/download/win) | Lightweight; adds `bash` to `PATH` |
+| **WSL** | `wsl --install` in an admin terminal | Full Linux environment |
+
+> **If both are installed**, WSL's `bash.exe` is found first by Windows `CreateProcess`, so WSL's bash will run. Keep this in mind for file path references.
+
+Neither is required if you do not enable the `bash` built-in tool.
+
+## Documentation
+
+| Document | Contents |
+|----------|----------|
+| [Configuration](docs/configuration.md) | `AgentConfig` reference, config precedence, approval modes, logging, system prompt, shell, project rules |
+| [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Generic setup and options |
+| [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
+| [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
+| [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
+| [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
+| [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
+| [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
 
 ---
 

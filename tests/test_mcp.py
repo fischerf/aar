@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import sys
 from contextlib import asynccontextmanager
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -383,7 +382,6 @@ class TestMCPBridge:
         from agent.extensions.mcp import MCPBridge, MCPClient, MCPServerConfig
 
         async def fake_list_tools_a(self_):
-            from agent.extensions.mcp import _make_tool_handler
             from agent.tools.schema import ToolSpec, SideEffect
             return [ToolSpec(name="echo", description="Echo", handler=AsyncMock(return_value=""), side_effects=[SideEffect.EXTERNAL])]
 

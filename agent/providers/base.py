@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
-from agent.core.events import AssistantMessage, ProviderMeta, ReasoningBlock, ToolCall
+from agent.core.events import ProviderMeta, ReasoningBlock, ToolCall
 
 
 @dataclass
@@ -40,6 +40,7 @@ class ProviderCapabilities:
     reasoning: bool = False
     streaming: bool = True
     structured_output: bool = False
+    vision: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +49,7 @@ class ProviderCapabilities:
             "reasoning": self.reasoning,
             "streaming": self.streaming,
             "structured_output": self.structured_output,
+            "vision": self.vision,
         }
 
 
@@ -77,6 +79,11 @@ class Provider(ABC):
     def supports_structured_output(self) -> bool:
         return False
 
+    @property
+    def supports_vision(self) -> bool:
+        """Return True when this provider/model accepts image content blocks."""
+        return False
+
     def capabilities(self) -> ProviderCapabilities:
         """Return a snapshot of this provider's capabilities."""
         return ProviderCapabilities(
@@ -85,6 +92,7 @@ class Provider(ABC):
             reasoning=self.supports_reasoning,
             streaming=self.supports_streaming,
             structured_output=self.supports_structured_output,
+            vision=self.supports_vision,
         )
 
     @abstractmethod

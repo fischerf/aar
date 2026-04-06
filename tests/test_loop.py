@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -23,9 +22,8 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.providers.base import ProviderResponse
 from agent.tools.execution import ToolExecutor
-from agent.tools.registry import ToolRegistry
 
-from tests.conftest import ErrorProvider, MockProvider
+from tests.conftest import MockProvider
 
 
 # ---------------------------------------------------------------------------

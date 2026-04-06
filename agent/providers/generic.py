@@ -154,6 +154,14 @@ class GenericProvider(Provider):
     # Core methods
     # ------------------------------------------------------------------
 
+    @property
+    def supports_vision(self) -> bool:
+        # Override via extra={"supports_vision": True/False}.
+        if "supports_vision" in self.config.extra:
+            return bool(self.config.extra["supports_vision"])
+        model = self.config.model.lower()
+        return "vision" in model or "4o" in model
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -421,8 +429,26 @@ def _build_messages(
                             }
                         )
                 else:
-                    text = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
-                    api_messages.append({"role": "user", "content": text})
+                    # Build an OpenAI-compatible content array, preserving
+                    # image_url blocks alongside text blocks.
+                    oai_parts: list[dict[str, Any]] = []
+                    for b in content:
+                        btype = b.get("type")
+                        if btype == "text":
+                            oai_parts.append({"type": "text", "text": b["text"]})
+                        elif btype == "image_url":
+                            # Already in the correct OpenAI format; pass through.
+                            oai_parts.append(b)
+
+                    if not oai_parts:
+                        continue
+
+                    # Unwrap single-text-block lists to a plain string for
+                    # cleaner serialization when there are no images.
+                    if len(oai_parts) == 1 and oai_parts[0].get("type") == "text":
+                        api_messages.append({"role": "user", "content": oai_parts[0]["text"]})
+                    else:
+                        api_messages.append({"role": "user", "content": oai_parts})
 
     return api_messages
 
