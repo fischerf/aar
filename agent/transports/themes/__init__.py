@@ -12,6 +12,7 @@ from agent.transports.themes.models import (
     HeaderStyle,
     LayoutConfig,
     ScrollbarConfig,
+    SeparatorStyle,
     Theme,
 )
 
@@ -21,6 +22,7 @@ __all__ = [
     "HeaderStyle",
     "LayoutConfig",
     "ScrollbarConfig",
+    "SeparatorStyle",
     "Theme",
     "ThemeRegistry",
 ]

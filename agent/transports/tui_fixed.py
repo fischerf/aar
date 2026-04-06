@@ -170,12 +170,13 @@ class SeparatorBar(Static):
     }
     """
 
-    def __init__(self, style: str = "dim") -> None:
+    def __init__(self, style: str = "dim", character: str = "─") -> None:
         super().__init__()
         self._style = style
+        self._character = character
 
     def render(self) -> Text:  # type: ignore[override]
-        return Text("─" * self.size.width, style=self._style)
+        return Text(self._character * self.size.width, style=self._style)
 
 
 # ---------------------------------------------------------------------------
@@ -780,18 +781,27 @@ class AarFixedApp(App):
         widget_map: dict[str, Callable[[], list]] = {
             "header": lambda: [
                 HeaderBar(self._theme),
-                SeparatorBar(self._theme.header.separator_style),
+                SeparatorBar(
+                    self._theme.header.separator.style,
+                    self._theme.header.separator.character,
+                ),
             ],
             "body": lambda: [
                 SelectableRichLog(id="body-log", wrap=True, markup=True, auto_scroll=True),
             ],
             "input": lambda: [
                 ApprovalBar(),
-                SeparatorBar(self._theme.footer.separator_style),
+                SeparatorBar(
+                    self._theme.footer.separator.style,
+                    self._theme.footer.separator.character,
+                ),
                 HistoryInput(placeholder="> type your message...", id="user-input"),
             ],
             "footer": lambda: [
-                SeparatorBar(self._theme.footer.separator_style),
+                SeparatorBar(
+                    self._theme.footer.separator.style,
+                    self._theme.footer.separator.character,
+                ),
                 FooterBar(self._theme),
             ],
         }
@@ -920,6 +930,22 @@ class AarFixedApp(App):
             footer_size = region_sizes.get("footer")
             if footer_size is not None:
                 footer.styles.height = footer_size
+        except Exception:
+            pass
+
+        # Separator bars
+        try:
+            separators = self.query(SeparatorBar)
+            for i, sep in enumerate(separators):
+                if i == 0:
+                    # First separator belongs to the header
+                    sep._style = theme.header.separator.style
+                    sep._character = theme.header.separator.character
+                else:
+                    # Remaining separators belong to the footer/input region
+                    sep._style = theme.footer.separator.style
+                    sep._character = theme.footer.separator.character
+                sep.refresh()
         except Exception:
             pass
 

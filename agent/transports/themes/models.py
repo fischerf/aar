@@ -23,12 +23,20 @@ class BadgeColors(BaseModel):
     external: str = "magenta"
 
 
+class SeparatorStyle(BaseModel):
+    """Style definition for horizontal line separators."""
+
+    character: str = "─"
+    style: str = "dim"
+
+
 class HeaderStyle(BaseModel):
     """Style definition for the fixed header bar."""
 
     background: str = "on #1a1a2e"
     text_style: str = "bold white"
     separator_style: str = "dim"
+    separator: SeparatorStyle = Field(default_factory=SeparatorStyle)
     provider_style: str = "bold cyan"
     tokens_style: str = "dim green"
     session_style: str = "dim"
@@ -41,6 +49,7 @@ class FooterStyle(BaseModel):
     background: str = "on #1a1a2e"
     text_style: str = "bold white"
     separator_style: str = "dim"
+    separator: SeparatorStyle = Field(default_factory=SeparatorStyle)
     step_style: str = "dim cyan"
     theme_style: str = "dim magenta"
     input_style: str = "bold blue"
