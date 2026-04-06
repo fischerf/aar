@@ -151,7 +151,7 @@ class FooterBar(Static):
             ("Ctrl+T", f.step_style),
             (" theme  ", f.separator_style),
             ("Ctrl+K", f.step_style),
-            (" think  ", f.separator_style),
+            (" think display  ", f.separator_style),
             ("Ctrl+L", f.step_style),
             (" clear  ", f.separator_style),
             ("Ctrl+Y", f.step_style),
@@ -687,7 +687,7 @@ class FixedTUIRenderer:
             "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
             "[bold]Shortcuts:[/]\n"
             "  [bold]Ctrl+T[/]  cycle theme    "
-            "[bold]Ctrl+K[/]  toggle thinking\n"
+            "[bold]Ctrl+K[/]  toggle thinking display\n"
             "  [bold]Ctrl+L[/]  clear screen   "
             "[bold]Ctrl+Y[/]  copy block (raw text)\n"
             "  [bold]↑ / ↓[/]   input history  "
