@@ -505,6 +505,7 @@ class FixedTUIRenderer:
         self._stream_md: TextualMarkdown | None = None
         self._stream_obj: MarkdownStream | None = None
         self._stream_scroll: VerticalScroll | None = None
+        self._stream_in_reasoning = False  # tracks whether we're in the reasoning phase
 
     def _write(self, content: object, raw: str = "", kind: str = "") -> None:
         """Write to the log, using block tracking when available."""
@@ -592,18 +593,28 @@ class FixedTUIRenderer:
         t = self.theme
 
         if isinstance(event, StreamChunk):
+            if event.reasoning_text and self._thinking_visible:
+                if not self._streaming_active:
+                    self._streaming_active = True
+                    self._stream_in_reasoning = True
+                    self._start_stream_widget()
+                if self._stream_obj is not None:
+                    loop = asyncio.get_running_loop()
+                    # Render reasoning as a blockquote inside the streamed markdown
+                    loop.create_task(self._stream_obj.write(f"> {event.reasoning_text}"))
             if event.text:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._start_stream_widget()
                 if self._stream_obj is not None:
                     loop = asyncio.get_running_loop()
+                    # Transition from reasoning to content: close the blockquote
+                    if self._stream_in_reasoning:
+                        self._stream_in_reasoning = False
+                        loop.create_task(self._stream_obj.write("\n\n---\n\n"))
                     loop.create_task(self._stream_obj.write(event.text))
-            if event.reasoning_text and self._thinking_visible:
-                self._log.write(
-                    Text(event.reasoning_text, style=f"italic {t.reasoning.border_style}")
-                )
             if event.finished:
+                self._stream_in_reasoning = False
                 if self._stream_obj is not None:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._stop_stream_widget())
@@ -614,6 +625,7 @@ class FixedTUIRenderer:
                 # Content was streamed live via the Markdown widget;
                 # finalize: hide the streaming widget and write the panel to the log.
                 self._streaming_active = False
+                self._stream_in_reasoning = False
                 if self._stream_obj is not None:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._stop_stream_widget())
@@ -644,7 +656,8 @@ class FixedTUIRenderer:
             )
 
         elif isinstance(event, ToolCall):
-            self._streaming_active = False  # reset between turns
+            self._streaming_active = False
+            self._stream_in_reasoning = False
             self._step_count += 1
             self._footer.step_count = self._step_count
             self._footer.refresh()
@@ -1100,6 +1113,7 @@ class AarFixedApp(App):
         self._renderer._step_count = 0
         self._renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
         self._renderer._streaming_active = False
+        self._renderer._stream_in_reasoning = False
         self._renderer.render_welcome()
 
     def action_copy_block(self) -> None:
