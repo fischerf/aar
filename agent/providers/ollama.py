@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse
+from agent.providers.base import Provider, ProviderResponse, StreamDelta
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ class OllamaProvider(Provider):
             thinking_text = message.get("thinking", "")
             if thinking_text:
                 from agent.core.events import ReasoningBlock
+
                 reasoning_blocks = [ReasoningBlock(content=thinking_text.strip())]
             elif "<think>" in content:
                 # Fallback for older Ollama versions that embed tags in content
@@ -158,6 +160,110 @@ class OllamaProvider(Provider):
             reasoning=reasoning_blocks,
             meta=meta,
         )
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str = "",
+    ) -> AsyncIterator[StreamDelta]:
+        """Stream response deltas from Ollama.
+
+        Ollama streams newline-delimited JSON objects from ``/api/chat``
+        when ``stream: true``.  Each object has a ``message`` with partial
+        ``content`` (and optionally ``thinking``).  The final object carries
+        ``done: true`` and usage statistics.
+        """
+        api_messages = _build_messages(messages, system)
+
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": api_messages,
+            "stream": True,
+            "options": {},
+        }
+
+        if self.config.temperature > 0:
+            payload["options"]["temperature"] = self.config.temperature
+        if self.config.max_tokens:
+            payload["options"]["num_predict"] = self.config.max_tokens
+
+        # Structured output
+        fmt = self.config.response_format
+        if fmt == "json":
+            payload["format"] = "json"
+        elif fmt == "json_schema" and self.config.json_schema:
+            payload["format"] = self.config.json_schema
+
+        if tools and self.supports_tools:
+            payload["tools"] = _convert_tools(tools)
+
+        if self.supports_reasoning:
+            payload["think"] = True
+
+        payload["keep_alive"] = self._keep_alive
+
+        _SKIP = {
+            "keep_alive",
+            "supports_reasoning",
+            "supports_tools",
+            "supports_vision",
+            "supports_audio",
+        }
+        for k, v in self.config.extra.items():
+            if k not in _SKIP:
+                payload["options"][k] = v
+
+        # Accumulators for tool calls (streamed models may return them in the final chunk)
+        tool_acc: list[dict[str, Any]] = []
+
+        async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                message = data.get("message", {})
+
+                # Text content delta
+                text = message.get("content", "")
+
+                # Reasoning delta (think mode)
+                reasoning = message.get("thinking", "")
+
+                # Tool calls (usually only in the final chunk)
+                raw_tcs = message.get("tool_calls", [])
+                if raw_tcs:
+                    tool_acc.extend(raw_tcs)
+
+                is_done = data.get("done", False)
+
+                if text or reasoning:
+                    yield StreamDelta(
+                        text=text,
+                        reasoning_delta=reasoning,
+                    )
+
+                if is_done:
+                    # Emit accumulated tool calls
+                    for i, tc in enumerate(tool_acc):
+                        fn = tc.get("function", {})
+                        yield StreamDelta(
+                            tool_call_delta={
+                                "tool_call_id": f"ollama_tc_{i}",
+                                "tool_name": fn.get("name", ""),
+                                "arguments": fn.get("arguments", {}),
+                            }
+                        )
+                    yield StreamDelta(done=True)
+                    return
+
+        # Safety fallback
+        yield StreamDelta(done=True)
 
     async def close(self) -> None:
         await self._client.aclose()

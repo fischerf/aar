@@ -10,7 +10,10 @@ from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
+    ReasoningBlock,
+    StreamChunk,
     StopReason,
+    ToolCall,
 )
 from agent.core.session import Session, trim_to_token_budget
 from agent.core.state import AgentState
@@ -79,16 +82,28 @@ async def run_loop(
 
             tool_schemas = tool_executor.registry.to_provider_schemas() or None
 
+            use_streaming = config.streaming and provider.supports_streaming
+
             # Provider call — timed, with retry for recoverable errors
             t_provider = time.monotonic()
             response: ProviderResponse | None = None
             for attempt in range(1, config.max_retries + 1):
                 try:
-                    response = await provider.complete(
-                        messages=messages,
-                        tools=tool_schemas,
-                        system=config.system_prompt,
-                    )
+                    if use_streaming:
+                        response = await _consume_stream(
+                            provider,
+                            messages,
+                            tool_schemas,
+                            config.system_prompt,
+                            session,
+                            on_event,
+                        )
+                    else:
+                        response = await provider.complete(
+                            messages=messages,
+                            tools=tool_schemas,
+                            system=config.system_prompt,
+                        )
                     break
                 except Exception as e:
                     _friendly, _recoverable = _provider_error_message(e)
@@ -187,6 +202,68 @@ async def run_loop(
         raise
 
     return session
+
+
+async def _consume_stream(
+    provider: Provider,
+    messages: list,
+    tools: list | None,
+    system: str,
+    session: Session,
+    on_event,
+) -> ProviderResponse:
+    """Consume a provider stream, emit StreamChunk events, return assembled response."""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    stop_reason = ""
+
+    async for delta in provider.stream(messages=messages, tools=tools, system=system):
+        # Emit chunk events for text and reasoning deltas
+        if delta.text or delta.reasoning_delta:
+            _emit(
+                session,
+                on_event,
+                StreamChunk(
+                    text=delta.text,
+                    reasoning_text=delta.reasoning_delta,
+                ),
+            )
+
+        if delta.text:
+            content_parts.append(delta.text)
+        if delta.reasoning_delta:
+            reasoning_parts.append(delta.reasoning_delta)
+
+        # Accumulated tool call (emitted when stream signals done or per-call)
+        if delta.tool_call_delta:
+            tc = delta.tool_call_delta
+            tool_calls.append(
+                ToolCall(
+                    tool_name=tc.get("tool_name", ""),
+                    tool_call_id=tc.get("tool_call_id", ""),
+                    arguments=tc.get("arguments", {}),
+                )
+            )
+
+        if delta.done:
+            _emit(session, on_event, StreamChunk(finished=True))
+            if tool_calls:
+                stop_reason = StopReason.TOOL_USE.value
+            else:
+                stop_reason = StopReason.END_TURN.value
+            break
+
+    reasoning_blocks = []
+    if reasoning_parts:
+        reasoning_blocks = [ReasoningBlock(content="".join(reasoning_parts))]
+
+    return ProviderResponse(
+        content="".join(content_parts),
+        tool_calls=tool_calls,
+        stop_reason=stop_reason,
+        reasoning=reasoning_blocks,
+    )
 
 
 def _emit(session: Session, on_event, event) -> None:

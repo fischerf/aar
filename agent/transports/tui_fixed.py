@@ -43,6 +43,7 @@ from agent.core.events import (
     ImageURLBlock,
     ProviderMeta,
     ReasoningBlock,
+    StreamChunk,
     ToolCall,
     ToolResult,
 )
@@ -498,6 +499,8 @@ class FixedTUIRenderer:
         self.layout = layout or LayoutConfig()
         self._extension_panels: dict[str, Callable] = {}
         self._thinking_visible = True
+        self._streaming_active = False
+        self._stream_buffer: list[str] = []
 
     def _write(self, content: object, raw: str = "", kind: str = "") -> None:
         """Write to the log, using block tracking when available."""
@@ -560,7 +563,40 @@ class FixedTUIRenderer:
         """Render a single event into the RichLog widget."""
         t = self.theme
 
+        if isinstance(event, StreamChunk):
+            if event.text:
+                if not self._streaming_active:
+                    self._streaming_active = True
+                    self._stream_buffer.clear()
+                    self._log.write(Text())  # spacer
+                self._stream_buffer.append(event.text)
+                # Write the latest token to the log for live display
+                self._log.write(Text(event.text, end=""))
+            if event.reasoning_text and self._thinking_visible:
+                self._log.write(
+                    Text(event.reasoning_text, style=f"italic {t.reasoning.border_style}", end="")
+                )
+            if event.finished and self._streaming_active:
+                self._log.write(Text())  # newline after stream
+            return
+
         if isinstance(event, AssistantMessage) and event.content:
+            if self._streaming_active:
+                # Content was already streamed live; render the final styled panel
+                self._streaming_active = False
+                self._stream_buffer.clear()
+                if self.layout.assistant.visible:
+                    self._write(
+                        Panel(
+                            Markdown(event.content),
+                            title=f"[{t.assistant.title_style}]Assistant[/]",
+                            border_style=t.assistant.border_style,
+                            padding=t.assistant.padding,
+                        ),
+                        raw=event.content,
+                        kind="assistant",
+                    )
+                return
             if not self.layout.assistant.visible:
                 return
             self._log.write(Text())  # spacer
@@ -576,6 +612,7 @@ class FixedTUIRenderer:
             )
 
         elif isinstance(event, ToolCall):
+            self._streaming_active = False  # reset between turns
             self._step_count += 1
             self._footer.step_count = self._step_count
             self._footer.refresh()

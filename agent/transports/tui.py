@@ -20,6 +20,7 @@ from agent.core.events import (
     ImageURLBlock,
     ProviderMeta,
     ReasoningBlock,
+    StreamChunk,
     ToolCall,
     ToolResult,
 )
@@ -51,6 +52,7 @@ class TUIRenderer:
         self.theme = theme or DEFAULT_THEME
         self.layout = layout or LayoutConfig()
         self._extension_panels: dict[str, Callable[[Console], None]] = {}
+        self._streaming_active = False
 
     # ------------------------------------------------------------------
     # Theme switching
@@ -97,7 +99,26 @@ class TUIRenderer:
         """Render a single event to the terminal."""
         t = self.theme
 
+        if isinstance(event, StreamChunk):
+            if event.text:
+                if not self._streaming_active:
+                    self._streaming_active = True
+                    self.console.print()  # blank line before streamed output
+                self.console.file.write(event.text)
+                self.console.file.flush()
+            if event.reasoning_text and self._verbose:
+                self.console.file.write(event.reasoning_text)
+                self.console.file.flush()
+            if event.finished and self._streaming_active:
+                self.console.file.write("\n")
+                self.console.file.flush()
+            return
+
         if isinstance(event, AssistantMessage) and event.content:
+            if self._streaming_active:
+                # Content was already streamed token-by-token
+                self._streaming_active = False
+                return
             if not self.layout.assistant.visible:
                 return
             self.console.print()
@@ -111,17 +132,14 @@ class TUIRenderer:
             )
 
         elif isinstance(event, ToolCall):
+            self._streaming_active = False  # reset between turns
             self._tool_calls.append(event)
             self._step_count += 1
             if not self.layout.tool_call.visible:
                 return
-            args_display = _format_args(
-                event.arguments, verbose=self._verbose, theme=t
-            )
+            args_display = _format_args(event.arguments, verbose=self._verbose, theme=t)
             if self._verbose:
-                badge = _side_effect_badge(
-                    event.data.get("side_effects", []), theme=t
-                )
+                badge = _side_effect_badge(event.data.get("side_effects", []), theme=t)
                 badge_prefix = f"{badge} " if badge else ""
                 title = (
                     f"{badge_prefix}[{t.tool_call.title_style}]{event.tool_name}[/]"
@@ -278,7 +296,9 @@ def _looks_like_path(s: str) -> bool:
     return len(s) < 120 and ("/" in s or "\\" in s)
 
 
-def _format_args(arguments: dict[str, Any], verbose: bool = False, theme: Theme | None = None) -> str:
+def _format_args(
+    arguments: dict[str, Any], verbose: bool = False, theme: Theme | None = None
+) -> str:
     t = theme or DEFAULT_THEME
     lines = []
     for k, v in arguments.items():
@@ -379,9 +399,7 @@ async def run_tui(
                     )
                     for tname in registry.list_names():
                         marker = " *" if tname == renderer.theme.name else ""
-                        renderer.console.print(
-                            f"  [{renderer.theme.dim_text}]{tname}{marker}[/]"
-                        )
+                        renderer.console.print(f"  [{renderer.theme.dim_text}]{tname}{marker}[/]")
                 else:
                     arg = parts[1].strip()
                     if arg == "next":
@@ -391,8 +409,7 @@ async def run_tui(
                             renderer.set_theme(registry.get(arg))
                         except KeyError:
                             renderer.console.print(
-                                f"[{renderer.theme.error.border_style}]"
-                                f"Unknown theme: {arg}[/]"
+                                f"[{renderer.theme.error.border_style}]Unknown theme: {arg}[/]"
                             )
                 continue
 
@@ -402,13 +419,9 @@ async def run_tui(
                 has_audio = False
                 for block in content:
                     if isinstance(block, ImageURLBlock):
-                        renderer.console.print(
-                            f"[{renderer.theme.dim_text}]  Attached: image[/]"
-                        )
+                        renderer.console.print(f"[{renderer.theme.dim_text}]  Attached: image[/]")
                     elif isinstance(block, AudioBlock):
-                        renderer.console.print(
-                            f"[{renderer.theme.dim_text}]  Attached: audio[/]"
-                        )
+                        renderer.console.print(f"[{renderer.theme.dim_text}]  Attached: audio[/]")
                         has_audio = True
                 if has_audio and not agent.provider.supports_audio:
                     renderer.console.print(

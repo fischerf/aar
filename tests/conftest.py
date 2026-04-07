@@ -5,17 +5,21 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 
 
 def pytest_addoption(parser):
-    parser.addoption("--live", action="store_true", default=False, help="Run live tests against real providers")
+    parser.addoption(
+        "--live", action="store_true", default=False, help="Run live tests against real providers"
+    )
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "live: mark test as requiring a live provider (skipped by default)")
+    config.addinivalue_line(
+        "markers", "live: mark test as requiring a live provider (skipped by default)"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -25,13 +29,14 @@ def pytest_collection_modifyitems(config, items):
             if item.get_closest_marker("live"):
                 item.add_marker(skip_live)
 
+
 from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
 from agent.core.events import (
     ProviderMeta,
     ToolCall,
 )
 from agent.core.session import Session
-from agent.providers.base import Provider, ProviderResponse
+from agent.providers.base import Provider, ProviderResponse, StreamDelta
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
@@ -40,6 +45,7 @@ from agent.tools.schema import SideEffect, ToolSpec
 # ---------------------------------------------------------------------------
 # Mock provider — the backbone of all non-live tests
 # ---------------------------------------------------------------------------
+
 
 class MockProvider(Provider):
     """Programmable mock provider for deterministic testing.
@@ -112,11 +118,13 @@ class MockProvider(Provider):
         tools: list[dict[str, Any]] | None = None,
         system: str = "",
     ) -> ProviderResponse:
-        self.call_history.append({
-            "messages": messages,
-            "tools": tools,
-            "system": system,
-        })
+        self.call_history.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "system": system,
+            }
+        )
         if not self._responses:
             raise RuntimeError("MockProvider has no more queued responses")
         return self._responses.pop(0)
@@ -137,9 +145,100 @@ class ErrorProvider(Provider):
         raise self._error
 
 
+class StreamingMockProvider(Provider):
+    """Mock provider that yields StreamDelta chunks for streaming tests.
+
+    Queue streaming sequences with `enqueue_stream()` — each sequence
+    is a list of StreamDelta objects that will be yielded one by one.
+    After all stream sequences are consumed, falls back to complete().
+    """
+
+    def __init__(self, config: ProviderConfig | None = None) -> None:
+        super().__init__(config or ProviderConfig(name="mock_stream", model="mock-stream-1"))
+        self._stream_sequences: list[list[StreamDelta]] = []
+        self._complete_responses: list[ProviderResponse] = []
+        self.stream_call_count: int = 0
+
+    @property
+    def name(self) -> str:
+        return "mock_stream"
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
+    def enqueue_stream(self, deltas: list[StreamDelta]) -> None:
+        """Add a streaming sequence (list of deltas ending with done=True)."""
+        self._stream_sequences.append(deltas)
+
+    def enqueue_text(self, text: str, stop: str = "end_turn") -> None:
+        """Enqueue a complete() fallback response."""
+        self._complete_responses.append(
+            ProviderResponse(
+                content=text,
+                stop_reason=stop,
+                meta=ProviderMeta(
+                    provider="mock_stream",
+                    model="mock-stream-1",
+                    usage={"input_tokens": 10, "output_tokens": 5},
+                ),
+            )
+        )
+
+    def enqueue_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_call_id: str = "tc_mock_1",
+    ) -> None:
+        """Enqueue a complete() fallback with a tool call."""
+        self._complete_responses.append(
+            ProviderResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        arguments=arguments,
+                    )
+                ],
+                stop_reason="tool_use",
+                meta=ProviderMeta(
+                    provider="mock_stream",
+                    model="mock-stream-1",
+                    usage={"input_tokens": 10, "output_tokens": 15},
+                ),
+            )
+        )
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str = "",
+    ) -> ProviderResponse:
+        if not self._complete_responses:
+            raise RuntimeError("StreamingMockProvider has no more queued complete responses")
+        return self._complete_responses.pop(0)
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str = "",
+    ) -> AsyncIterator[StreamDelta]:
+        self.stream_call_count += 1
+        if not self._stream_sequences:
+            raise RuntimeError("StreamingMockProvider has no more queued stream sequences")
+        sequence = self._stream_sequences.pop(0)
+        for delta in sequence:
+            yield delta
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_provider() -> MockProvider:
@@ -152,6 +251,11 @@ def error_provider() -> ErrorProvider:
 
 
 @pytest.fixture
+def streaming_mock_provider() -> StreamingMockProvider:
+    return StreamingMockProvider()
+
+
+@pytest.fixture
 def tool_registry() -> ToolRegistry:
     """Registry with a simple echo tool pre-registered."""
     reg = ToolRegistry()
@@ -159,17 +263,19 @@ def tool_registry() -> ToolRegistry:
     async def echo(message: str) -> str:
         return f"echo: {message}"
 
-    reg.add(ToolSpec(
-        name="echo",
-        description="Echoes the input",
-        input_schema={
-            "type": "object",
-            "properties": {"message": {"type": "string"}},
-            "required": ["message"],
-        },
-        side_effects=[SideEffect.NONE],
-        handler=echo,
-    ))
+    reg.add(
+        ToolSpec(
+            name="echo",
+            description="Echoes the input",
+            input_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+            side_effects=[SideEffect.NONE],
+            handler=echo,
+        )
+    )
     return reg
 
 
@@ -182,17 +288,19 @@ def slow_tool_registry() -> ToolRegistry:
         await asyncio.sleep(seconds)
         return "done"
 
-    reg.add(ToolSpec(
-        name="slow_tool",
-        description="Sleeps for a while",
-        input_schema={
-            "type": "object",
-            "properties": {"seconds": {"type": "integer"}},
-            "required": [],
-        },
-        side_effects=[SideEffect.NONE],
-        handler=slow_tool,
-    ))
+    reg.add(
+        ToolSpec(
+            name="slow_tool",
+            description="Sleeps for a while",
+            input_schema={
+                "type": "object",
+                "properties": {"seconds": {"type": "integer"}},
+                "required": [],
+            },
+            side_effects=[SideEffect.NONE],
+            handler=slow_tool,
+        )
+    )
     return reg
 
 
@@ -204,13 +312,15 @@ def failing_tool_registry() -> ToolRegistry:
     async def bad_tool() -> str:
         raise ValueError("something went wrong")
 
-    reg.add(ToolSpec(
-        name="bad_tool",
-        description="Always fails",
-        input_schema={"type": "object", "properties": {}, "required": []},
-        side_effects=[SideEffect.NONE],
-        handler=bad_tool,
-    ))
+    reg.add(
+        ToolSpec(
+            name="bad_tool",
+            description="Always fails",
+            input_schema={"type": "object", "properties": {}, "required": []},
+            side_effects=[SideEffect.NONE],
+            handler=bad_tool,
+        )
+    )
     return reg
 
 

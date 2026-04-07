@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse
+from agent.providers.base import Provider, ProviderResponse, StreamDelta
 
 
 class OpenAIProvider(Provider):
@@ -137,6 +137,90 @@ class OpenAIProvider(Provider):
             stop_reason=stop_reason,
             meta=meta,
         )
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str = "",
+    ) -> AsyncIterator[StreamDelta]:
+        """Stream response deltas using the OpenAI SDK's streaming API."""
+        api_messages = _build_messages(messages, system)
+
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": api_messages,
+            "stream": True,
+        }
+
+        if tools:
+            kwargs["tools"] = _convert_tools(tools)
+        if self.config.max_tokens:
+            kwargs["max_tokens"] = self.config.max_tokens
+        if self.config.temperature > 0:
+            kwargs["temperature"] = self.config.temperature
+
+        # Structured output
+        fmt = self.config.response_format
+        if fmt == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+        elif fmt == "json_schema" and self.config.json_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": self.config.json_schema,
+            }
+
+        kwargs.update(self.config.extra)
+
+        # Accumulators for tool call fragments
+        tool_acc: dict[int, dict[str, str]] = {}
+
+        stream_resp = await self._client.chat.completions.create(**kwargs)
+
+        async for chunk in stream_resp:
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # Text delta
+            text = delta.content or "" if delta else ""
+            if text:
+                yield StreamDelta(text=text)
+
+            # Tool call argument fragments
+            if delta and delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_acc:
+                        tool_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        tool_acc[idx]["id"] = tc_delta.id
+                    if tc_delta.function and tc_delta.function.name:
+                        tool_acc[idx]["name"] = tc_delta.function.name
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tool_acc[idx]["arguments"] += tc_delta.function.arguments
+
+            # Finish
+            if choice.finish_reason:
+                for acc in tool_acc.values():
+                    try:
+                        parsed_args = json.loads(acc["arguments"] or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        parsed_args = {"raw": acc["arguments"]}
+                    yield StreamDelta(
+                        tool_call_delta={
+                            "tool_call_id": acc["id"],
+                            "tool_name": acc["name"],
+                            "arguments": parsed_args,
+                        }
+                    )
+                yield StreamDelta(done=True)
+                return
+
+        # Fallback sentinel
+        yield StreamDelta(done=True)
 
 
 def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:

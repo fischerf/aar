@@ -22,6 +22,7 @@ from agent.core.events import (
     ImageURLBlock,
     ProviderMeta,
     ReasoningBlock,
+    StreamChunk,
     ToolCall,
     ToolResult,
 )
@@ -170,12 +171,33 @@ def _looks_like_path(s: str) -> bool:
 
 def _make_event_handler(verbose: bool = False):
     """Return an event handler callback, optionally with richer feedback."""
+    _streaming_state = {"active": False}
 
     def _handler(event: Event) -> None:
+        if isinstance(event, StreamChunk):
+            if event.text:
+                if not _streaming_state["active"]:
+                    _streaming_state["active"] = True
+                    console.print()  # blank line before streamed output
+                console.file.write(event.text)
+                console.file.flush()
+            if event.reasoning_text and verbose:
+                console.file.write(event.reasoning_text)
+                console.file.flush()
+            if event.finished and _streaming_state["active"]:
+                console.file.write("\n")
+                console.file.flush()
+            return
+
         if isinstance(event, AssistantMessage) and event.content:
+            if _streaming_state["active"]:
+                # Content was already streamed token-by-token; skip duplicate render
+                _streaming_state["active"] = False
+                return
             console.print()
             console.print(Markdown(event.content))
         elif isinstance(event, ToolCall):
+            _streaming_state["active"] = False  # reset between turns
             if verbose:
                 badge = _side_effect_badge(event.data.get("side_effects", []))
                 prefix = f"{badge} " if badge else ""

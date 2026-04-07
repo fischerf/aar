@@ -84,6 +84,7 @@ ContentBlock = Annotated[
 class EventType(str, Enum):
     USER_MESSAGE = "user_message"
     ASSISTANT_MESSAGE = "assistant_message"
+    STREAM_CHUNK = "stream_chunk"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     REASONING = "reasoning"
@@ -131,6 +132,15 @@ class AssistantMessage(Event):
     stop_reason: StopReason | None = None
 
 
+class StreamChunk(Event):
+    """A single token-level streaming chunk emitted during generation."""
+
+    type: EventType = EventType.STREAM_CHUNK
+    text: str = ""
+    reasoning_text: str = ""
+    finished: bool = False
+
+
 class ToolCall(Event):
     type: EventType = EventType.TOOL_CALL
     tool_name: str = ""
@@ -176,6 +186,7 @@ class SessionEvent(Event):
 AnyEvent = (
     UserMessage
     | AssistantMessage
+    | StreamChunk
     | ToolCall
     | ToolResult
     | ReasoningBlock
@@ -187,6 +198,7 @@ AnyEvent = (
 EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.USER_MESSAGE: UserMessage,
     EventType.ASSISTANT_MESSAGE: AssistantMessage,
+    EventType.STREAM_CHUNK: StreamChunk,
     EventType.TOOL_CALL: ToolCall,
     EventType.TOOL_RESULT: ToolResult,
     EventType.REASONING: ReasoningBlock,

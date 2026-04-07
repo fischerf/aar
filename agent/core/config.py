@@ -144,6 +144,7 @@ class AgentConfig(BaseModel):
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0
     max_retries: int = 3
+    streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
     context_strategy: str = "sliding_window"  # "sliding_window" | "none"
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
