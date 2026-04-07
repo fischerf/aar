@@ -33,7 +33,7 @@ config = AgentConfig(
     timeout=300.0,                                 # seconds
     system_prompt="You are a helpful assistant.",
     tui=TUIConfig(
-        theme="default",                               # "default" | "claude" | "decker" or custom name
+        theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name
         layout={},                                     # section visibility (see docs/themes.md)
     ),
     session_dir=".agent/sessions",
@@ -241,7 +241,7 @@ The `tui` section controls the TUI's visual appearance and section visibility. S
 ```json
 {
   "tui": {
-    "theme": "claude",
+    "theme": "default",
     "layout": {
       "reasoning": { "visible": false },
       "token_usage": { "visible": false }
@@ -254,7 +254,7 @@ The `tui` section controls the TUI's visual appearance and section visibility. S
 
 ```bash
 aar tui --theme decker
-aar tui -t claude
+aar tui -t contrast
 aar tui --fixed                 # full-screen mode with fixed bars, scrollable body, mouse support
 aar tui --fixed --theme decker  # fixed mode with a specific theme
 ```
@@ -265,8 +265,8 @@ Fixed mode includes keyboard shortcuts: **Ctrl+T** (cycle theme), **Ctrl+K** (to
 
 ```
 /theme              # list available themes
-/theme claude       # switch theme
+/theme decker       # switch theme
 /theme next         # cycle themes
 ```
 
-Built-in themes: `default`, `claude`, `decker`. Custom themes go in `~/.aar/themes/<name>.json` — run `aar init` to get a template and JSON schema.
+Built-in themes: `default`, `contrast`, `decker`, `sleek`. Custom themes go in `~/.aar/themes/<name>.json` — run `aar init` to get a template and JSON schema.

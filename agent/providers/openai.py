@@ -39,6 +39,10 @@ class OpenAIProvider(Provider):
         return model.startswith(("o1", "o3"))
 
     @property
+    def supports_structured_output(self) -> bool:
+        return True
+
+    @property
     def supports_vision(self) -> bool:
         # GPT-4o, GPT-4-vision, and similar models support image input.
         # Override via extra={"supports_vision": True/False}.
@@ -75,6 +79,17 @@ class OpenAIProvider(Provider):
             kwargs["max_tokens"] = self.config.max_tokens
         if self.config.temperature > 0:
             kwargs["temperature"] = self.config.temperature
+
+        # Structured output
+        fmt = self.config.response_format
+        if fmt == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+        elif fmt == "json_schema" and self.config.json_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": self.config.json_schema,
+            }
+
         kwargs.update(self.config.extra)
 
         response = await self._client.chat.completions.create(**kwargs)

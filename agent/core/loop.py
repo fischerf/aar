@@ -12,7 +12,7 @@ from agent.core.events import (
     ErrorEvent,
     StopReason,
 )
-from agent.core.session import Session
+from agent.core.session import Session, trim_to_token_budget
 from agent.core.state import AgentState
 from agent.providers.base import Provider, ProviderResponse
 from agent.tools.execution import ToolExecutor
@@ -59,7 +59,7 @@ async def run_loop(
             # Timeout check
             elapsed = time.monotonic() - start_time
             if elapsed > config.timeout:
-                session.state = AgentState.ERROR
+                session.state = AgentState.TIMED_OUT
                 _emit(
                     session,
                     on_event,
@@ -72,29 +72,54 @@ async def run_loop(
 
             session.increment_step()
             messages = session.to_messages()
+
+            # Automatic context management — trim old messages if configured
+            if config.context_window > 0 and config.context_strategy == "sliding_window":
+                messages = trim_to_token_budget(messages, config.context_window)
+
             tool_schemas = tool_executor.registry.to_provider_schemas() or None
 
-            # Provider call — timed
+            # Provider call — timed, with retry for recoverable errors
             t_provider = time.monotonic()
-            try:
-                response: ProviderResponse = await provider.complete(
-                    messages=messages,
-                    tools=tool_schemas,
-                    system=config.system_prompt,
-                )
-            except Exception as e:
-                _friendly, _recoverable = _provider_error_message(e)
-                _log.warning(
-                    "Provider error at step %d: %s", session.step_count, _friendly, extra=_extra
-                )
-                _log.debug("Provider error detail", exc_info=True, extra=_extra)
-                session.state = AgentState.ERROR
-                _emit(
-                    session,
-                    on_event,
-                    ErrorEvent(message=_friendly, recoverable=_recoverable),
-                )
-                return session
+            response: ProviderResponse | None = None
+            for attempt in range(1, config.max_retries + 1):
+                try:
+                    response = await provider.complete(
+                        messages=messages,
+                        tools=tool_schemas,
+                        system=config.system_prompt,
+                    )
+                    break
+                except Exception as e:
+                    _friendly, _recoverable = _provider_error_message(e)
+                    if _recoverable and attempt < config.max_retries:
+                        delay = 2 ** (attempt - 1)
+                        _log.info(
+                            "Recoverable error at step %d (attempt %d/%d), retrying in %ds: %s",
+                            session.step_count,
+                            attempt,
+                            config.max_retries,
+                            delay,
+                            _friendly,
+                            extra=_extra,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    _log.warning(
+                        "Provider error at step %d: %s",
+                        session.step_count,
+                        _friendly,
+                        extra=_extra,
+                    )
+                    _log.debug("Provider error detail", exc_info=True, extra=_extra)
+                    session.state = AgentState.ERROR
+                    _emit(
+                        session,
+                        on_event,
+                        ErrorEvent(message=_friendly, recoverable=_recoverable),
+                    )
+                    return session
+            assert response is not None
 
             provider_ms = (time.monotonic() - t_provider) * 1000
 
@@ -146,6 +171,7 @@ async def run_loop(
                 done = True
 
         if session.step_count >= config.max_steps and not done:
+            session.state = AgentState.MAX_STEPS
             _emit(
                 session,
                 on_event,

@@ -6,8 +6,8 @@ Aar's TUI supports switchable color themes and configurable layout sections. The
 
 ```bash
 # launch with a specific theme
-aar tui --theme claude
 aar tui --theme decker
+aar tui --theme sleek
 
 # launch in full-screen mode with fixed header/footer bars
 aar tui --fixed
@@ -15,7 +15,7 @@ aar tui --fixed --theme decker
 
 # switch themes at runtime (inside the TUI)
 /theme              # list available themes
-/theme claude       # switch to a theme by name
+/theme decker       # switch to a theme by name
 /theme next         # cycle to the next theme
 ```
 
@@ -23,9 +23,10 @@ aar tui --fixed --theme decker
 
 | Name | Description |
 |------|-------------|
-| `default` | Classic Aar palette — green, yellow, cyan, red. Matches the original look. |
-| `claude` | Warm sand and sage — muted palette inspired by Claude Code. |
+| `default` | Warm amber palette (Bernstein) — the default look. |
+| `contrast` | Classic Aar palette — green, yellow, cyan, red. |
 | `decker` | Neon glow — cyberpunk terminal aesthetic with cyan, magenta, and orange. |
+| `sleek` | Tight spacing, minimal chrome — compact and modern. |
 
 ## Setting a default theme
 
@@ -200,7 +201,7 @@ Layout controls which TUI sections are visible. Configure it in `~/.aar/config.j
 ```json
 {
   "tui": {
-    "theme": "claude",
+    "theme": "default",
     "layout": {
       "reasoning": { "visible": false },
       "token_usage": { "visible": false },
@@ -252,7 +253,7 @@ Pass `--fixed` to launch the TUI with a persistent header and footer bar, scroll
 ```bash
 pip install "aar-agent[tui-fixed]"    # install textual dependency
 aar tui --fixed
-aar tui --fixed --theme claude --verbose
+aar tui --fixed --theme decker --verbose
 ```
 
 Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io)).
@@ -316,7 +317,7 @@ All commands from the scrollable TUI also work in fixed mode:
 | > type your message... (↑/↓ for history)                                |
 +────────────────────────────────────────────────────────────────────────+
 | Footer bar (fixed)                                                      |
-| step: 5 | theme: claude | Ctrl+T theme  Ctrl+K think  Ctrl+Y copy ...  |
+| step: 5 | theme: default | Ctrl+T theme  Ctrl+K think  Ctrl+Y copy ...  |
 +------------------------------------------------------------------------+
 ```
 
@@ -441,7 +442,7 @@ Header/footer styles and fixed_layout are all optional — if omitted, the defau
 
 When Aar looks up a theme name, it checks in order:
 
-1. Built-in themes (`default`, `claude`, `decker`)
+1. Built-in themes (`default`, `contrast`, `decker`, `sleek`)
 2. User themes at `~/.aar/themes/<name>.json`
 3. Direct file path (absolute or relative)
 

@@ -71,6 +71,8 @@ class ProviderConfig(BaseModel):
     base_url: str = ""
     max_tokens: int = 4096
     temperature: float = 0.0
+    response_format: str = ""  # "" | "json" | "json_schema"
+    json_schema: dict = Field(default_factory=dict)  # schema when response_format="json_schema"
     extra: dict = Field(default_factory=dict)
 
 
@@ -141,6 +143,9 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0
+    max_retries: int = 3
+    context_window: int = 0  # model context limit in tokens; 0 = no automatic management
+    context_strategy: str = "sliding_window"  # "sliding_window" | "none"
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
     shell_path: str = ""
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))

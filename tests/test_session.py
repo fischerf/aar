@@ -428,3 +428,107 @@ class TestSessionResumption:
         assert msgs[0]["content"] == "First"
         assert msgs[1]["content"] == "Reply"
         assert msgs[2]["content"] == "Second"
+
+
+# ---------------------------------------------------------------------------
+# Schema versioning
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaVersioning:
+    def test_save_includes_schema_version(self, tmp_dir: Path):
+        """Saved JSONL should include schema_version in the header."""
+        from agent.memory.session_store import SCHEMA_VERSION
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("test")
+        path = store.save(s)
+
+        header = json.loads(path.read_text().split("\n")[0])
+        assert header["schema_version"] == SCHEMA_VERSION
+
+    def test_load_old_session_without_version(self, tmp_dir: Path):
+        """Sessions without schema_version (pre-versioning) should load fine."""
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("old session")
+        path = store.save(s)
+
+        # Remove schema_version from the header to simulate old format
+        lines = path.read_text().split("\n")
+        header = json.loads(lines[0])
+        del header["schema_version"]
+        lines[0] = json.dumps(header)
+        path.write_text("\n".join(lines))
+
+        loaded = store.load(s.session_id)
+        assert loaded.events[0].content == "old session"
+
+    def test_load_future_version_raises(self, tmp_dir: Path):
+        """Sessions with a newer schema version should raise ValueError."""
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("future")
+        path = store.save(s)
+
+        # Set a future schema version
+        lines = path.read_text().split("\n")
+        header = json.loads(lines[0])
+        header["schema_version"] = 999
+        lines[0] = json.dumps(header)
+        path.write_text("\n".join(lines))
+
+        with pytest.raises(ValueError, match="schema version 999"):
+            store.load(s.session_id)
+
+
+# ---------------------------------------------------------------------------
+# Context management (token estimation and trimming)
+# ---------------------------------------------------------------------------
+
+
+class TestContextManagement:
+    def test_estimate_token_count_basic(self):
+        from agent.core.session import estimate_token_count
+
+        msgs = [{"role": "user", "content": "a" * 400}]
+        assert estimate_token_count(msgs) == 100  # 400 chars / 4
+
+    def test_trim_under_budget_is_noop(self):
+        from agent.core.session import trim_to_token_budget
+
+        msgs = [
+            {"role": "user", "content": "short"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result = trim_to_token_budget(msgs, 10000)
+        assert len(result) == 2
+
+    def test_trim_drops_oldest_messages(self):
+        from agent.core.session import trim_to_token_budget
+
+        msgs = [
+            {"role": "user", "content": "a" * 400},  # ~100 tokens
+            {"role": "assistant", "content": "b" * 400},  # ~100 tokens
+            {"role": "user", "content": "c" * 400},  # ~100 tokens
+        ]
+        # Budget of 150 tokens should keep only the last 1-2 messages
+        result = trim_to_token_budget(msgs, 150)
+        assert len(result) < 3
+        # The most recent message should always be kept
+        assert result[-1]["content"] == "c" * 400
+
+    def test_trim_zero_budget_is_noop(self):
+        from agent.core.session import trim_to_token_budget
+
+        msgs = [{"role": "user", "content": "hello"}]
+        result = trim_to_token_budget(msgs, 0)
+        assert len(result) == 1
+
+    def test_trim_never_returns_empty(self):
+        from agent.core.session import trim_to_token_budget
+
+        msgs = [{"role": "user", "content": "a" * 10000}]
+        result = trim_to_token_budget(msgs, 1)
+        assert len(result) == 1  # keeps at least one message

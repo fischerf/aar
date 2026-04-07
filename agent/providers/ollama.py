@@ -73,6 +73,13 @@ class OllamaProvider(Provider):
         if self.config.max_tokens:
             payload["options"]["num_predict"] = self.config.max_tokens
 
+        # Structured output (Ollama uses "format" parameter)
+        fmt = self.config.response_format
+        if fmt == "json":
+            payload["format"] = "json"
+        elif fmt == "json_schema" and self.config.json_schema:
+            payload["format"] = self.config.json_schema
+
         # Tool support
         if tools and self.supports_tools:
             payload["tools"] = _convert_tools(tools)
