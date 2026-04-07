@@ -16,7 +16,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Callable
 
-from rich.markdown import Markdown
+from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -24,9 +24,11 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Horizontal
+    from textual.containers import Horizontal, VerticalScroll
     from textual.events import Click
     from textual.widgets import Button, Input, RichLog, Static
+    from textual.widgets import Markdown as TextualMarkdown
+    from textual.widgets.markdown import MarkdownStream
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "The fixed TUI requires the 'textual' package. "
@@ -500,7 +502,9 @@ class FixedTUIRenderer:
         self._extension_panels: dict[str, Callable] = {}
         self._thinking_visible = True
         self._streaming_active = False
-        self._stream_buffer: list[str] = []
+        self._stream_md: TextualMarkdown | None = None
+        self._stream_obj: MarkdownStream | None = None
+        self._stream_scroll: VerticalScroll | None = None
 
     def _write(self, content: object, raw: str = "", kind: str = "") -> None:
         """Write to the log, using block tracking when available."""
@@ -556,6 +560,30 @@ class FixedTUIRenderer:
         return self._thinking_visible
 
     # ------------------------------------------------------------------
+    # Streaming via Textual Markdown widget
+    # ------------------------------------------------------------------
+
+    def _start_stream_widget(self) -> None:
+        """Show the streaming Markdown widget and create a MarkdownStream."""
+        if self._stream_md is not None:
+            self._stream_md.update("")
+            self._stream_obj = TextualMarkdown.get_stream(self._stream_md)
+            if self._stream_scroll is not None:
+                self._stream_scroll.display = True
+                self._stream_scroll.anchor()
+
+    async def _stop_stream_widget(self) -> None:
+        """Stop the MarkdownStream and hide the widget."""
+        if self._stream_obj is not None:
+            try:
+                await self._stream_obj.stop()
+            except Exception:
+                pass
+            self._stream_obj = None
+        if self._stream_scroll is not None:
+            self._stream_scroll.display = False
+
+    # ------------------------------------------------------------------
     # Event rendering (into RichLog)
     # ------------------------------------------------------------------
 
@@ -567,28 +595,32 @@ class FixedTUIRenderer:
             if event.text:
                 if not self._streaming_active:
                     self._streaming_active = True
-                    self._stream_buffer.clear()
-                    self._log.write(Text())  # spacer
-                self._stream_buffer.append(event.text)
-                # Write the latest token to the log for live display
-                self._log.write(Text(event.text, end=""))
+                    self._start_stream_widget()
+                if self._stream_obj is not None:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._stream_obj.write(event.text))
             if event.reasoning_text and self._thinking_visible:
                 self._log.write(
-                    Text(event.reasoning_text, style=f"italic {t.reasoning.border_style}", end="")
+                    Text(event.reasoning_text, style=f"italic {t.reasoning.border_style}")
                 )
-            if event.finished and self._streaming_active:
-                self._log.write(Text())  # newline after stream
+            if event.finished:
+                if self._stream_obj is not None:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._stop_stream_widget())
             return
 
         if isinstance(event, AssistantMessage) and event.content:
             if self._streaming_active:
-                # Content was already streamed live; render the final styled panel
+                # Content was streamed live via the Markdown widget;
+                # finalize: hide the streaming widget and write the panel to the log.
                 self._streaming_active = False
-                self._stream_buffer.clear()
+                if self._stream_obj is not None:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._stop_stream_widget())
                 if self.layout.assistant.visible:
                     self._write(
                         Panel(
-                            Markdown(event.content),
+                            RichMarkdown(event.content),
                             title=f"[{t.assistant.title_style}]Assistant[/]",
                             border_style=t.assistant.border_style,
                             padding=t.assistant.padding,
@@ -602,7 +634,7 @@ class FixedTUIRenderer:
             self._log.write(Text())  # spacer
             self._write(
                 Panel(
-                    Markdown(event.content),
+                    RichMarkdown(event.content),
                     title=f"[{t.assistant.title_style}]Assistant[/]",
                     border_style=t.assistant.border_style,
                     padding=t.assistant.padding,
@@ -778,6 +810,15 @@ class AarFixedApp(App):
     #body-log {
         min-height: 4;
     }
+    #stream-scroll {
+        max-height: 50%;
+        min-height: 3;
+        display: none;
+        padding: 0 1;
+    }
+    #stream-md {
+        min-height: 1;
+    }
     #input-sep {
         height: 1;
     }
@@ -836,6 +877,7 @@ class AarFixedApp(App):
             ],
             "body": lambda: [
                 SelectableRichLog(id="body-log", wrap=True, markup=True, auto_scroll=True),
+                VerticalScroll(TextualMarkdown(id="stream-md"), id="stream-scroll"),
             ],
             "input": lambda: [
                 ApprovalBar(),
@@ -898,6 +940,14 @@ class AarFixedApp(App):
             theme=self._theme,
             layout=self._layout_config,
         )
+
+        # Wire streaming Markdown widget into the renderer
+        try:
+            self._renderer._stream_md = self.query_one("#stream-md", TextualMarkdown)
+            self._renderer._stream_scroll = self.query_one("#stream-scroll", VerticalScroll)
+        except Exception:
+            pass
+
         self._agent.on_event(self._renderer.render_event)
 
         # Wire approval callback into the agent's permission manager
@@ -1049,6 +1099,7 @@ class AarFixedApp(App):
         footer.refresh()
         self._renderer._step_count = 0
         self._renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
+        self._renderer._streaming_active = False
         self._renderer.render_welcome()
 
     def action_copy_block(self) -> None:
