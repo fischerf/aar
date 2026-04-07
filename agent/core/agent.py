@@ -101,6 +101,7 @@ class Agent:
         self,
         prompt: str | list[ContentBlock],
         session: Session | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> Session:
         """Run the agent with a user prompt.
 
@@ -109,6 +110,8 @@ class Agent:
                 :class:`~agent.core.events.ContentBlock` objects for multimodal
                 (text + image) input.
             session: Optional existing session to continue.
+            cancel_event: Optional asyncio.Event; set it to request cooperative
+                cancellation of the agent loop.
 
         Returns:
             The completed session.
@@ -133,6 +136,7 @@ class Agent:
             tool_executor=self.executor,
             config=self.config,
             on_event=_dispatch if self._on_event else None,
+            cancel_event=cancel_event,
         )
 
         return session

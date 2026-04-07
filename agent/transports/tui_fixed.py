@@ -151,6 +151,10 @@ class FooterBar(Static):
             ("  |  ", f.separator_style),
             (f"theme: {self.theme_name}", f.theme_style),
             ("  |  ", f.separator_style),
+            ("Shift+Enter", f.step_style),
+            (" newline  ", f.separator_style),
+            ("Ctrl+C", f.step_style),
+            (" cancel  ", f.separator_style),
             ("Ctrl+T", f.step_style),
             (" theme  ", f.separator_style),
             ("Ctrl+K", f.step_style),
@@ -335,9 +339,18 @@ class HistoryInput(Input):
         self.cursor_position = len(self.value)
 
     async def _on_key(self, event: object) -> None:
-        """Intercept up/down keys for history navigation."""
+        """Intercept up/down keys for history and shift+enter for newlines."""
         key = getattr(event, "key", "")
-        if key == "up":
+        if key == "shift+enter":
+            # Insert a newline at the cursor position
+            pos = self.cursor_position
+            self.value = self.value[:pos] + "\n" + self.value[pos:]
+            self.cursor_position = pos + 1
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+        elif key == "up":
             self._key_up(event)
             if hasattr(event, "prevent_default"):
                 event.prevent_default()  # type: ignore[union-attr]
@@ -810,6 +823,7 @@ class AarFixedApp(App):
     BINDINGS = [
         Binding("pageup", "scroll_up", "Page Up", show=False),
         Binding("pagedown", "scroll_down", "Page Down", show=False),
+        Binding("ctrl+c", "cancel_agent", "Cancel agent", show=False, priority=True),
         Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False),
         Binding("ctrl+k", "toggle_thinking", "Toggle thinking", show=False, priority=True),
         Binding("ctrl+l", "clear_screen", "Clear screen", show=False),
@@ -869,6 +883,7 @@ class AarFixedApp(App):
         self._session: Session | None = None
         self._store = SessionStore(config.session_dir)
         self._renderer: FixedTUIRenderer | None = renderer
+        self._cancel_event: asyncio.Event | None = None
 
     # ------------------------------------------------------------------
     # Compose the widget tree from theme layout config
@@ -1119,6 +1134,33 @@ class AarFixedApp(App):
         self._renderer._stream_in_reasoning = False
         self._renderer.render_welcome()
 
+    async def action_cancel_agent(self) -> None:
+        """Ctrl+C — cancel the running agent."""
+        # Signal cooperative cancellation
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        # Cancel the Textual worker
+        for worker in self.workers:
+            if getattr(worker, "name", "") == "agent-run" and worker.is_running:
+                worker.cancel()
+                # Stop streaming widget if active
+                if self._renderer:
+                    await self._renderer._stop_stream_widget()
+                    self._renderer._write(
+                        Text("Cancelled", style=self._renderer.theme.error.border_style),
+                        raw="Cancelled",
+                        kind="system",
+                    )
+                # Update header state
+                try:
+                    header = self.query_one(HeaderBar)
+                    header.state = "cancelled"
+                    header.refresh()
+                except Exception:
+                    pass
+                self._restore_input()
+                break
+
     def action_copy_block(self) -> None:
         """Ctrl+Y — copy the selected (or last) block's raw text to clipboard."""
         self._do_copy_selected()
@@ -1292,9 +1334,11 @@ class AarFixedApp(App):
 
     def _run_agent_worker(self, content: object) -> None:
         """Launch the agent in a Textual worker so the event loop stays free."""
+        cancel_event = asyncio.Event()
+        self._cancel_event = cancel_event
 
         async def _do_run() -> Session:
-            return await self._agent.run(content, self._session)
+            return await self._agent.run(content, self._session, cancel_event=cancel_event)
 
         self.run_worker(_do_run(), exclusive=True, name="agent-run")
 
