@@ -572,6 +572,9 @@ class FixedTUIRenderer:
             if self._stream_scroll is not None:
                 self._stream_scroll.display = True
                 self._stream_scroll.anchor()
+            # Scroll the RichLog to the bottom so the screen doesn't look cut
+            # when the body splits between the log and the stream widget.
+            self._log.scroll_end(animate=False)
 
     async def _stop_stream_widget(self) -> None:
         """Stop the MarkdownStream and hide the widget."""
@@ -601,7 +604,7 @@ class FixedTUIRenderer:
                 if self._stream_obj is not None:
                     loop = asyncio.get_running_loop()
                     # Render reasoning as a blockquote inside the streamed markdown
-                    loop.create_task(self._stream_obj.write(f"> {event.reasoning_text}"))
+                    loop.create_task(self._stream_obj.write(f"{event.reasoning_text}"))
             if event.text:
                 if not self._streaming_active:
                     self._streaming_active = True
