@@ -621,6 +621,11 @@ class ChatBody(VerticalScroll):
         if self.auto_scroll:
             self.scroll_end(animate=False)
 
+    def watch_virtual_size(self, new_size) -> None:  # noqa: ANN001
+        """Pin to bottom whenever content grows, unless the user has scrolled up."""
+        if self.auto_scroll:
+            self.scroll_end(animate=False)
+
     def on_scroll(self) -> None:
         """Pause auto-scroll when user scrolls up; resume when back at bottom."""
         at_bottom = self.scroll_offset.y >= (self.virtual_size.height - self.size.height - 2)
