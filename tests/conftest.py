@@ -6,8 +6,26 @@ import asyncio
 import tempfile
 from pathlib import Path
 from typing import Any, AsyncIterator
+from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_dir(tmp_path):
+    """Prevent tests from reading ~/.aar/config.json or ~/.aar/mcp_servers.json.
+
+    Patches both user-dir path constants in the CLI module to point at
+    nonexistent paths inside a temp directory, so tests are hermetic
+    regardless of what the developer has installed locally.
+    """
+    fake_config = tmp_path / "no_config.json"       # does not exist
+    fake_mcp = tmp_path / "no_mcp_servers.json"     # does not exist
+    with (
+        patch("agent.transports.cli._USER_CONFIG", fake_config),
+        patch("agent.transports.cli._USER_MCP_CONFIG", fake_mcp),
+    ):
+        yield
 
 
 def pytest_addoption(parser):
