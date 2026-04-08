@@ -63,6 +63,15 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 ## CLI
 
 ```bash
+# Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
+# Shortcuts: Ctrl+T theme, Ctrl+K think, Ctrl+L clear, Ctrl+Y copy, ↑/↓ history
+# Left-click selects a block, right-click copies it. /quit to exit.
+aar tui --fixed
+aar tui --fixed --theme decker
+
+# Launch the rich TUI
+aar tui
+
 # Interactive chat (asks before write/execute, file tools restricted to cwd)
 aar chat
 
@@ -90,15 +99,6 @@ aar sessions
 
 # List available tools
 aar tools
-
-# Launch the rich TUI
-aar tui
-
-# Full-screen TUI with fixed bars, scrollable body, mouse support
-# Shortcuts: Ctrl+T theme, Ctrl+K think, Ctrl+L clear, Ctrl+Y copy, ↑/↓ history
-# Left-click selects a block, right-click copies it. /quit to exit.
-aar tui --fixed
-aar tui --fixed --theme decker
 
 # Start the HTTP/SSE web server
 aar serve --host 0.0.0.0 --port 8080
