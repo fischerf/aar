@@ -21,7 +21,6 @@ from agent.core.events import (
 )
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
-    BERNSTEIN_THEME,
     BUILTIN_THEMES,
     CLASSIC_THEME,
     DECKER_THEME,
@@ -49,7 +48,6 @@ from agent.transports.tui_fixed import (
     FooterBar,
     HeaderBar,
     HistoryInput,
-    SelectableRichLog,
     _Block,
 )
 
