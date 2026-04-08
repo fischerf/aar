@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from agent.core.config import AgentConfig
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -42,17 +45,20 @@ class TUIRenderer:
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
+        config: "AgentConfig | None" = None,
     ) -> None:
         self.console = console or Console()
         self._verbose = verbose
         self._tool_calls: list[ToolCall] = []
         self._tool_results: list[ToolResult] = []
         self._usage_total: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self._total_cost: float = 0.0
         self._step_count = 0
         self.theme = theme or DEFAULT_THEME
         self.layout = layout or LayoutConfig()
         self._extension_panels: dict[str, Callable[[Console], None]] = {}
         self._streaming_active = False
+        self._config: AgentConfig | None = config
 
     # ------------------------------------------------------------------
     # Theme switching
@@ -212,14 +218,39 @@ class TUIRenderer:
             u = event.usage
             self._usage_total["input_tokens"] += u.get("input_tokens", 0)
             self._usage_total["output_tokens"] += u.get("output_tokens", 0)
+
+            # Calculate step cost
+            from agent.core.tokens import TokenUsage, calculate_cost, get_pricing
+
+            usage_obj = TokenUsage.from_dict(u)
+            pricing = get_pricing(event.model)
+            step_cost = calculate_cost(usage_obj, pricing) if pricing else 0.0
+            self._total_cost += step_cost
+
             if not self.layout.token_usage.visible:
                 return
+
+            from agent.transports.tui_utils.formatting import (
+                format_token_display,
+                is_over_warning_threshold,
+            )
+
+            warning = False
+            if self._config:
+                cfg = self._config
+                token_total = self._usage_total["input_tokens"] + self._usage_total["output_tokens"]
+                warning = is_over_warning_threshold(
+                    token_total, cfg.token_budget, cfg.token_warning_threshold
+                ) or is_over_warning_threshold(
+                    self._total_cost, cfg.cost_limit, cfg.cost_warning_threshold
+                )
+
+            style = t.usage_warning_style if warning else t.usage_style
             self.console.print(
                 Text(
                     f"  {u.get('input_tokens', 0)}in / {u.get('output_tokens', 0)}out "
-                    f"(total: {self._usage_total['input_tokens']}in"
-                    f" / {self._usage_total['output_tokens']}out)",
-                    style=t.usage_style,
+                    f"(total: {format_token_display(self._usage_total['input_tokens'], self._usage_total['output_tokens'], self._total_cost)})",
+                    style=style,
                 ),
                 justify="right",
             )
@@ -233,10 +264,17 @@ class TUIRenderer:
         status.add_column(justify="left")
         status.add_column(justify="center")
         status.add_column(justify="right")
+        total_tokens = self._usage_total["input_tokens"] + self._usage_total["output_tokens"]
+        token_info = f"Tokens: {total_tokens}"
+        if self._total_cost > 0:
+            if self._total_cost < 0.01:
+                token_info += f" (${self._total_cost:.4f})"
+            else:
+                token_info += f" (${self._total_cost:.2f})"
         status.add_row(
             f"[{t.dim_text}]Session: {session.session_id[:8]}...[/]",
             f"[{t.dim_text}]Steps: {session.step_count}[/]",
-            f"[{t.dim_text}]State: {session.state.value}[/]",
+            f"[{t.dim_text}]{token_info}[/]",
         )
         self.console.print(status)
 
@@ -312,7 +350,7 @@ async def run_tui(
     layout = LayoutConfig.model_validate(config.tui.layout) if config.tui.layout else LayoutConfig()
 
     agent = agent or Agent(config=config)
-    renderer = TUIRenderer(verbose=verbose, theme=theme, layout=layout)
+    renderer = TUIRenderer(verbose=verbose, theme=theme, layout=layout, config=config)
     store = SessionStore(config.session_dir)
     session: Session | None = None
 

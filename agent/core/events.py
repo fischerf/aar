@@ -99,6 +99,7 @@ class StopReason(str, Enum):
     MAX_TOKENS = "max_tokens"
     TIMEOUT = "timeout"
     MAX_STEPS = "max_steps"
+    BUDGET_EXCEEDED = "budget_exceeded"
     CANCELLED = "cancelled"
     ERROR = "error"
 

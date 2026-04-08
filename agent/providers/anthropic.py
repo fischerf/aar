@@ -82,13 +82,24 @@ class AnthropicProvider(Provider):
         # Map stop reason
         stop_reason = _map_stop_reason(response.stop_reason)
 
+        usage: dict[str, int] = {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
+        # Capture cache tokens when available (prompt caching)
+        if hasattr(response.usage, "cache_read_input_tokens"):
+            cache_read = response.usage.cache_read_input_tokens
+            if cache_read:
+                usage["cache_read_tokens"] = cache_read
+        if hasattr(response.usage, "cache_creation_input_tokens"):
+            cache_write = response.usage.cache_creation_input_tokens
+            if cache_write:
+                usage["cache_write_tokens"] = cache_write
+
         meta = ProviderMeta(
             provider="anthropic",
             model=response.model,
-            usage={
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            },
+            usage=usage,
             request_id=response.id,
         )
 

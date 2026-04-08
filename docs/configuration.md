@@ -36,6 +36,10 @@ config = AgentConfig(
         theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name
         layout={},                                     # section visibility (see docs/themes.md)
     ),
+    token_budget=0,                                # max total tokens per run; 0 = unlimited
+    cost_limit=0.0,                                # max USD cost per run; 0.0 = unlimited
+    token_warning_threshold=0.8,                   # TUI warning at 80% of budget
+    cost_warning_threshold=0.8,                    # TUI warning at 80% of cost limit
     session_dir=".agent/sessions",
     shell_path="",                                 # custom shell binary (see below)
     project_rules_dir=".agent",                    # project rules folder (see below)
@@ -151,6 +155,60 @@ config = AgentConfig(log_level="DEBUG")
 aar chat --log-level DEBUG
 aar run "do something" --log-level INFO
 aar tui --log-level WARNING
+```
+
+## Token budget & cost limits
+
+You can cap how many tokens or how much estimated cost a single agent run is allowed to consume. Both limits default to zero (unlimited).
+
+### How token tracking works
+
+After every provider call the agent reads `ProviderMeta.usage` (input tokens + output tokens) and adds the values to a running total for the current run. Once the accumulated total exceeds `token_budget` (if non-zero), the loop emits an `ErrorEvent` and stops with `AgentState.BUDGET_EXCEEDED`.
+
+### How cost estimation works
+
+Aar ships a built-in pricing table keyed by model-name prefix. After each provider call the framework multiplies token counts by the matching per-token price to produce an estimated USD cost. The estimate is **approximate** — prompt-caching discounts, batching, and future price changes are not reflected.
+
+- Cost is accumulated across all steps in the run, just like tokens.
+- When `cost_limit` (if > 0) is exceeded the agent stops the same way as for `token_budget`.
+- Local or Ollama models that don't match any pricing-table entry will report **$0.00** cost.
+
+### Warning thresholds (TUI only)
+
+`token_warning_threshold` and `cost_warning_threshold` are fractions (0.0–1.0) of the corresponding limit. When the running total crosses the threshold the TUI switches the counter display to **red**. This is a visual cue only — the agent keeps running until the hard limit is hit.
+
+### Enforcement details
+
+| Behaviour | Detail |
+|-----------|--------|
+| Checked | After each provider call, before the next step |
+| Scope | Per-run (resets when `Agent.run()` is called again) |
+| State on exceed | `AgentState.BUDGET_EXCEEDED` |
+| Event emitted | `ErrorEvent` with a descriptive message |
+| Warning thresholds | Visual only — TUI counter turns red |
+
+### Configuration examples
+
+**Via `AgentConfig` in code:**
+
+```python
+config = AgentConfig(
+    token_budget=100_000,          # stop after 100 k tokens
+    cost_limit=5.0,                # stop after ~$5
+    token_warning_threshold=0.9,   # yellow → red at 90 %
+    cost_warning_threshold=0.9,
+)
+```
+
+**Via config file** (`~/.aar/config.json` or `--config`):
+
+```json
+{
+  "token_budget": 100000,
+  "cost_limit": 5.0,
+  "token_warning_threshold": 0.9,
+  "cost_warning_threshold": 0.9
+}
 ```
 
 ## Configurable system prompt

@@ -13,3 +13,4 @@ class AgentState(str, Enum):
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
     MAX_STEPS = "max_steps"
+    BUDGET_EXCEEDED = "budget_exceeded"

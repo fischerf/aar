@@ -11,8 +11,8 @@ from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
     ReasoningBlock,
-    StreamChunk,
     StopReason,
+    StreamChunk,
     ToolCall,
 )
 from agent.core.session import Session, trim_to_token_budget
@@ -146,6 +146,54 @@ async def run_loop(
             # Record reasoning blocks
             for rb in response.reasoning:
                 _emit(session, on_event, rb)
+
+            # ── Token / cost budget enforcement ─────────────────────────
+            if response.meta and response.meta.usage:
+                from agent.core.tokens import TokenUsage, calculate_cost, get_pricing
+
+                usage = TokenUsage.from_dict(response.meta.usage)
+                session.total_input_tokens += usage.input_tokens
+                session.total_output_tokens += usage.output_tokens
+
+                # Cost tracking
+                pricing = get_pricing(config.provider.model)
+                if pricing:
+                    step_cost = calculate_cost(usage, pricing)
+                    session.total_cost += step_cost
+
+                # Token budget check
+                if config.token_budget > 0:
+                    if session.total_tokens >= config.token_budget:
+                        session.state = AgentState.BUDGET_EXCEEDED
+                        _emit(
+                            session,
+                            on_event,
+                            ErrorEvent(
+                                message=(
+                                    f"Token budget exceeded"
+                                    f" ({session.total_tokens}/{config.token_budget})"
+                                ),
+                                recoverable=False,
+                            ),
+                        )
+                        return session
+
+                # Cost limit check
+                if config.cost_limit > 0:
+                    if session.total_cost >= config.cost_limit:
+                        session.state = AgentState.BUDGET_EXCEEDED
+                        _emit(
+                            session,
+                            on_event,
+                            ErrorEvent(
+                                message=(
+                                    f"Cost limit exceeded"
+                                    f" (${session.total_cost:.4f}/${config.cost_limit:.4f})"
+                                ),
+                                recoverable=False,
+                            ),
+                        )
+                        return session
 
             _log.info(
                 "step=%d provider_ms=%.0f tool_calls=%d",
