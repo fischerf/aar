@@ -124,6 +124,9 @@ agent/
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # MCP bridge, observability
 └── transports/     # CLI, TUI, web, event stream
+    ├── themes/     # Theme models, built-in themes, registry
+    ├── tui_utils/  # Shared formatting helpers for TUI transports
+    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.

@@ -21,8 +21,8 @@ from agent.core.events import (
 )
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
-    BUILTIN_THEMES,
     BERNSTEIN_THEME,
+    BUILTIN_THEMES,
     CLASSIC_THEME,
     DECKER_THEME,
     DEFAULT_THEME,
@@ -44,6 +44,7 @@ from agent.transports.tui import TUIRenderer
 from agent.transports.tui_fixed import (
     AarFixedApp,
     ApprovalBar,
+    ChatBody,
     FixedTUIRenderer,
     FooterBar,
     HeaderBar,
@@ -889,7 +890,7 @@ class TestAarFixedAppStartup:
             # App mounted — check core widgets exist
             assert app.query_one(HeaderBar) is not None
             assert app.query_one(FooterBar) is not None
-            assert app.query_one(SelectableRichLog) is not None
+            assert app.query_one(ChatBody) is not None
             assert app.query_one(HistoryInput) is not None
 
     @pytest.mark.asyncio
@@ -898,9 +899,10 @@ class TestAarFixedAppStartup:
         config = AgentConfig()
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as _pilot:
-            log = app.query_one("#body-log", SelectableRichLog)
-            # Welcome message should be in the blocks (raw text)
-            assert any("Aar Agent TUI" in b.raw for b in log._blocks)
+            chat_body = app.query_one("#chat-body", ChatBody)
+            # Welcome message should be in a RichBlock child
+            assert chat_body.get_all_text() != ""
+            assert "Aar Agent TUI" in chat_body.get_all_text()
 
     @pytest.mark.asyncio
     async def test_app_header_shows_provider(self) -> None:
@@ -922,9 +924,9 @@ class TestAarFixedAppStartup:
             inp.value = "/theme"
             await pilot.press("enter")
             await pilot.pause()
-            # /theme writes plain text entries (not tracked blocks)
-            log = app.query_one("#body-log", SelectableRichLog)
-            assert log._total_lines > 0  # content was written
+            # /theme writes RichBlock entries into the chat body
+            chat_body = app.query_one("#chat-body", ChatBody)
+            assert chat_body.get_all_text() != ""  # content was written
 
     @pytest.mark.asyncio
     async def test_app_ctrl_t_cycles_theme(self) -> None:

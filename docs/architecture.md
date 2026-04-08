@@ -21,6 +21,9 @@ agent/
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # MCP bridge, observability
 └── transports/     # CLI, TUI, web, event stream
+    ├── themes/     # Theme models, built-in themes, registry
+    ├── tui_utils/  # Shared formatting helpers for TUI transports
+    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
 ```
 
 ## Core loop
@@ -213,9 +216,18 @@ Transports are thin I/O adapters. They create an `Agent`, wire up event handlers
 | Transport | Module | Entry point | Notes |
 |-----------|--------|-------------|-------|
 | CLI | `transports/cli.py` | `aar chat`, `aar run`, etc. | Typer app, terminal approval callback |
-| TUI | `transports/tui.py` | `aar tui` | Rich panels, `/policy` command, `/tools` listing |
+| TUI | `transports/tui.py` | `aar tui` | Rich inline TUI, scrollable terminal UI |
+| TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer |
 | Web | `transports/web.py` | `aar serve` | ASGI app, SSE streaming, per-request safety override |
 | Stream | `transports/stream.py` | (internal) | `EventStream` / `AsyncEventStream` for pub/sub |
+
+Shared TUI sub-packages:
+
+| Package | Contents |
+|---------|----------|
+| `transports/tui_utils/` | Formatting helpers shared by both TUI transports |
+| `transports/tui_widgets/` | Textual widget classes: bars, blocks, chat body, input |
+| `transports/themes/` | Theme models, built-in themes, theme registry |
 
 All transports share the same `AgentConfig` schema. Transport-specific behavior is limited to:
 - How user input is collected
