@@ -1,0 +1,81 @@
+{
+  "provider": {
+    "name": "ollama",
+    "model": "deepseek-r1:8b",
+    "temperature": 0.6,
+    "max_tokens": 8192,
+    "extra": {
+	  "num_ctx": 32768,
+      "top_p": 0.95,
+      "top_k": 20,
+      "min_p": 0.0,
+      "supports_reasoning": true,
+      "supports_tools": false,
+      "supports_vision": true,
+      "keep_alive": "10m"
+    }
+  },
+  "tools": {
+    "enabled_builtins": [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "list_directory",
+      "bash"
+    ],
+    "allowed_paths": [],
+    "command_timeout": 80,
+    "max_output_chars": 50000
+  },
+  "safety": {
+    "read_only": false,
+    "require_approval_for_writes": true,
+    "require_approval_for_execute": true,
+    "denied_paths": [
+      "/etc/shadow",
+      "/etc/passwd",
+      "/etc/sudoers",
+      "/etc/sudoers.d/**",
+      "**/.env",
+      "**/.env.*",
+      "**/credentials",
+      "**/credentials.*",
+      "**/secrets",
+      "**/secrets.*",
+      "**/*.pem",
+      "**/*.key",
+      "**/*.p12",
+      "**/*.pfx",
+      "**/.ssh/**",
+      "**/id_rsa",
+      "**/id_dsa",
+      "**/id_ecdsa",
+      "**/id_ed25519",
+      "**/.aws/**",
+      "**/.azure/**",
+      "**/.config/gcloud/**",
+      "**/.netrc",
+      "**/.npmrc",
+      "**/.pypirc"
+    ],
+    "allowed_paths": [],
+    "sandbox": "local",
+    "sandbox_max_memory_mb": 512,
+    "log_all_commands": true
+  },
+  "tui": {
+    "theme": "decker",
+    "layout": {}
+  },
+  "max_steps": 50,
+  "max_tokens_per_turn": 8192,
+  "timeout": 500.0,
+  "max_retries": 3,
+  "streaming": true,
+  "context_window": 32768,
+  "context_strategy": "sliding_window",
+  "session_dir": ".agent/sessions",
+  "shell_path": "",
+  "project_rules_dir": ".agent",
+  "log_level": "WARNING"
+}
