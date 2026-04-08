@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse
+from agent.providers.base import Provider, ProviderResponse, StreamDelta
 
 
 class AnthropicProvider(Provider):
@@ -98,6 +99,82 @@ class AnthropicProvider(Provider):
             reasoning=reasoning_blocks,
             meta=meta,
         )
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str = "",
+    ) -> AsyncIterator[StreamDelta]:
+        """Stream response deltas using the Anthropic SDK's streaming API.
+
+        Anthropic streams typed events: ``content_block_start``,
+        ``content_block_delta``, ``content_block_stop``, and ``message_stop``.
+        Text and thinking blocks are emitted as deltas; tool_use blocks are
+        accumulated and emitted at the end.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "messages": _convert_messages_for_anthropic(messages),
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = tools
+        if self.config.temperature > 0:
+            kwargs["temperature"] = self.config.temperature
+        kwargs.update(self.config.extra)
+
+        # Track active content blocks by index
+        active_blocks: dict[int, dict[str, Any]] = {}
+
+        async with self._client.messages.stream(**kwargs) as stream:
+            async for event in stream:
+                event_type = event.type
+
+                if event_type == "content_block_start":
+                    idx = event.index
+                    block = event.content_block
+                    active_blocks[idx] = {"type": block.type}
+                    if block.type == "tool_use":
+                        active_blocks[idx]["id"] = block.id
+                        active_blocks[idx]["name"] = block.name
+                        active_blocks[idx]["arguments"] = ""
+
+                elif event_type == "content_block_delta":
+                    idx = event.index
+                    delta = event.delta
+
+                    if delta.type == "text_delta":
+                        yield StreamDelta(text=delta.text)
+                    elif delta.type == "thinking_delta":
+                        yield StreamDelta(reasoning_delta=delta.thinking)
+                    elif delta.type == "input_json_delta":
+                        if idx in active_blocks:
+                            active_blocks[idx]["arguments"] += delta.partial_json
+
+                elif event_type == "message_stop":
+                    # Emit accumulated tool calls
+                    for block_info in active_blocks.values():
+                        if block_info.get("type") == "tool_use":
+                            raw_args = block_info.get("arguments", "{}")
+                            try:
+                                parsed_args = json.loads(raw_args) if raw_args else {}
+                            except (json.JSONDecodeError, TypeError):
+                                parsed_args = {"raw": raw_args}
+                            yield StreamDelta(
+                                tool_call_delta={
+                                    "tool_call_id": block_info.get("id", ""),
+                                    "tool_name": block_info.get("name", ""),
+                                    "arguments": parsed_args,
+                                }
+                            )
+                    yield StreamDelta(done=True)
+                    return
+
+        # Fallback sentinel
+        yield StreamDelta(done=True)
 
 
 def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

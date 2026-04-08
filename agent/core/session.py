@@ -155,6 +155,51 @@ class Session(BaseModel):
         return messages
 
 
+def estimate_token_count(messages: list[dict[str, Any]]) -> int:
+    """Rough token estimate: ~4 chars per token for English text.
+
+    This is a fast heuristic, not an exact count.  It's used to decide
+    whether to trim context, not for billing.
+    """
+    total_chars = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    total_chars += len(str(block.get("text", "")))
+                    total_chars += len(str(block.get("content", "")))
+                    total_chars += len(str(block.get("input", "")))
+    return total_chars // 4
+
+
+def trim_to_token_budget(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+) -> list[dict[str, Any]]:
+    """Drop oldest messages (keeping the first user message) until under budget.
+
+    Preserves the most recent messages.  If even the last message exceeds
+    the budget, returns it alone — we never return an empty list.
+    """
+    if max_tokens <= 0 or estimate_token_count(messages) <= max_tokens:
+        return messages
+
+    # Always try to keep the last N messages that fit
+    result: list[dict[str, Any]] = []
+    budget = max_tokens
+    for msg in reversed(messages):
+        msg_tokens = estimate_token_count([msg])
+        if budget - msg_tokens < 0 and result:
+            break
+        result.insert(0, msg)
+        budget -= msg_tokens
+
+    return result
+
+
 def _tool_results_message(results: list[ToolResult]) -> dict[str, Any]:
     """Build a user message containing tool result blocks."""
     content = []

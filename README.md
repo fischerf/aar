@@ -30,6 +30,9 @@ pip install "aar-agent[generic]"
 # With MCP support
 pip install "aar-agent[ollama,mcp]"
 
+# Full-screen TUI with fixed bars (requires textual)
+pip install "aar-agent[tui-fixed]"
+
 # Core only (no LLM provider)
 pip install aar-agent
 ```
@@ -60,6 +63,15 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 ## CLI
 
 ```bash
+# Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
+# Shortcuts: Ctrl+T theme, Ctrl+K think, Ctrl+L clear, Ctrl+Y copy, ↑/↓ history
+# Left-click selects a block, right-click copies it. /quit to exit.
+aar tui --fixed
+aar tui --fixed --theme decker
+
+# Launch the rich TUI
+aar tui
+
 # Interactive chat (asks before write/execute, file tools restricted to cwd)
 aar chat
 
@@ -88,9 +100,6 @@ aar sessions
 # List available tools
 aar tools
 
-# Launch the rich TUI
-aar tui
-
 # Start the HTTP/SSE web server
 aar serve --host 0.0.0.0 --port 8080
 ```
@@ -115,6 +124,9 @@ agent/
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # MCP bridge, observability
 └── transports/     # CLI, TUI, web, event stream
+    ├── themes/     # Theme models, built-in themes, registry
+    ├── tui_utils/  # Shared formatting helpers for TUI transports
+    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
@@ -150,6 +162,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
+| [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |

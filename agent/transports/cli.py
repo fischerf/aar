@@ -16,13 +16,17 @@ from agent.core.agent import Agent
 from agent.core.config import AgentConfig, load_config
 from agent.core.events import (
     AssistantMessage,
+    AudioBlock,
     ErrorEvent,
     Event,
+    ImageURLBlock,
     ProviderMeta,
     ReasoningBlock,
+    StreamChunk,
     ToolCall,
     ToolResult,
 )
+from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
@@ -167,12 +171,33 @@ def _looks_like_path(s: str) -> bool:
 
 def _make_event_handler(verbose: bool = False):
     """Return an event handler callback, optionally with richer feedback."""
+    _streaming_state = {"active": False}
 
     def _handler(event: Event) -> None:
+        if isinstance(event, StreamChunk):
+            if event.text:
+                if not _streaming_state["active"]:
+                    _streaming_state["active"] = True
+                    console.print()  # blank line before streamed output
+                console.file.write(event.text)
+                console.file.flush()
+            if event.reasoning_text and verbose:
+                console.file.write(event.reasoning_text)
+                console.file.flush()
+            if event.finished and _streaming_state["active"]:
+                console.file.write("\n")
+                console.file.flush()
+            return
+
         if isinstance(event, AssistantMessage) and event.content:
+            if _streaming_state["active"]:
+                # Content was already streamed token-by-token; skip duplicate render
+                _streaming_state["active"] = False
+                return
             console.print()
             console.print(Markdown(event.content))
         elif isinstance(event, ToolCall):
+            _streaming_state["active"] = False  # reset between turns
             if verbose:
                 badge = _side_effect_badge(event.data.get("side_effects", []))
                 prefix = f"{badge} " if badge else ""
@@ -291,7 +316,13 @@ async def _async_chat_loop(
             console.print(f"[red]Session {session_id} not found[/]")
             raise typer.Exit(1)
 
-    console.print(Panel("Agent ready. Type your message. Ctrl+C to exit.", border_style="blue"))
+    console.print(
+        Panel(
+            "Agent ready. Type your message. Ctrl+C to exit.\n"
+            "[dim]Attach files with @path (e.g. @photo.jpg @audio.wav)[/]",
+            border_style="blue",
+        )
+    )
 
     try:
         while True:
@@ -305,7 +336,22 @@ async def _async_chat_loop(
             if user_input.strip().lower() in {"/quit", "/exit", "/q"}:
                 break
 
-            session = await agent.run(user_input, session)
+            content = parse_multimodal_input(user_input)
+            if isinstance(content, list):
+                has_audio = False
+                for block in content:
+                    if isinstance(block, ImageURLBlock):
+                        console.print("[dim]  Attached: image[/]")
+                    elif isinstance(block, AudioBlock):
+                        console.print("[dim]  Attached: audio[/]")
+                        has_audio = True
+                if has_audio and not agent.provider.supports_audio:
+                    console.print(
+                        "[yellow]Warning:[/] audio input is not supported by "
+                        f"{agent.provider.name} (as of Ollama v0.20). "
+                        "Audio will be dropped."
+                    )
+            session = await agent.run(content, session)
             # Reset session state after a recoverable error (e.g. provider timeout)
             # so the user can retry without losing conversation history.
             if session.state == AgentState.ERROR:
@@ -491,7 +537,22 @@ def run(
             except FileNotFoundError:
                 console.print(f"[red]Session {session_id} not found[/]")
                 raise typer.Exit(1)
-        session = await agent.run(task, session)
+        content = parse_multimodal_input(task)
+        if isinstance(content, list):
+            has_audio = False
+            for block in content:
+                if isinstance(block, ImageURLBlock):
+                    console.print("[dim]  Attached: image[/]")
+                elif isinstance(block, AudioBlock):
+                    console.print("[dim]  Attached: audio[/]")
+                    has_audio = True
+            if has_audio and not agent.provider.supports_audio:
+                console.print(
+                    "[yellow]Warning:[/] audio input is not supported by "
+                    f"{agent.provider.name} (as of Ollama v0.20). "
+                    "Audio will be dropped."
+                )
+        session = await agent.run(content, session)
         store.save(session)
         console.print(f"\n[dim]Session: {session.session_id}[/]")
 
@@ -622,9 +683,23 @@ def tui(
         "--log-level",
         help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
     ),
+    theme: Optional[str] = typer.Option(
+        None,
+        "--theme",
+        "-t",
+        help="TUI theme name (default, contrast, decker, sleek) or path to theme JSON",
+    ),
+    fixed: bool = typer.Option(
+        False,
+        "--fixed",
+        help="Full-screen mode with fixed bars, scrollable body, and mouse support (requires textual)",
+    ),
 ) -> None:
     """Launch the rich TUI interface."""
-    from agent.transports.tui import run_tui
+    if fixed:
+        from agent.transports.tui_fixed import run_tui_fixed as _run_tui
+    else:
+        from agent.transports.tui import run_tui as _run_tui
 
     config = _build_config(
         model=model,
@@ -643,7 +718,9 @@ def tui(
     _configure_logging(config)
     asyncio.run(
         _run_with_mcp(
-            lambda agent: run_tui(config, agent=agent, verbose=verbose, session_id=session_id),
+            lambda agent: _run_tui(
+                config, agent=agent, verbose=verbose, session_id=session_id, theme_name=theme
+            ),
             config,
             mcp_config,
             approval_callback=_terminal_approval_callback,
@@ -747,6 +824,25 @@ def init(
         ]
     }
 
+    # Theme directory and files
+    _USER_THEMES_DIR = _USER_DIR / "themes"
+    _USER_THEMES_DIR.mkdir(parents=True, exist_ok=True)
+
+    _USER_THEME_EXAMPLE = _USER_THEMES_DIR / "example.json"
+
+    from agent.transports.themes.builtin import DECKER_THEME
+    from agent.transports.themes.models import Theme
+
+    example_theme = _json.loads(DECKER_THEME.model_dump_json())
+    example_theme["name"] = "example"
+    example_theme["description"] = (
+        "Example custom theme (copy of decker). Rename and edit to create your own."
+    )
+
+    theme_schema = Theme.model_json_schema()
+
+    _USER_THEME_SCHEMA = _USER_THEMES_DIR / "theme.schema.template"
+
     created: list[str] = []
     skipped: list[str] = []
 
@@ -754,6 +850,8 @@ def init(
         (_USER_CONFIG, default_config),
         (_USER_MCP_CONFIG, default_mcp),
         (_USER_MCP_EXAMPLE, example_mcp),
+        (_USER_THEME_EXAMPLE, example_theme),
+        (_USER_THEME_SCHEMA, theme_schema),
     ]:
         if path.is_file() and not force:
             console.print(
@@ -771,10 +869,15 @@ def init(
             f"  1. Edit [bold]{_USER_CONFIG}[/] — set provider, model, api_key, base_url, etc."
         )
         console.print(
-            f"  2. Copy entries from [bold]{_USER_MCP_EXAMPLE}[/] into [bold]{_USER_MCP_CONFIG}[/] to enable MCP servers."
+            f"  2. Copy entries from [bold]{_USER_MCP_EXAMPLE}[/] into"
+            f" [bold]{_USER_MCP_CONFIG}[/] to enable MCP servers."
         )
         console.print("  3. Optionally add global rules to [bold]~/.aar/rules.md[/].")
-        console.print("  4. Run [bold]aar chat[/] — no flags needed.")
+        console.print(
+            f"  4. Create custom themes in [bold]{_USER_THEMES_DIR}[/]"
+            f" — see [bold]{_USER_THEME_EXAMPLE}[/] for a template."
+        )
+        console.print("  5. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 

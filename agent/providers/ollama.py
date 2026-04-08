@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+import logging
+from typing import Any, AsyncIterator
 
 import httpx
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse
+from agent.providers.base import Provider, ProviderResponse, StreamDelta
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
@@ -44,6 +48,12 @@ class OllamaProvider(Provider):
         # Most current Ollama vision models support image input; opt-out via config.
         return self.config.extra.get("supports_vision", True)
 
+    @property
+    def supports_audio(self) -> bool:
+        # Ollama does not support audio input as of v0.20.  This returns
+        # False unconditionally; the config flag is kept for forward compat.
+        return False
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -64,15 +74,32 @@ class OllamaProvider(Provider):
         if self.config.max_tokens:
             payload["options"]["num_predict"] = self.config.max_tokens
 
+        # Structured output (Ollama uses "format" parameter)
+        fmt = self.config.response_format
+        if fmt == "json":
+            payload["format"] = "json"
+        elif fmt == "json_schema" and self.config.json_schema:
+            payload["format"] = self.config.json_schema
+
         # Tool support
         if tools and self.supports_tools:
             payload["tools"] = _convert_tools(tools)
+
+        # Thinking mode (Ollama 0.20+)
+        if self.supports_reasoning:
+            payload["think"] = True
 
         # Keep-alive
         payload["keep_alive"] = self._keep_alive
 
         # Extra options (skip known non-option keys)
-        _SKIP = {"keep_alive", "supports_reasoning", "supports_tools", "supports_vision"}
+        _SKIP = {
+            "keep_alive",
+            "supports_reasoning",
+            "supports_tools",
+            "supports_vision",
+            "supports_audio",
+        }
         for k, v in self.config.extra.items():
             if k not in _SKIP:
                 payload["options"][k] = v
@@ -101,10 +128,17 @@ class OllamaProvider(Provider):
         done_reason = data.get("done_reason", "")
         stop_reason = _map_stop_reason(done_reason, bool(tool_calls))
 
-        # Handle think mode — content between <think>...</think> tags
+        # Handle think mode — Ollama 0.20+ returns thinking in message.thinking
         reasoning_blocks = []
-        if self.supports_reasoning and "<think>" in content:
-            content, reasoning_blocks = _extract_thinking(content)
+        if self.supports_reasoning:
+            thinking_text = message.get("thinking", "")
+            if thinking_text:
+                from agent.core.events import ReasoningBlock
+
+                reasoning_blocks = [ReasoningBlock(content=thinking_text.strip())]
+            elif "<think>" in content:
+                # Fallback for older Ollama versions that embed tags in content
+                content, reasoning_blocks = _extract_thinking(content)
 
         # Usage metadata
         usage: dict[str, int] = {}
@@ -127,24 +161,126 @@ class OllamaProvider(Provider):
             meta=meta,
         )
 
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str = "",
+    ) -> AsyncIterator[StreamDelta]:
+        """Stream response deltas from Ollama.
+
+        Ollama streams newline-delimited JSON objects from ``/api/chat``
+        when ``stream: true``.  Each object has a ``message`` with partial
+        ``content`` (and optionally ``thinking``).  The final object carries
+        ``done: true`` and usage statistics.
+        """
+        api_messages = _build_messages(messages, system)
+
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": api_messages,
+            "stream": True,
+            "options": {},
+        }
+
+        if self.config.temperature > 0:
+            payload["options"]["temperature"] = self.config.temperature
+        if self.config.max_tokens:
+            payload["options"]["num_predict"] = self.config.max_tokens
+
+        # Structured output
+        fmt = self.config.response_format
+        if fmt == "json":
+            payload["format"] = "json"
+        elif fmt == "json_schema" and self.config.json_schema:
+            payload["format"] = self.config.json_schema
+
+        if tools and self.supports_tools:
+            payload["tools"] = _convert_tools(tools)
+
+        if self.supports_reasoning:
+            payload["think"] = True
+
+        payload["keep_alive"] = self._keep_alive
+
+        _SKIP = {
+            "keep_alive",
+            "supports_reasoning",
+            "supports_tools",
+            "supports_vision",
+            "supports_audio",
+        }
+        for k, v in self.config.extra.items():
+            if k not in _SKIP:
+                payload["options"][k] = v
+
+        # Accumulators for tool calls (streamed models may return them in the final chunk)
+        tool_acc: list[dict[str, Any]] = []
+
+        async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                message = data.get("message", {})
+
+                # Text content delta
+                text = message.get("content", "")
+
+                # Reasoning delta (think mode)
+                reasoning = message.get("thinking", "")
+
+                # Tool calls (usually only in the final chunk)
+                raw_tcs = message.get("tool_calls", [])
+                if raw_tcs:
+                    tool_acc.extend(raw_tcs)
+
+                is_done = data.get("done", False)
+
+                if text or reasoning:
+                    yield StreamDelta(
+                        text=text,
+                        reasoning_delta=reasoning,
+                    )
+
+                if is_done:
+                    # Emit accumulated tool calls
+                    for i, tc in enumerate(tool_acc):
+                        fn = tc.get("function", {})
+                        yield StreamDelta(
+                            tool_call_delta={
+                                "tool_call_id": f"ollama_tc_{i}",
+                                "tool_name": fn.get("name", ""),
+                                "arguments": fn.get("arguments", {}),
+                            }
+                        )
+                    yield StreamDelta(done=True)
+                    return
+
+        # Safety fallback
+        yield StreamDelta(done=True)
+
     async def close(self) -> None:
         await self._client.aclose()
 
 
 def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:
-    """Convert internal messages to Ollama format.
+    """Convert internal messages to Ollama's native ``/api/chat`` format.
 
-    Multimodal user messages (carrying ``image_url`` content blocks) are
-    handled in two complementary ways:
+    Ollama's native API requires ``content`` to be a **string** — content
+    arrays (OpenAI-compatible format) are only accepted on the ``/v1/``
+    endpoint.  Images use the top-level ``images`` field (list of raw
+    base-64 strings, no ``data:`` prefix).
 
-    * A content *array* is produced (Ollama 0.5+ / OpenAI-compatible format).
-    * Base-64 images (``data:`` URIs) are **also** placed in the top-level
-      ``images`` list for backwards compatibility with Ollama < 0.5 that
-      speaks the native ``/api/chat`` wire format.
-
-    HTTP/HTTPS image URLs are passed only via the content array; fetching
-    remote URLs inside the adapter would introduce unwanted side-effects and
-    latency, and Ollama 0.5+ handles them natively.
+    **Audio** is not yet supported by Ollama's API (as of v0.20).  Audio
+    blocks are dropped with a warning.  The framework-level ``AudioBlock``
+    type remains so callers can build multimodal pipelines that will work
+    once Ollama adds audio support.
     """
     api_messages: list[dict[str, Any]] = []
 
@@ -196,40 +332,31 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                         )
                 else:
                     image_blocks = [b for b in content if b.get("type") == "image_url"]
+                    audio_blocks = [b for b in content if b.get("type") == "audio"]
                     text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
 
-                    if image_blocks:
-                        # Build an OpenAI-compatible content array (Ollama 0.5+)
-                        oai_content: list[dict[str, Any]] = []
-                        if text_parts:
-                            oai_content.append(
-                                {"type": "text", "text": " ".join(t for t in text_parts if t)}
-                            )
-                        for img in image_blocks:
-                            oai_content.append(img)  # pass through as-is
+                    text = " ".join(t for t in text_parts if t)
+                    api_msg = {"role": "user", "content": text}
 
-                        api_msg = {"role": "user", "content": oai_content}
+                    # Extract base-64 payloads into top-level ``images`` list
+                    images: list[str] = []
+                    for img in image_blocks:
+                        url = img.get("image_url", {}).get("url", "")
+                        if url.startswith("data:"):
+                            try:
+                                images.append(url.split(",", 1)[1])
+                            except IndexError:
+                                pass
+                    if images:
+                        api_msg["images"] = images
 
-                        # Legacy Ollama (< 0.5): also populate top-level ``images``
-                        # list with raw base-64 payloads extracted from data: URIs.
-                        legacy_images: list[str] = []
-                        for img in image_blocks:
-                            url = img.get("image_url", {}).get("url", "")
-                            if url.startswith("data:"):
-                                # data:<mime>;base64,<payload>
-                                try:
-                                    b64 = url.split(",", 1)[1]
-                                    legacy_images.append(b64)
-                                except IndexError:
-                                    pass  # malformed data URI — skip
-                        if legacy_images:
-                            api_msg["images"] = legacy_images
+                    if audio_blocks:
+                        logger.warning(
+                            "audio not yet supported by Ollama — dropping %d audio block(s)",
+                            len(audio_blocks),
+                        )
 
-                        api_messages.append(api_msg)
-                    else:
-                        # Text-only user message
-                        text = " ".join(t for t in text_parts if t)
-                        api_messages.append({"role": "user", "content": text})
+                    api_messages.append(api_msg)
 
     return api_messages
 

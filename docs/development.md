@@ -1,6 +1,6 @@
 # Development Guide
 
-This document covers the programming API for building with Aar: image input, custom tools, the event model, sessions, cancellation, observability, and testing.
+This document covers the programming API for building with Aar: multimodal input (images, audio, video), custom tools, the event model, sessions, cancellation, observability, and testing.
 
 ## Programmatic usage
 
@@ -22,58 +22,127 @@ async def main():
 asyncio.run(main())
 ```
 
-## Image input (multimodal)
+## Multimodal input (images, audio, video)
 
-Aar supports image input for vision-capable models on all four providers. Pass a list of `ContentBlock` objects instead of a plain string to `Agent.run()`, `Agent.chat()`, or `Session.add_user_message()`.
+Aar supports multimodal input — images and audio — for capable models. Video support is **prepared** (types exist) but **not yet implemented** at the provider level.
+
+### CLI / TUI — `@file` syntax
+
+The easiest way to send images or audio from the CLI or TUI is the `@file` syntax:
+
+```bash
+# Image
+aar run "What is in this photo? @photo.jpg"
+aar chat   # then type: describe this @screenshot.png
+
+# Audio (e.g. Gemma 4 E4B via Ollama)
+aar run "Transcribe this clip @recording.wav"
+aar chat   # then type: what do you hear? @clip.mp3
+
+# Multiple attachments
+aar run "Compare these @diagram.png @notes.wav"
+```
+
+Supported file types:
+- **Image**: `.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`, `.bmp`, `.tiff`
+- **Audio**: `.wav`, `.mp3`, `.ogg`, `.flac`, `.m4a`
+- **Video**: `.mp4`, `.webm`, `.mov` *(prepared — raises an error until provider support is added)*
+
+Files are read, base-64 encoded, and sent as typed content blocks. Media blocks are placed **before** text in the content list for optimal model performance (recommended by Gemma 4 docs).
+
+### Programmatic API
+
+Pass a list of `ContentBlock` objects instead of a plain string to `Agent.run()`, `Agent.chat()`, or `Session.add_user_message()`.
 
 ```python
-from agent.core.events import TextBlock, ImageURLBlock, ImageURL
+from agent.core.events import TextBlock, ImageURLBlock, ImageURL, AudioBlock, AudioData
 
-# HTTP / HTTPS URL
+# Image — HTTP URL
 response = await agent.chat([
-    TextBlock(text="What is shown in this diagram?"),
     ImageURLBlock(image_url=ImageURL(url="https://example.com/diagram.png")),
+    TextBlock(text="What is shown in this diagram?"),
 ])
 
-# Local file — base-64 encode it first
+# Image — local file via base-64 data URI
 import base64
 raw = open("screenshot.png", "rb").read()
 data_uri = "data:image/png;base64," + base64.b64encode(raw).decode()
-
 response = await agent.chat([
-    TextBlock(text="Describe this screenshot."),
     ImageURLBlock(image_url=ImageURL(url=data_uri)),
+    TextBlock(text="Describe this screenshot."),
+])
+
+# Audio — base-64 data URI
+raw = open("clip.wav", "rb").read()
+data_uri = "data:audio/wav;base64," + base64.b64encode(raw).decode()
+response = await agent.chat([
+    AudioBlock(audio=AudioData(url=data_uri, format="wav")),
+    TextBlock(text="What do you hear?"),
 ])
 
 # OpenAI vision detail hint ("auto" | "low" | "high")
 ImageURLBlock(image_url=ImageURL(url="https://example.com/photo.jpg", detail="high"))
 ```
 
+Or use the helper to convert local files automatically:
+
+```python
+from agent.core.multimodal import file_to_content_block, parse_multimodal_input
+from pathlib import Path
+
+# Single file
+block = file_to_content_block(Path("photo.jpg"))  # → ImageURLBlock
+block = file_to_content_block(Path("clip.wav"))    # → AudioBlock
+
+# Parse user input with @file syntax
+content = parse_multimodal_input("Describe @photo.jpg")
+# Returns list[ContentBlock] if attachments found, or str if plain text
+session = await agent.run(content)
+```
+
 Text-only callers are completely unchanged — passing a plain string still works.
 
 ### Provider support
 
-| Provider | Vision | Notes |
-|---|---|---|
-| Anthropic | always | claude-3+ models; HTTP URLs and base-64 data URIs |
-| OpenAI | auto-detected | gpt-4o, gpt-4-vision, o1 and newer; all image types |
-| Ollama | default on | Model must be vision-capable (e.g. `qwen2.5vl`, `llava`, `minicpm-v`) |
-| Generic | auto-detected | Any OpenAI-compatible endpoint with vision support |
+| Provider | Vision | Audio | Notes |
+|---|---|---|---|
+| Anthropic | always | — | claude-3+ models; HTTP URLs and base-64 data URIs |
+| OpenAI | auto-detected | — | gpt-4o, gpt-4-vision, o1 and newer |
+| Ollama | default on | **not yet** | Vision works; audio not yet exposed in Ollama's API (as of v0.20) |
+| Generic | auto-detected | — | Any OpenAI-compatible endpoint |
 
-Vision support is auto-detected from the model name for OpenAI and Generic providers. For Ollama, it defaults to `True` and can be overridden:
+For Ollama, vision defaults to `True`:
 
 ```python
 ProviderConfig(
     name="ollama",
-    model="qwen2.5vl:7b",
+    model="gemma4:e4b",
     extra={"supports_vision": True},   # default True; set False to opt out
 )
 ```
 
-Check capability at runtime:
+> **Audio note:** Gemma 4 supports audio at the model level, but Ollama's `/api/chat` endpoint does not accept audio data as of v0.20. Audio blocks attached via `@file` will be **dropped with a warning**. The framework `AudioBlock` type is kept so pipelines are ready when Ollama adds audio support.
+
+Check capabilities at runtime:
 
 ```python
-print(agent.provider.capabilities().vision)  # True / False
+print(agent.provider.supports_vision)  # True / False
+print(agent.provider.supports_audio)   # True / False (always False for Ollama currently)
+```
+
+### Video support (prepared, not yet implemented)
+
+The `VideoBlock` and `VideoData` types exist in `agent.core.events` so you can start building pipelines, but passing video to any provider will currently raise `ValueError`. This will be implemented once Ollama and other providers have stable video input APIs.
+
+```python
+from agent.core.events import VideoBlock, VideoData
+
+# Type exists for future use
+block = VideoBlock(video=VideoData(url="data:video/mp4;base64,...", format="mp4"))
+
+# But file_to_content_block raises ValueError for video files
+from agent.core.multimodal import file_to_content_block
+file_to_content_block(Path("clip.mp4"))  # ValueError: Video input is prepared but not yet implemented
 ```
 
 ### Format conversion
@@ -82,43 +151,63 @@ The same `ContentBlock` API works identically across all providers. Aar converts
 
 - **OpenAI / Generic** — content blocks forwarded as-is (already the OpenAI wire format)
 - **Anthropic** — `image_url` blocks converted to `{"type": "image", "source": {...}}`; `data:` URIs become `base64` sources, HTTP URLs become `url` sources
-- **Ollama** — sent as an OpenAI-compatible content array (Ollama 0.5+); `data:` URI payloads are also placed in the legacy `images` field for Ollama < 0.5
+- **Ollama** — uses the native `/api/chat` format: text in `content` (string), base-64 payloads in top-level `images` list. Audio blocks are not yet supported and are dropped with a warning
 
-### Ollama vision models
+### Ollama multimodal models
 
-Pull any vision-capable model and point the provider at it:
+Pull any multimodal model and point the provider at it:
 
 ```bash
+# Vision + audio (Gemma 4)
+ollama pull gemma4:e4b
+aar chat --provider ollama --model gemma4:e4b
+
+# Vision only
 ollama pull qwen2.5vl:7b
 aar chat --provider ollama --model qwen2.5vl:7b
 ```
 
-Popular choices: `qwen2.5vl:7b`, `llava:13b`, `minicpm-v`, `moondream`.
+Audio note: Gemma 4 E4B supports audio at the model level, but Ollama's API does not yet expose audio input (as of v0.20). Audio files attached via `@file` will be dropped with a warning. This will work automatically once Ollama adds audio support.
 
-### Multi-turn with images
+### Multi-turn with media
 
-Images in earlier turns are preserved in `session.to_messages()` — subsequent text-only turns can refer back to them:
+Images and audio in earlier turns are preserved in `session.to_messages()` — subsequent text-only turns can refer back to them:
 
 ```python
 session = None
 
 session = await agent.run(
-    [TextBlock(text="Here is our UI mockup."),
-     ImageURLBlock(image_url=ImageURL(url="https://example.com/mockup.png"))],
+    [ImageURLBlock(image_url=ImageURL(url="https://example.com/mockup.png")),
+     TextBlock(text="Here is our UI mockup.")],
     session=session,
 )
 session = await agent.run("Now write the HTML for it.", session=session)
 ```
 
+### Web API (serve mode)
+
+The web transport (`POST /chat`) accepts multimodal content via the standard content block format in JSON. Clients send base-64 data URIs or HTTP URLs directly — the `@file` syntax is a CLI/TUI convenience only.
+
+```json
+{
+  "prompt": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}},
+    {"type": "audio", "audio": {"url": "data:audio/wav;base64,UklG...", "format": "wav"}},
+    {"type": "text", "text": "Describe what you see and hear."}
+  ]
+}
+```
+
 ### Accessing content blocks directly
 
 ```python
-from agent.core.events import TextBlock, ImageURLBlock, ImageURL, ContentBlock
+from agent.core.events import TextBlock, ImageURLBlock, ImageURL, AudioBlock, AudioData, ContentBlock
 
 # Build a typed block list
 parts: list[ContentBlock] = [
-    TextBlock(text="Analyse this chart."),
     ImageURLBlock(image_url=ImageURL(url="https://example.com/chart.png", detail="high")),
+    AudioBlock(audio=AudioData(url="data:audio/wav;base64,...", format="wav")),
+    TextBlock(text="Analyse this chart and audio."),
 ]
 
 # Session helper
@@ -126,7 +215,7 @@ from agent.core.session import Session
 s = Session()
 msg = s.add_user_message(parts)
 print(msg.is_multimodal)   # True
-print(msg.content)         # "Analyse this chart."  (text summary for logging)
+print(msg.content)         # "Analyse this chart and audio."  (text summary for logging)
 ```
 
 ## Tool system
@@ -285,11 +374,12 @@ pip install "aar-agent[dev]"
 pytest tests/ -v
 ```
 
-The test suite (236 tests) runs entirely without live API calls using a `MockProvider`. Tests cover:
+The test suite runs entirely without live API calls using a `MockProvider`. Tests cover:
 
 - Loop termination, max steps, timeout, cancellation (`asyncio.Event` + `CancelledError`), provider errors
 - Session persistence, resumption, compaction, `trace_id` round-trip, message conversion
 - Event serialization round-trips for all event types, including `duration_ms` fields
+- Multimodal content blocks (image, audio, video), input parsing, file-to-block conversion, Ollama native format
 - Provider normalization for Anthropic, OpenAI, and Ollama (mocked)
 - Tool registry, schema inference, execution (sync/async, timeout, truncation, timing)
 - Safety policy (command deny-list, path restrictions, read-only mode, approval gates)

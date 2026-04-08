@@ -35,8 +35,45 @@ class ImageURLBlock(BaseModel):
     image_url: ImageURL
 
 
+class AudioData(BaseModel):
+    """Points to audio by URL or base-64 data URI."""
+
+    url: str  # HTTP/HTTPS URL or data:<mime>;base64,<payload>
+    format: str = ""  # e.g. "wav", "mp3", "ogg" — empty = auto-detect
+
+
+class AudioBlock(BaseModel):
+    """An audio content block for speech/sound input (max ~30 s for Gemma 4)."""
+
+    type: Literal["audio"] = "audio"
+    audio: AudioData
+
+
+class VideoData(BaseModel):
+    """Points to video by URL or base-64 data URI.
+
+    Video support is **prepared but not yet implemented** at the provider
+    level.  The block type exists so callers can start building multimodal
+    pipelines; actual provider adapters will raise ``NotImplementedError``
+    until a backend supports it end-to-end.
+    """
+
+    url: str
+    format: str = ""  # e.g. "mp4", "webm"
+
+
+class VideoBlock(BaseModel):
+    """A video content block (prepared, not yet implemented in providers)."""
+
+    type: Literal["video"] = "video"
+    video: VideoData
+
+
 # Pydantic v2 discriminated union dispatched on the ``type`` field.
-ContentBlock = Annotated[TextBlock | ImageURLBlock, Field(discriminator="type")]
+ContentBlock = Annotated[
+    TextBlock | ImageURLBlock | AudioBlock | VideoBlock,
+    Field(discriminator="type"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +84,7 @@ ContentBlock = Annotated[TextBlock | ImageURLBlock, Field(discriminator="type")]
 class EventType(str, Enum):
     USER_MESSAGE = "user_message"
     ASSISTANT_MESSAGE = "assistant_message"
+    STREAM_CHUNK = "stream_chunk"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     REASONING = "reasoning"
@@ -84,7 +122,7 @@ class UserMessage(Event):
 
     @property
     def is_multimodal(self) -> bool:
-        """Return True when this message contains image (or other non-text) blocks."""
+        """Return True when this message contains image, audio, video, or other non-text blocks."""
         return bool(self.parts)
 
 
@@ -92,6 +130,15 @@ class AssistantMessage(Event):
     type: EventType = EventType.ASSISTANT_MESSAGE
     content: str = ""
     stop_reason: StopReason | None = None
+
+
+class StreamChunk(Event):
+    """A single token-level streaming chunk emitted during generation."""
+
+    type: EventType = EventType.STREAM_CHUNK
+    text: str = ""
+    reasoning_text: str = ""
+    finished: bool = False
 
 
 class ToolCall(Event):
@@ -139,6 +186,7 @@ class SessionEvent(Event):
 AnyEvent = (
     UserMessage
     | AssistantMessage
+    | StreamChunk
     | ToolCall
     | ToolResult
     | ReasoningBlock
@@ -150,6 +198,7 @@ AnyEvent = (
 EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.USER_MESSAGE: UserMessage,
     EventType.ASSISTANT_MESSAGE: AssistantMessage,
+    EventType.STREAM_CHUNK: StreamChunk,
     EventType.TOOL_CALL: ToolCall,
     EventType.TOOL_RESULT: ToolResult,
     EventType.REASONING: ReasoningBlock,

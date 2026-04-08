@@ -71,6 +71,8 @@ class ProviderConfig(BaseModel):
     base_url: str = ""
     max_tokens: int = 4096
     temperature: float = 0.0
+    response_format: str = ""  # "" | "json" | "json_schema"
+    json_schema: dict = Field(default_factory=dict)  # schema when response_format="json_schema"
     extra: dict = Field(default_factory=dict)
 
 
@@ -128,13 +130,23 @@ class SafetyConfig(BaseModel):
     log_all_commands: bool = True
 
 
+class TUIConfig(BaseModel):
+    theme: str = "default"
+    layout: dict = Field(default_factory=dict)
+
+
 class AgentConfig(BaseModel):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    tui: TUIConfig = Field(default_factory=TUIConfig)
     max_steps: int = 50
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0
+    max_retries: int = 3
+    streaming: bool = False  # use token-level streaming when the provider supports it
+    context_window: int = 0  # model context limit in tokens; 0 = no automatic management
+    context_strategy: str = "sliding_window"  # "sliding_window" | "none"
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
     shell_path: str = ""
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
