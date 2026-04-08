@@ -8,6 +8,18 @@ pass ``--fixed`` to use this one.
 Requires the ``tui-fixed`` optional extra::
 
     pip install "aar-agent[tui-fixed]"
+
+Architecture — multiplexed streaming UI
+----------------------------------------
+Each phase of an LLM response gets its own widget mounted into a
+``ChatBody`` (VerticalScroll):
+
+* ``ThinkingBlock``  — plain-text stream for reasoning tokens (fast)
+* ``AnswerBlock``    — batched Rich-Markdown stream for answer tokens
+* ``RichBlock``      — static Rich renderable for tool calls / results / errors
+
+This avoids the "split screen" problem of the old RichLog + separate
+MarkdownStream approach: all content lives in one unified scroll container.
 """
 
 from __future__ import annotations
@@ -27,8 +39,6 @@ try:
     from textual.containers import Horizontal, VerticalScroll
     from textual.events import Click
     from textual.widgets import Button, Input, RichLog, Static
-    from textual.widgets import Markdown as TextualMarkdown
-    from textual.widgets.markdown import MarkdownStream
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "The fixed TUI requires the 'textual' package. "
@@ -60,7 +70,7 @@ from agent.transports.themes.models import LayoutConfig
 from agent.transports.tui import _format_args, _side_effect_badge
 
 # ---------------------------------------------------------------------------
-# Block — tracks raw content for each rendered block
+# Block — kept for backward compatibility with existing tests/imports
 # ---------------------------------------------------------------------------
 
 
@@ -70,12 +80,12 @@ class _Block:
 
     raw: str  # raw text / markdown (what gets copied)
     kind: str = ""  # "assistant", "tool_call", "tool_result", "reasoning", "error", etc.
-    line_start: int = 0  # first line index in the RichLog
-    line_count: int = 0  # how many lines this block occupies
+    line_start: int = 0
+    line_count: int = 0
 
 
 # ---------------------------------------------------------------------------
-# Textual widgets
+# Fixed widgets: header, footer, separator
 # ---------------------------------------------------------------------------
 
 
@@ -235,7 +245,6 @@ class ApprovalBar(Static):
             f"[bold red]Approval Required[/]\n[bold]{tool_name}[/]\n{args_text}\n[bold]Allow?[/]"
         )
         self.add_class("visible")
-        # Focus the Yes button by default
         try:
             self.query_one("#approval-yes", Button).focus()
         except Exception:
@@ -342,7 +351,6 @@ class HistoryInput(Input):
         """Intercept up/down keys for history and shift+enter for newlines."""
         key = getattr(event, "key", "")
         if key == "shift+enter":
-            # Insert a newline at the cursor position
             pos = self.cursor_position
             self.value = self.value[:pos] + "\n" + self.value[pos:]
             self.cursor_position = pos + 1
@@ -365,15 +373,14 @@ class HistoryInput(Input):
 
 
 # ---------------------------------------------------------------------------
-# SelectableRichLog — RichLog with block selection, highlighting, and copy
+# SelectableRichLog — kept for backward compatibility with existing tests
 # ---------------------------------------------------------------------------
 
 
 class SelectableRichLog(RichLog):
     """RichLog that tracks rendered blocks and supports click-to-select + copy.
 
-    Each ``write()`` call is paired with a raw text string via ``write_block()``.
-    Left-click selects and highlights a block; right-click copies and deselects.
+    Kept for backward compatibility. The live app now uses ChatBody instead.
     """
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
@@ -381,7 +388,7 @@ class SelectableRichLog(RichLog):
         self._blocks: list[_Block] = []
         self._selected_block: int | None = None
         self._total_lines: int = 0
-        self._selected_style: str = "on #2a2a3a"  # overridden by theme
+        self._selected_style: str = "on #2a2a3a"
 
     def write_block(
         self,
@@ -389,11 +396,10 @@ class SelectableRichLog(RichLog):
         raw: str,
         kind: str = "",
         **kwargs,  # noqa: ANN003
-    ) -> SelectableRichLog:
+    ) -> "SelectableRichLog":
         """Write a renderable to the log and track its raw text for copy."""
         line_start = self._total_lines
         result = self.write(content, **kwargs)
-        # Estimate lines by measuring the rendered content
         from io import StringIO
 
         from rich.console import Console
@@ -419,8 +425,7 @@ class SelectableRichLog(RichLog):
         shrink: bool = True,
         scroll_end: bool | None = None,
         animate: bool = False,
-    ) -> SelectableRichLog:
-        """Write content (used internally by Textual deferred renders)."""
+    ) -> "SelectableRichLog":
         return super().write(  # type: ignore[return-value]
             content,
             width=width,
@@ -436,75 +441,247 @@ class SelectableRichLog(RichLog):
         self._total_lines = 0
         super().clear()
 
-    def _block_at_y(self, click_y: int) -> int | None:
-        """Find which block index contains the given Y coordinate."""
-        if not self._blocks:
-            return None
-        y = click_y + self.scroll_offset.y
-        total = max(self.virtual_size.height, 1)
-        ratio = y / total
-        idx = int(ratio * len(self._blocks))
-        return max(0, min(idx, len(self._blocks) - 1))
-
     def select_block(self, idx: int | None) -> None:
-        """Select a block by index (or deselect with None)."""
-        old = self._selected_block
         self._selected_block = idx
-        # Re-render affected blocks to show/hide highlight
-        if old is not None or idx is not None:
-            self.refresh()
-
-    async def on_click(self, event: Click) -> None:
-        """Left-click selects a block; right-click copies and deselects."""
-        idx = self._block_at_y(event.y)
-        if event.button == 3:  # right-click
-            if self._selected_block is not None:
-                # Copy will be handled by the app's action
-                app = self.app
-                if hasattr(app, "_do_copy_selected"):
-                    app._do_copy_selected()  # type: ignore[attr-defined]
-            return
-        # Left-click — select or deselect
-        if idx == self._selected_block:
-            self.select_block(None)
-        else:
-            self.select_block(idx)
+        self.refresh()
 
     def get_selected_raw(self) -> str:
-        """Return the raw text of the currently selected block."""
         if self._selected_block is not None and 0 <= self._selected_block < len(self._blocks):
             return self._blocks[self._selected_block].raw
         return ""
 
     def get_last_raw(self) -> str:
-        """Return the raw text of the most recent block."""
         if self._blocks:
             return self._blocks[-1].raw
         return ""
 
     def get_all_text(self) -> str:
-        """Get all blocks' raw text, separated by newlines."""
         return "\n\n".join(b.raw for b in self._blocks)
 
 
 # ---------------------------------------------------------------------------
-# FixedTUIRenderer — renders events into a RichLog
+# Multiplexed streaming widgets (new architecture)
+# ---------------------------------------------------------------------------
+
+
+class ThinkingBlock(Static):
+    """Live-streaming reasoning block — plain text for fast token-by-token updates."""
+
+    DEFAULT_CSS = """
+    ThinkingBlock {
+        padding: 0 1;
+    }
+    """
+
+    def __init__(self, theme: Theme) -> None:
+        super().__init__()
+        self._theme = theme
+        self._buffer = ""
+        self.raw = ""
+        self.kind = "reasoning"
+        self._selected = False
+
+    def append(self, token: str) -> None:
+        self._buffer += token
+        self.raw = self._buffer
+        t = self._theme
+        self.update(
+            Panel(
+                Text(self._buffer, style=f"italic {t.reasoning.border_style}"),
+                title=f"[{t.reasoning.title_style}]Thinking...[/]",
+                border_style=t.reasoning.border_style,
+                padding=t.reasoning.padding,
+            )
+        )
+
+    def finalize(self) -> None:
+        """Trim to 500 chars and remove the '...' from the title."""
+        text = self._buffer
+        if len(text) > 500:
+            text = text[:500] + "..."
+        self.raw = self._buffer
+        t = self._theme
+        self.update(
+            Panel(
+                Text(text, style=f"italic {t.reasoning.border_style}"),
+                title=f"[{t.reasoning.title_style}]Thinking[/]",
+                border_style=t.reasoning.border_style,
+                padding=t.reasoning.padding,
+            )
+        )
+
+    async def on_click(self, event: Click) -> None:
+        self._selected = not self._selected
+        if event.button == 3 and hasattr(self.app, "_do_copy_selected"):
+            self.app._do_copy_selected()  # type: ignore[attr-defined]
+
+
+class AnswerBlock(Static):
+    """Live-streaming answer block — batched Rich Markdown for performance."""
+
+    DEFAULT_CSS = """
+    AnswerBlock {
+        padding: 0 1;
+    }
+    """
+
+    _BATCH = 15  # render every N tokens
+
+    def __init__(self, theme: Theme) -> None:
+        super().__init__()
+        self._theme = theme
+        self._buffer = ""
+        self._token_count = 0
+        self.raw = ""
+        self.kind = "assistant"
+        self._selected = False
+
+    def append(self, token: str) -> None:
+        self._buffer += token
+        self._token_count += 1
+        self.raw = self._buffer
+        if self._token_count % self._BATCH == 0:
+            self._render()
+
+    def _render(self) -> None:
+        t = self._theme
+        self.update(
+            Panel(
+                RichMarkdown(self._buffer),
+                title=f"[{t.assistant.title_style}]Assistant[/]",
+                border_style=t.assistant.border_style,
+                padding=t.assistant.padding,
+            )
+        )
+
+    def finalize(self, content: str | None = None) -> None:
+        """Final render — use authoritative full content if provided."""
+        if content is not None:
+            self._buffer = content
+        self.raw = self._buffer
+        self._render()
+
+    async def on_click(self, event: Click) -> None:
+        self._selected = not self._selected
+        if event.button == 3 and hasattr(self.app, "_do_copy_selected"):
+            self.app._do_copy_selected()  # type: ignore[attr-defined]
+
+
+class RichBlock(Static):
+    """Static block for any Rich renderable: tool calls, errors, system messages, etc."""
+
+    DEFAULT_CSS = """
+    RichBlock {
+        padding: 0 1;
+    }
+    RichBlock.selected {
+        opacity: 0.85;
+    }
+    """
+
+    def __init__(self, content: object, raw: str = "", kind: str = "") -> None:
+        super().__init__()
+        self.raw = raw
+        self.kind = kind
+        self._selected = False
+        self.update(content)
+
+    async def on_click(self, event: Click) -> None:
+        if self._selected:
+            self._selected = False
+            self.remove_class("selected")
+        else:
+            # Deselect all siblings
+            if self.parent:
+                for sibling in self.parent.query("RichBlock.selected"):
+                    sibling._selected = False  # type: ignore[attr-defined]
+                    sibling.remove_class("selected")
+            self._selected = True
+            self.add_class("selected")
+        if event.button == 3 and hasattr(self.app, "_do_copy_selected"):
+            self.app._do_copy_selected()  # type: ignore[attr-defined]
+
+
+class ChatBody(VerticalScroll):
+    """Main scrollable chat area — the unified container for all content blocks."""
+
+    DEFAULT_CSS = """
+    ChatBody {
+        min-height: 4;
+    }
+    """
+
+    def __init__(self, **kwargs) -> None:  # noqa: ANN003
+        super().__init__(**kwargs)
+        self.auto_scroll: bool = True
+
+    async def _mount_block(self, widget: Static) -> None:
+        """Mount a content block and scroll to bottom if auto-scroll is on."""
+        await self.mount(widget)
+        if self.auto_scroll:
+            self.scroll_end(animate=False)
+
+    def on_scroll(self) -> None:
+        """Pause auto-scroll when user scrolls up; resume when back at bottom."""
+        at_bottom = self.scroll_offset.y >= (self.virtual_size.height - self.size.height - 2)
+        self.auto_scroll = at_bottom
+
+    def get_selected_raw(self) -> str:
+        """Return raw text of the currently selected block."""
+        for block in self.query("RichBlock.selected"):
+            raw = getattr(block, "raw", "")
+            if raw:
+                return raw
+        for block in self.query("ThinkingBlock, AnswerBlock"):
+            if getattr(block, "_selected", False):
+                raw = getattr(block, "raw", "")
+                if raw:
+                    return raw
+        return ""
+
+    def get_last_raw(self) -> str:
+        """Return raw text of the most recent content block."""
+        blocks = list(self.query("ThinkingBlock, AnswerBlock, RichBlock"))
+        for block in reversed(blocks):
+            raw = getattr(block, "raw", "")
+            if raw:
+                return raw
+        return ""
+
+    def get_all_text(self) -> str:
+        """Concatenate raw text from all content blocks."""
+        blocks = list(self.query("ThinkingBlock, AnswerBlock, RichBlock"))
+        return "\n\n".join(
+            getattr(b, "raw", "") for b in blocks if getattr(b, "raw", "")
+        )
+
+
+# ---------------------------------------------------------------------------
+# FixedTUIRenderer — routes agent events to the appropriate widgets
 # ---------------------------------------------------------------------------
 
 
 class FixedTUIRenderer:
-    """Renders agent events into a Textual :class:`SelectableRichLog` widget."""
+    """Renders agent events into the chat UI.
+
+    Supports two modes:
+    - *App mode*: ``chat_body`` is set — blocks are mounted asynchronously.
+    - *Test mode*: ``log`` is set — content is written synchronously to a
+      ``SelectableRichLog`` (or any duck-typed stand-in).
+    """
 
     def __init__(
         self,
-        log: RichLog | SelectableRichLog,
         header: HeaderBar,
         footer: FooterBar,
+        log: "RichLog | SelectableRichLog | None" = None,
+        chat_body: ChatBody | None = None,
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
     ) -> None:
         self._log = log
+        self._chat_body = chat_body
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -515,23 +692,40 @@ class FixedTUIRenderer:
         self._extension_panels: dict[str, Callable] = {}
         self._thinking_visible = True
         self._streaming_active = False
-        self._stream_md: TextualMarkdown | None = None
-        self._stream_obj: MarkdownStream | None = None
-        self._stream_scroll: VerticalScroll | None = None
-        self._stream_in_reasoning = False  # tracks whether we're in the reasoning phase
+        self._stream_in_reasoning = False
+        # Live streaming widget references (app mode only)
+        self._current_thinking: ThinkingBlock | None = None
+        self._current_answer: AnswerBlock | None = None
 
     def _write(self, content: object, raw: str = "", kind: str = "") -> None:
-        """Write to the log, using block tracking when available."""
-        if hasattr(self._log, "write_block") and raw:
-            self._log.write_block(content, raw=raw, kind=kind)
-        else:
-            self._log.write(content)
+        """Write a content block — sync (test mode) or async mount (app mode)."""
+        if self._log is not None:
+            if hasattr(self._log, "write_block") and raw:
+                self._log.write_block(content, raw=raw, kind=kind)
+            else:
+                self._log.write(content)
+        if self._chat_body is not None:
+            block = RichBlock(content, raw=raw, kind=kind)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._chat_body._mount_block(block))
+            except RuntimeError:
+                pass  # no running loop (unit-test context without Textual)
+
+    def _mount_streaming(self, widget: Static) -> None:
+        """Mount a ThinkingBlock or AnswerBlock to the chat body."""
+        if self._chat_body is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._chat_body._mount_block(widget))
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------------
     # Theme switching
     # ------------------------------------------------------------------
 
-    def set_theme(self, theme: Theme, app: AarFixedApp) -> None:
+    def set_theme(self, theme: Theme, app: "AarFixedApp") -> None:
         """Switch to a new theme and update all widgets."""
         self.theme = theme
         self._header.theme = theme
@@ -544,7 +738,7 @@ class FixedTUIRenderer:
             kind="system",
         )
 
-    def cycle_theme(self, registry: ThemeRegistry, app: AarFixedApp) -> None:
+    def cycle_theme(self, registry: ThemeRegistry, app: "AarFixedApp") -> None:
         """Cycle to the next available theme."""
         names = registry.list_names()
         if not names:
@@ -574,104 +768,75 @@ class FixedTUIRenderer:
         return self._thinking_visible
 
     # ------------------------------------------------------------------
-    # Streaming via Textual Markdown widget
+    # Event rendering
     # ------------------------------------------------------------------
 
-    def _start_stream_widget(self) -> None:
-        """Show the streaming Markdown widget and create a MarkdownStream."""
-        if self._stream_md is not None:
-            self._stream_md.update("")
-            self._stream_obj = TextualMarkdown.get_stream(self._stream_md)
-            if self._stream_scroll is not None:
-                self._stream_scroll.display = True
-                self._stream_scroll.anchor()
-            # Scroll the RichLog to the bottom so the screen doesn't look cut
-            # when the body splits between the log and the stream widget.
-            self._log.scroll_end(animate=False)
-
-    async def _stop_stream_widget(self) -> None:
-        """Stop the MarkdownStream and hide the widget."""
-        if self._stream_obj is not None:
-            try:
-                await self._stream_obj.stop()
-            except Exception:
-                pass
-            self._stream_obj = None
-        if self._stream_scroll is not None:
-            self._stream_scroll.display = False
-
-    # ------------------------------------------------------------------
-    # Event rendering (into RichLog)
-    # ------------------------------------------------------------------
-
-    def render_event(self, event: Event) -> None:
-        """Render a single event into the RichLog widget."""
+    def render_event(self, event: Event) -> None:  # noqa: C901
+        """Render a single agent event."""
         t = self.theme
 
+        # --- Streaming tokens -------------------------------------------------
         if isinstance(event, StreamChunk):
             if event.reasoning_text and self._thinking_visible:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
-                    self._start_stream_widget()
-                if self._stream_obj is not None:
-                    loop = asyncio.get_running_loop()
-                    # Render reasoning as a blockquote inside the streamed markdown
-                    loop.create_task(self._stream_obj.write(f"{event.reasoning_text}"))
+                if self._current_thinking is None:
+                    self._current_thinking = ThinkingBlock(self.theme)
+                    self._mount_streaming(self._current_thinking)
+                self._current_thinking.append(event.reasoning_text)
+
             if event.text:
                 if not self._streaming_active:
                     self._streaming_active = True
-                    self._start_stream_widget()
-                if self._stream_obj is not None:
-                    loop = asyncio.get_running_loop()
-                    # Transition from reasoning to content: close the blockquote
-                    if self._stream_in_reasoning:
-                        self._stream_in_reasoning = False
-                        loop.create_task(self._stream_obj.write("\n\n---\n\n"))
-                    loop.create_task(self._stream_obj.write(event.text))
+                if self._stream_in_reasoning:
+                    self._stream_in_reasoning = False
+                    # Finalize thinking title so it no longer shows "..."
+                    if self._current_thinking is not None:
+                        self._current_thinking.finalize()
+                if self._current_answer is None:
+                    self._current_answer = AnswerBlock(self.theme)
+                    self._mount_streaming(self._current_answer)
+                self._current_answer.append(event.text)
+
             if event.finished:
                 self._stream_in_reasoning = False
-                if self._stream_obj is not None:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._stop_stream_widget())
+                if self._current_thinking is not None:
+                    self._current_thinking.finalize()
+                # _streaming_active stays True until AssistantMessage arrives
+                # so we know to finalize (not re-create) the answer block.
             return
 
+        # --- Final assistant message ------------------------------------------
         if isinstance(event, AssistantMessage) and event.content:
             if self._streaming_active:
-                # Content was streamed live via the Markdown widget;
-                # finalize: hide the streaming widget and write the panel to the log.
+                # Streaming completed: update blocks with authoritative content.
                 self._streaming_active = False
                 self._stream_in_reasoning = False
-                if self._stream_obj is not None:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._stop_stream_widget())
-                if self.layout.assistant.visible:
-                    self._write(
-                        Panel(
-                            RichMarkdown(event.content),
-                            title=f"[{t.assistant.title_style}]Assistant[/]",
-                            border_style=t.assistant.border_style,
-                            padding=t.assistant.padding,
-                        ),
-                        raw=event.content,
-                        kind="assistant",
-                    )
-                return
-            if not self.layout.assistant.visible:
-                return
-            self._log.write(Text())  # spacer
-            self._write(
-                Panel(
-                    RichMarkdown(event.content),
-                    title=f"[{t.assistant.title_style}]Assistant[/]",
-                    border_style=t.assistant.border_style,
-                    padding=t.assistant.padding,
-                ),
-                raw=event.content,
-                kind="assistant",
-            )
+                if self._current_answer is not None:
+                    self._current_answer.finalize(event.content)
+                    self._current_answer = None
+                if self._current_thinking is not None:
+                    self._current_thinking.finalize()
+                    self._current_thinking = None
+            else:
+                # No streaming (e.g. non-streaming provider): write static block.
+                if not self.layout.assistant.visible:
+                    return
+                self._write(
+                    Panel(
+                        RichMarkdown(event.content),
+                        title=f"[{t.assistant.title_style}]Assistant[/]",
+                        border_style=t.assistant.border_style,
+                        padding=t.assistant.padding,
+                    ),
+                    raw=event.content,
+                    kind="assistant",
+                )
+            return
 
-        elif isinstance(event, ToolCall):
+        # --- Tool call --------------------------------------------------------
+        if isinstance(event, ToolCall):
             self._streaming_active = False
             self._stream_in_reasoning = False
             self._step_count += 1
@@ -692,7 +857,6 @@ class FixedTUIRenderer:
                     f"[{t.tool_call.title_style}]Tool: {event.tool_name}[/]"
                     f" [{t.dim_text}](step {self._step_count})[/]"
                 )
-            # Raw text: tool name + arguments as readable string
             import json
 
             try:
@@ -710,6 +874,7 @@ class FixedTUIRenderer:
                 kind="tool_call",
             )
 
+        # --- Tool result ------------------------------------------------------
         elif isinstance(event, ToolResult):
             if not self.layout.tool_result.visible:
                 return
@@ -730,6 +895,7 @@ class FixedTUIRenderer:
                 kind="tool_result",
             )
 
+        # --- Reasoning block (non-streaming) ----------------------------------
         elif isinstance(event, ReasoningBlock) and event.content:
             if not self.layout.reasoning.visible or not self._thinking_visible:
                 return
@@ -747,6 +913,7 @@ class FixedTUIRenderer:
                 kind="reasoning",
             )
 
+        # --- Error ------------------------------------------------------------
         elif isinstance(event, ErrorEvent):
             hint = (
                 f"\n[{t.dim_text}]You can type your message again to retry.[/]"
@@ -764,6 +931,7 @@ class FixedTUIRenderer:
                 kind="error",
             )
 
+        # --- Provider metadata -----------------------------------------------
         elif isinstance(event, ProviderMeta):
             u = event.usage
             self._usage_total["input_tokens"] += u.get("input_tokens", 0)
@@ -834,20 +1002,8 @@ class AarFixedApp(App):
     Screen {
         layout: vertical;
     }
-    #header-sep {
-        height: 1;
-    }
-    #body-log {
+    #chat-body {
         min-height: 4;
-    }
-    #stream-scroll {
-        max-height: 50%;
-        min-height: 3;
-        display: none;
-        padding: 0 1;
-    }
-    #stream-md {
-        min-height: 1;
     }
     #input-sep {
         height: 1;
@@ -892,12 +1048,10 @@ class AarFixedApp(App):
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
 
-        # Build a size lookup from region config
         region_sizes: dict[str, int | None] = {}
         for region in fl.regions:
             region_sizes[region.name] = region.size
 
-        # Map region names to widget factories
         widget_map: dict[str, Callable[[], list]] = {
             "header": lambda: [
                 HeaderBar(self._theme),
@@ -907,8 +1061,7 @@ class AarFixedApp(App):
                 ),
             ],
             "body": lambda: [
-                SelectableRichLog(id="body-log", wrap=True, markup=True, auto_scroll=True),
-                VerticalScroll(TextualMarkdown(id="stream-md"), id="stream-scroll"),
+                ChatBody(id="chat-body"),
             ],
             "input": lambda: [
                 ApprovalBar(),
@@ -952,19 +1105,19 @@ class AarFixedApp(App):
         return _approval
 
     def on_mount(self) -> None:
-        log = self.query_one("#body-log", SelectableRichLog)
+        chat_body = self.query_one("#chat-body", ChatBody)
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
 
-        # Populate header from config
         header.provider_name = self._config.provider.name
         header.model_name = self._config.provider.model
 
-        # Apply selected block highlight style from theme
-        log._selected_style = self._theme.fixed_layout.selected_block_style
+        # Apply selected block highlight style from theme to ChatBody CSS
+        fl = self._theme.fixed_layout
+        chat_body.styles.background = fl.body_background
 
         self._renderer = FixedTUIRenderer(
-            log=log,
+            chat_body=chat_body,
             header=header,
             footer=footer,
             verbose=self._verbose,
@@ -972,41 +1125,49 @@ class AarFixedApp(App):
             layout=self._layout_config,
         )
 
-        # Wire streaming Markdown widget into the renderer
-        try:
-            self._renderer._stream_md = self.query_one("#stream-md", TextualMarkdown)
-            self._renderer._stream_scroll = self.query_one("#stream-scroll", VerticalScroll)
-        except Exception:
-            pass
-
         self._agent.on_event(self._renderer.render_event)
 
-        # Wire approval callback into the agent's permission manager
         approval_cb = self._make_approval_callback()
         if hasattr(self._agent, "executor") and hasattr(self._agent.executor, "permissions"):
             self._agent.executor.permissions._approval_callback = approval_cb
 
-        # Apply theme CSS
         self.apply_theme(self._theme)
 
-        # Resume session if requested
         if self._session_id:
             try:
                 self._session = self._store.load(self._session_id)
                 header.session_id = self._session.session_id
                 header.refresh()
-                log.write(Text(f"Resumed session {self._session_id}", style=self._theme.dim_text))
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    chat_body._mount_block(
+                        RichBlock(
+                            Text(
+                                f"Resumed session {self._session_id}",
+                                style=self._theme.dim_text,
+                            ),
+                            raw=f"Resumed session {self._session_id}",
+                            kind="system",
+                        )
+                    )
+                )
             except FileNotFoundError:
-                log.write(
-                    Text(
-                        f"Session {self._session_id} not found",
-                        style=self._theme.error.border_style,
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    chat_body._mount_block(
+                        RichBlock(
+                            Text(
+                                f"Session {self._session_id} not found",
+                                style=self._theme.error.border_style,
+                            ),
+                            raw=f"Session {self._session_id} not found",
+                            kind="error",
+                        )
                     )
                 )
 
         self._renderer.render_welcome()
 
-        # Focus the input
         self.query_one("#user-input", HistoryInput).focus()
 
     def apply_theme(self, theme: Theme) -> None:
@@ -1015,23 +1176,21 @@ class AarFixedApp(App):
         fl = theme.fixed_layout
         sb = fl.scrollbar
 
-        # Build region size lookup
         region_sizes: dict[str, int | None] = {}
         for region in fl.regions:
             region_sizes[region.name] = region.size
 
-        # Body log
+        # Chat body
         try:
-            log = self.query_one("#body-log", SelectableRichLog)
-            log.styles.background = fl.body_background
-            log.styles.scrollbar_color = sb.color
-            log.styles.scrollbar_color_hover = sb.color_hover
-            log.styles.scrollbar_color_active = sb.color_active
-            log.styles.scrollbar_background = sb.background
-            log.styles.scrollbar_background_hover = sb.background_hover
-            log.styles.scrollbar_background_active = sb.background_active
-            log.styles.scrollbar_size_vertical = sb.size
-            log._selected_style = fl.selected_block_style
+            chat_body = self.query_one("#chat-body", ChatBody)
+            chat_body.styles.background = fl.body_background
+            chat_body.styles.scrollbar_color = sb.color
+            chat_body.styles.scrollbar_color_hover = sb.color_hover
+            chat_body.styles.scrollbar_color_active = sb.color_active
+            chat_body.styles.scrollbar_background = sb.background
+            chat_body.styles.scrollbar_background_hover = sb.background_hover
+            chat_body.styles.scrollbar_background_active = sb.background_active
+            chat_body.styles.scrollbar_size_vertical = sb.size
         except Exception:
             pass
 
@@ -1042,7 +1201,6 @@ class AarFixedApp(App):
             ifield = fl.input_field
             inp.styles.border = (ifield.border_type, ifield.border_color)
             inp.styles.color = ifield.text_color
-            # Store focus color for on_focus / on_blur
             inp._border_color = ifield.border_color
             inp._border_color_focus = ifield.border_color_focus
             inp._border_type = ifield.border_type
@@ -1074,11 +1232,9 @@ class AarFixedApp(App):
             separators = self.query(SeparatorBar)
             for i, sep in enumerate(separators):
                 if i == 0:
-                    # First separator belongs to the header
                     sep._style = theme.header.separator.style
                     sep._character = theme.header.separator.character
                 else:
-                    # Remaining separators belong to the footer/input region
                     sep._style = theme.footer.separator.style
                     sep._character = theme.footer.separator.character
                 sep.refresh()
@@ -1093,12 +1249,12 @@ class AarFixedApp(App):
         return self._theme.fixed_layout.scrollbar.scroll_speed
 
     def action_scroll_up(self) -> None:
-        self.query_one("#body-log", SelectableRichLog).scroll_up(
+        self.query_one("#chat-body", ChatBody).scroll_up(
             animate=False, duration=0, speed=self._scroll_speed()
         )
 
     def action_scroll_down(self) -> None:
-        self.query_one("#body-log", SelectableRichLog).scroll_down(
+        self.query_one("#chat-body", ChatBody).scroll_down(
             animate=False, duration=0, speed=self._scroll_speed()
         )
 
@@ -1112,14 +1268,15 @@ class AarFixedApp(App):
         if self._renderer:
             self._renderer.toggle_thinking()
 
-    def action_clear_screen(self) -> None:
-        """Ctrl+L — clear the scrollback and reset counters."""
+    async def action_clear_screen(self) -> None:
+        """Ctrl+L — clear the chat body and reset counters."""
         if not self._renderer:
             return
-        log = self.query_one("#body-log", SelectableRichLog)
+        chat_body = self.query_one("#chat-body", ChatBody)
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
-        log.clear()
+        await chat_body.remove_children()
+        chat_body.auto_scroll = True
         self._session = None
         header.session_id = ""
         header.input_tokens = 0
@@ -1132,26 +1289,31 @@ class AarFixedApp(App):
         self._renderer._usage_total = {"input_tokens": 0, "output_tokens": 0}
         self._renderer._streaming_active = False
         self._renderer._stream_in_reasoning = False
+        self._renderer._current_thinking = None
+        self._renderer._current_answer = None
         self._renderer.render_welcome()
 
     async def action_cancel_agent(self) -> None:
         """Ctrl+C — cancel the running agent."""
-        # Signal cooperative cancellation
         if self._cancel_event is not None:
             self._cancel_event.set()
-        # Cancel the Textual worker
         for worker in self.workers:
             if getattr(worker, "name", "") == "agent-run" and worker.is_running:
                 worker.cancel()
-                # Stop streaming widget if active
                 if self._renderer:
-                    await self._renderer._stop_stream_widget()
+                    # Finalize any live streaming blocks
+                    if self._renderer._current_thinking is not None:
+                        self._renderer._current_thinking.finalize()
+                        self._renderer._current_thinking = None
+                    if self._renderer._current_answer is not None:
+                        self._renderer._current_answer.finalize()
+                        self._renderer._current_answer = None
+                    self._renderer._streaming_active = False
                     self._renderer._write(
                         Text("Cancelled", style=self._renderer.theme.error.border_style),
                         raw="Cancelled",
                         kind="system",
                     )
-                # Update header state
                 try:
                     header = self.query_one(HeaderBar)
                     header.state = "cancelled"
@@ -1167,13 +1329,19 @@ class AarFixedApp(App):
 
     def _do_copy_selected(self) -> None:
         """Copy selected block raw text, show feedback, deselect."""
-        log = self.query_one("#body-log", SelectableRichLog)
-        text = log.get_selected_raw()
+        try:
+            chat_body = self.query_one("#chat-body", ChatBody)
+        except Exception:
+            return
+        text = chat_body.get_selected_raw()
         if not text:
-            text = log.get_last_raw()
+            text = chat_body.get_last_raw()
         if text:
             self.copy_to_clipboard(text)
-            log.select_block(None)  # deselect
+            # Deselect all selected blocks
+            for block in chat_body.query("RichBlock.selected"):
+                block._selected = False  # type: ignore[attr-defined]
+                block.remove_class("selected")
             if self._renderer:
                 self._renderer._write(
                     Text("Copied to clipboard", style=self._renderer.theme.dim_text),
@@ -1182,23 +1350,10 @@ class AarFixedApp(App):
                 )
 
     # ------------------------------------------------------------------
-    # Scroll-aware auto_scroll: pause on manual scroll, resume at bottom
-    # ------------------------------------------------------------------
-
-    def on_rich_log_scroll(self) -> None:
-        """When the user scrolls, pause auto-scroll if not at the bottom."""
-        try:
-            log = self.query_one("#body-log", SelectableRichLog)
-            at_bottom = log.scroll_offset.y >= (log.virtual_size.height - log.size.height - 2)
-            log.auto_scroll = at_bottom
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
     # Input handling
     # ------------------------------------------------------------------
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: "Input.Submitted") -> None:
         """Handle user input from the Input widget."""
         user_input = event.value
         inp = self.query_one("#user-input", HistoryInput)
@@ -1207,24 +1362,26 @@ class AarFixedApp(App):
         if not stripped:
             return
 
-        # Add to input history
         inp.add_to_history(stripped)
 
         assert self._renderer is not None
-        log = self.query_one("#body-log", SelectableRichLog)
+        chat_body = self.query_one("#chat-body", ChatBody)
         header = self.query_one(HeaderBar)
+        t = self._renderer.theme
+
+        async def _write(content: object, raw: str = "", kind: str = "") -> None:
+            await chat_body._mount_block(RichBlock(content, raw=raw, kind=kind))
 
         # Echo input
-        log.write(Text(f"  > {stripped}", style=self._renderer.theme.prompt_style))
+        await _write(Text(f"  > {stripped}", style=self._renderer.theme.prompt_style))
 
         # --- TUI commands ------------------------------------------------
         if stripped.lower() in {"/quit", "/exit", "/q"}:
             self.exit()
             return
         elif stripped.lower() == "/status":
-            t = self._renderer.theme
             if not self._session:
-                log.write(f"[{t.dim_text}]No active session.[/]")
+                await _write(f"[{t.dim_text}]No active session.[/]")
             else:
                 status = Table.grid(padding=(0, 2))
                 status.add_column(justify="left")
@@ -1235,13 +1392,12 @@ class AarFixedApp(App):
                     f"[{t.dim_text}]Steps: {self._session.step_count}[/]",
                     f"[{t.dim_text}]State: {self._session.state.value}[/]",
                 )
-                log.write(status)
+                await _write(status)
             return
         elif stripped.lower() == "/tools":
-            t = self._renderer.theme
             for spec in self._agent.registry.list_tools():
                 effects = ", ".join(e.value for e in spec.side_effects)
-                log.write(
+                await _write(
                     Text.from_markup(
                         f"  [bold]{spec.name}[/]  [{t.dim_text}]({effects})[/]  {spec.description}"
                     )
@@ -1249,38 +1405,39 @@ class AarFixedApp(App):
             return
         elif stripped.lower() == "/policy":
             sc = self._config.safety
-            t = Table(title="Safety Policy", show_header=True, header_style="bold")
-            t.add_column("Setting", style="bold")
-            t.add_column("Value")
-            t.add_row("read_only", "[red]yes[/]" if sc.read_only else "[green]no[/]")
-            t.add_row(
+            tbl = Table(title="Safety Policy", show_header=True, header_style="bold")
+            tbl.add_column("Setting", style="bold")
+            tbl.add_column("Value")
+            tbl.add_row("read_only", "[red]yes[/]" if sc.read_only else "[green]no[/]")
+            tbl.add_row(
                 "require_approval_for_writes",
                 "[yellow]yes[/]" if sc.require_approval_for_writes else "[green]no[/]",
             )
-            t.add_row(
+            tbl.add_row(
                 "require_approval_for_execute",
                 "[yellow]yes[/]" if sc.require_approval_for_execute else "[green]no[/]",
             )
-            t.add_row("sandbox", sc.sandbox)
-            t.add_row("log_all_commands", "yes" if sc.log_all_commands else "no")
+            tbl.add_row("sandbox", sc.sandbox)
+            tbl.add_row("log_all_commands", "yes" if sc.log_all_commands else "no")
             allowed = (
                 ", ".join(sc.allowed_paths) if sc.allowed_paths else "[dim]all (no whitelist)[/]"
             )
-            t.add_row("allowed_paths", allowed)
-            t.add_row("denied_paths", f"[dim]{len(sc.denied_paths)} patterns[/]")
-            log.write(t)
+            tbl.add_row("allowed_paths", allowed)
+            tbl.add_row("denied_paths", f"[dim]{len(sc.denied_paths)} patterns[/]")
+            await _write(tbl)
             return
         elif stripped.lower() == "/clear":
-            self.action_clear_screen()
+            await self.action_clear_screen()
             return
         elif stripped.lower().startswith("/theme"):
             parts = stripped.split(maxsplit=1)
-            t = self._renderer.theme
             if len(parts) == 1:
-                log.write(Text.from_markup(f"[{t.dim_text}]Current theme:[/] [bold]{t.name}[/]"))
+                await _write(
+                    Text.from_markup(f"[{t.dim_text}]Current theme:[/] [bold]{t.name}[/]")
+                )
                 for tname in self._theme_registry.list_names():
                     marker = " *" if tname == t.name else ""
-                    log.write(Text.from_markup(f"  [{t.dim_text}]{tname}{marker}[/]"))
+                    await _write(Text.from_markup(f"  [{t.dim_text}]{tname}{marker}[/]"))
             else:
                 arg = parts[1].strip()
                 if arg == "next":
@@ -1289,12 +1446,7 @@ class AarFixedApp(App):
                     try:
                         self._renderer.set_theme(self._theme_registry.get(arg), self)
                     except KeyError:
-                        log.write(
-                            Text(
-                                f"Unknown theme: {arg}",
-                                style=t.error.border_style,
-                            )
-                        )
+                        await _write(Text(f"Unknown theme: {arg}", style=t.error.border_style))
             return
         elif stripped.lower() == "/think":
             self._renderer.toggle_thinking()
@@ -1309,12 +1461,12 @@ class AarFixedApp(App):
             has_audio = False
             for block in content:
                 if isinstance(block, ImageURLBlock):
-                    log.write(Text("  Attached: image", style=self._renderer.theme.dim_text))
+                    await _write(Text("  Attached: image", style=self._renderer.theme.dim_text))
                 elif isinstance(block, AudioBlock):
-                    log.write(Text("  Attached: audio", style=self._renderer.theme.dim_text))
+                    await _write(Text("  Attached: audio", style=self._renderer.theme.dim_text))
                     has_audio = True
             if has_audio and not self._agent.provider.supports_audio:
-                log.write(
+                await _write(
                     Text(
                         f"Warning: audio input is not supported by "
                         f"{self._agent.provider.name}. Audio will be dropped.",
@@ -1327,8 +1479,7 @@ class AarFixedApp(App):
         header.refresh()
         inp.placeholder = "working..."
         inp.disabled = True
-        # Re-enable auto-scroll when starting agent work
-        log.auto_scroll = True
+        chat_body.auto_scroll = True
 
         self._run_agent_worker(content)
 
@@ -1342,7 +1493,7 @@ class AarFixedApp(App):
 
         self.run_worker(_do_run(), exclusive=True, name="agent-run")
 
-    def on_worker_state_changed(self, event: object) -> None:
+    async def on_worker_state_changed(self, event: object) -> None:
         """Handle agent worker completion."""
         worker = getattr(event, "worker", None)
         if worker is None or getattr(worker, "name", "") != "agent-run":
@@ -1351,12 +1502,17 @@ class AarFixedApp(App):
         from textual.worker import WorkerState
 
         if worker.state != WorkerState.SUCCESS:
-            # Worker cancelled or errored — re-enable input
             if worker.state == WorkerState.ERROR:
                 try:
-                    log = self.query_one("#body-log", SelectableRichLog)
+                    chat_body = self.query_one("#chat-body", ChatBody)
                     err_msg = str(worker.error) if worker.error else "Agent run failed"
-                    log.write(Text(f"Error: {err_msg}", style=self._theme.error.border_style))
+                    await chat_body._mount_block(
+                        RichBlock(
+                            Text(f"Error: {err_msg}", style=self._theme.error.border_style),
+                            raw=err_msg,
+                            kind="error",
+                        )
+                    )
                 except Exception:
                     pass
             self._restore_input()
@@ -1373,7 +1529,6 @@ class AarFixedApp(App):
         header.session_id = self._session.session_id
         header.refresh()
 
-        # Handle recoverable errors
         if self._session.state == AgentState.ERROR:
             last_error = next(
                 (e for e in reversed(self._session.events) if isinstance(e, ErrorEvent)),
