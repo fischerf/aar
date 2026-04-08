@@ -45,8 +45,15 @@ class ToolExecutor:
         self.permissions = PermissionManager(approval_callback)
         self.sandbox = _create_sandbox(sc, shell_path=shell_path)
 
-    async def execute(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        """Execute a batch of tool calls and return results."""
+    async def execute(self, tool_calls: list[ToolCall], parallel: bool = True) -> list[ToolResult]:
+        """Execute a batch of tool calls and return results.
+
+        Args:
+            tool_calls: The tool calls to execute.
+            parallel: If True and multiple calls are present, execute concurrently.
+        """
+        if parallel and len(tool_calls) > 1:
+            return await asyncio.gather(*(self._execute_one(tc) for tc in tool_calls))
         results = []
         for tc in tool_calls:
             result = await self._execute_one(tc)
@@ -70,6 +77,17 @@ class ToolExecutor:
                 output=f"Error: tool '{tc.tool_name}' has no handler",
                 is_error=True,
             )
+
+        # --- Input validation against schema ---
+        if spec.input_schema:
+            validation_error = _validate_arguments(tc.arguments, spec.input_schema)
+            if validation_error:
+                return ToolResult(
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.tool_name,
+                    output=f"Error: invalid arguments for '{tc.tool_name}': {validation_error}",
+                    is_error=True,
+                )
 
         # --- Safety policy check ---
         decision = self.policy.check_tool(spec, tc.arguments)
@@ -133,9 +151,20 @@ class ToolExecutor:
             )
 
 
+def _validate_arguments(arguments: dict, schema: dict) -> str | None:
+    """Validate tool arguments against the JSON schema. Return error message or None."""
+    try:
+        import jsonschema
+
+        jsonschema.validate(instance=arguments, schema=schema)
+    except jsonschema.ValidationError as e:
+        return e.message
+    except Exception:
+        pass  # schema validation is best-effort; don't block execution
+    return None
+
+
 def _create_sandbox(config: SafetyConfig, shell_path: str = "") -> Sandbox:
     if config.sandbox == "subprocess":
-        return SubprocessSandbox(
-            max_memory_mb=config.sandbox_max_memory_mb, shell_path=shell_path
-        )
+        return SubprocessSandbox(max_memory_mb=config.sandbox_max_memory_mb, shell_path=shell_path)
     return LocalSandbox(shell_path=shell_path)

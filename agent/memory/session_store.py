@@ -12,6 +12,9 @@ from agent.core.session import Session
 
 logger = logging.getLogger(__name__)
 
+# Bump this when the JSONL event format changes in a breaking way.
+SCHEMA_VERSION = 1
+
 
 class SessionStore:
     """Persists sessions as JSONL files."""
@@ -29,6 +32,7 @@ class SessionStore:
 
         header = {
             "_meta": True,
+            "schema_version": SCHEMA_VERSION,
             "session_id": session.session_id,
             "run_id": session.run_id,
             "trace_id": session.trace_id,
@@ -64,6 +68,22 @@ class SessionStore:
                     header = data
                 else:
                     events.append(deserialize_event(data))
+
+        # Schema version check
+        file_version = header.get("schema_version", 0)
+        if file_version > SCHEMA_VERSION:
+            raise ValueError(
+                f"Session '{session_id}' was saved with schema version {file_version}, "
+                f"but this version of aar only supports up to version {SCHEMA_VERSION}. "
+                f"Upgrade aar to load this session."
+            )
+        if file_version < SCHEMA_VERSION:
+            logger.info(
+                "Session '%s' uses schema version %d (current: %d) — migrating",
+                session_id,
+                file_version,
+                SCHEMA_VERSION,
+            )
 
         from agent.core.state import AgentState
 

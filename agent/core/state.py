@@ -11,3 +11,5 @@ class AgentState(str, Enum):
     COMPLETED = "completed"
     ERROR = "error"
     CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    MAX_STEPS = "max_steps"

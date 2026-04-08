@@ -13,6 +13,7 @@ from agent.core.events import (
     EventType,
     ProviderMeta,
     ReasoningBlock,
+    StreamChunk,
     StopReason,
     ToolCall,
     ToolResult,
@@ -20,10 +21,10 @@ from agent.core.events import (
 from agent.core.loop import run_loop
 from agent.core.session import Session
 from agent.core.state import AgentState
-from agent.providers.base import ProviderResponse
+from agent.providers.base import ProviderResponse, StreamDelta
 from agent.tools.execution import ToolExecutor
 
-from tests.conftest import MockProvider
+from tests.conftest import MockProvider, StreamingMockProvider
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ async def test_loop_enforces_timeout(tool_registry):
     executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
     result = await run_loop(session, provider, executor, config)
 
-    assert result.state == AgentState.ERROR
+    assert result.state == AgentState.TIMED_OUT
     errors = [e for e in result.events if isinstance(e, ErrorEvent)]
     assert any("timed out" in e.message.lower() for e in errors)
 
@@ -187,7 +188,9 @@ async def test_loop_handles_multiple_tool_calls(mock_provider, tool_registry, de
                 ToolCall(tool_name="echo", tool_call_id="tc_2", arguments={"message": "second"}),
             ],
             stop_reason="tool_use",
-            meta=ProviderMeta(provider="mock", model="mock-1", usage={"input_tokens": 10, "output_tokens": 20}),
+            meta=ProviderMeta(
+                provider="mock", model="mock-1", usage={"input_tokens": 10, "output_tokens": 20}
+            ),
         )
     )
     mock_provider.enqueue_text("Got both results")
@@ -258,7 +261,9 @@ async def test_loop_records_reasoning_blocks(mock_provider, tool_registry, defau
             content="The answer is 42",
             stop_reason="end_turn",
             reasoning=[ReasoningBlock(content="Let me think about this...")],
-            meta=ProviderMeta(provider="mock", model="mock-1", usage={"input_tokens": 10, "output_tokens": 5}),
+            meta=ProviderMeta(
+                provider="mock", model="mock-1", usage={"input_tokens": 10, "output_tokens": 5}
+            ),
         )
     )
 
@@ -317,7 +322,9 @@ async def test_loop_respects_cancel_event(mock_provider, tool_registry, default_
     cancel_event.set()  # already set before the loop starts
 
     executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
-    result = await run_loop(session, mock_provider, executor, default_config, cancel_event=cancel_event)
+    result = await run_loop(
+        session, mock_provider, executor, default_config, cancel_event=cancel_event
+    )
 
     assert result.state == AgentState.CANCELLED
     errors = [e for e in result.events if isinstance(e, ErrorEvent)]
@@ -346,9 +353,7 @@ async def test_loop_cancel_event_mid_run(tool_registry, default_config):
     session.add_user_message("Go")
 
     executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
-    result = await run_loop(
-        session, provider, executor, default_config, cancel_event=cancel_event
-    )
+    result = await run_loop(session, provider, executor, default_config, cancel_event=cancel_event)
 
     assert result.state == AgentState.CANCELLED
 
@@ -356,6 +361,7 @@ async def test_loop_cancel_event_mid_run(tool_registry, default_config):
 @pytest.mark.asyncio
 async def test_loop_handles_asyncio_cancelled_error(tool_registry, default_config):
     """asyncio task cancellation should set state to CANCELLED and re-raise."""
+
     class SlowProvider(MockProvider):
         async def complete(self, messages, tools=None, system=""):
             await asyncio.sleep(10)  # will be cancelled here
@@ -415,3 +421,337 @@ async def test_tool_result_has_duration(mock_provider, tool_registry, default_co
     tool_results = [e for e in result.events if isinstance(e, ToolResult)]
     assert len(tool_results) == 1
     assert tool_results[0].duration_ms >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Retry on recoverable errors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loop_retries_on_recoverable_error(tool_registry):
+    """Loop should retry on recoverable errors and succeed when the provider recovers."""
+
+    class FlakyProvider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self._attempt = 0
+
+        async def complete(self, messages, tools=None, system=""):
+            self._attempt += 1
+            if self._attempt == 1:
+                raise ConnectionError("temporary network glitch")
+            return await super().complete(messages, tools, system)
+
+    provider = FlakyProvider()
+    provider.enqueue_text("Recovered!")
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock"),
+        max_steps=10,
+        timeout=30.0,
+        max_retries=3,
+    )
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    msgs = [e for e in result.events if isinstance(e, AssistantMessage)]
+    assert msgs[0].content == "Recovered!"
+
+
+@pytest.mark.asyncio
+async def test_loop_gives_up_after_max_retries(tool_registry):
+    """Loop should stop after exhausting retries on recoverable errors."""
+
+    class AlwaysFailProvider(MockProvider):
+        async def complete(self, messages, tools=None, system=""):
+            raise ConnectionError("persistent network failure")
+
+    provider = AlwaysFailProvider()
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock"),
+        max_steps=10,
+        timeout=30.0,
+        max_retries=2,
+    )
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, provider, executor, config)
+
+    assert result.state == AgentState.ERROR
+    errors = [e for e in result.events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# State mapping: TIMED_OUT and MAX_STEPS
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loop_max_steps_sets_max_steps_state(mock_provider, tool_registry):
+    """Loop should set MAX_STEPS state when step limit is reached."""
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock"),
+        max_steps=2,
+        timeout=30.0,
+    )
+    for i in range(5):
+        mock_provider.enqueue_tool_call("echo", {"message": f"step {i}"}, f"tc_{i}")
+    mock_provider.enqueue_text("final")
+
+    session = Session()
+    session.add_user_message("Loop")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, config)
+
+    assert result.state == AgentState.MAX_STEPS
+
+
+# ---------------------------------------------------------------------------
+# Multiple event callbacks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_multiple_event_callbacks():
+    """Agent.on_event should support multiple callbacks."""
+    from agent.core.agent import Agent
+
+    collected_a: list = []
+    collected_b: list = []
+
+    provider = MockProvider()
+    provider.enqueue_text("Hello")
+
+    agent = Agent(
+        config=AgentConfig(provider=ProviderConfig(name="mock"), max_steps=5, timeout=10.0),
+        provider=provider,
+    )
+    agent.on_event(collected_a.append)
+    agent.on_event(collected_b.append)
+
+    await agent.run("Hi")
+
+    assert len(collected_a) > 0
+    assert len(collected_a) == len(collected_b)
+
+
+# ---------------------------------------------------------------------------
+# Token-level streaming
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_stream_chunks(streaming_mock_provider, tool_registry):
+    """When streaming is enabled, the loop should emit StreamChunk events."""
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(text="Hello"),
+            StreamDelta(text=" world"),
+            StreamDelta(text="!"),
+            StreamDelta(done=True),
+        ]
+    )
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=10,
+        timeout=30.0,
+        streaming=True,
+    )
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(
+        session, streaming_mock_provider, executor, config, on_event=collected.append
+    )
+
+    assert result.state == AgentState.COMPLETED
+
+    chunks = [e for e in collected if isinstance(e, StreamChunk)]
+    # 3 text chunks + 1 finished chunk
+    assert len(chunks) == 4
+    assert chunks[0].text == "Hello"
+    assert chunks[1].text == " world"
+    assert chunks[2].text == "!"
+    assert chunks[3].finished is True
+
+    # Final assistant message should contain the full assembled text
+    msgs = [e for e in collected if isinstance(e, AssistantMessage)]
+    assert any(m.content == "Hello world!" for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_streaming_assembles_content(streaming_mock_provider, tool_registry):
+    """Streaming should assemble fragmented tokens into a complete response."""
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(text="The answer"),
+            StreamDelta(text=" is 42"),
+            StreamDelta(done=True),
+        ]
+    )
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=10,
+        timeout=30.0,
+        streaming=True,
+    )
+
+    session = Session()
+    session.add_user_message("What is the answer?")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, streaming_mock_provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    msgs = [e for e in result.events if isinstance(e, AssistantMessage)]
+    assert msgs[-1].content == "The answer is 42"
+
+
+@pytest.mark.asyncio
+async def test_streaming_with_tool_calls(streaming_mock_provider, tool_registry):
+    """Streaming should handle tool call deltas and execute tools."""
+    # First stream: tool call
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(text="Let me check..."),
+            StreamDelta(
+                tool_call_delta={
+                    "tool_call_id": "tc_stream_1",
+                    "tool_name": "echo",
+                    "arguments": {"message": "streamed"},
+                }
+            ),
+            StreamDelta(done=True),
+        ]
+    )
+    # Second: final text (via complete fallback for simplicity)
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(text="Done!"),
+            StreamDelta(done=True),
+        ]
+    )
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=10,
+        timeout=30.0,
+        streaming=True,
+    )
+
+    session = Session()
+    session.add_user_message("Call echo")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, streaming_mock_provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    tool_results = [e for e in result.events if isinstance(e, ToolResult)]
+    assert len(tool_results) == 1
+    assert "echo: streamed" in tool_results[0].output
+
+
+@pytest.mark.asyncio
+async def test_streaming_with_reasoning(streaming_mock_provider, tool_registry):
+    """Streaming should accumulate reasoning deltas into ReasoningBlock events."""
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(reasoning_delta="Let me think"),
+            StreamDelta(reasoning_delta=" about this..."),
+            StreamDelta(text="The answer is 42"),
+            StreamDelta(done=True),
+        ]
+    )
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=10,
+        timeout=30.0,
+        streaming=True,
+    )
+
+    session = Session()
+    session.add_user_message("Think hard")
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(
+        session, streaming_mock_provider, executor, config, on_event=collected.append
+    )
+
+    assert result.state == AgentState.COMPLETED
+
+    # Reasoning chunks were emitted as StreamChunks
+    reasoning_chunks = [e for e in collected if isinstance(e, StreamChunk) and e.reasoning_text]
+    assert len(reasoning_chunks) == 2
+
+    # Reasoning block was assembled in the response and recorded
+    reasoning_blocks = [e for e in result.events if isinstance(e, ReasoningBlock)]
+    assert len(reasoning_blocks) == 1
+    assert reasoning_blocks[0].content == "Let me think about this..."
+
+
+@pytest.mark.asyncio
+async def test_streaming_disabled_uses_complete(tool_registry):
+    """When streaming=False, provider.stream() should not be called."""
+    provider = StreamingMockProvider()
+    provider.enqueue_text("Hello via complete")
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=10,
+        timeout=30.0,
+        streaming=False,
+    )
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    assert provider.stream_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_streaming_calls_stream_method(streaming_mock_provider, tool_registry):
+    """When streaming=True, provider.stream() should be called."""
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(text="Hi"),
+            StreamDelta(done=True),
+        ]
+    )
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=10,
+        timeout=30.0,
+        streaming=True,
+    )
+
+    session = Session()
+    session.add_user_message("Hello")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    await run_loop(session, streaming_mock_provider, executor, config)
+
+    assert streaming_mock_provider.stream_call_count == 1

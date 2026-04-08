@@ -366,11 +366,16 @@ class GenericProvider(Provider):
             payload["tools"] = _convert_tools(tools)
 
         # ── Structured output ─────────────────────────────────────────────────
-        fmt: str = str(self.config.extra.get("response_format", "text"))
-        if fmt == "json_object":
+        # Config-level response_format takes precedence over extra.response_format.
+        fmt: str = self.config.response_format or str(
+            self.config.extra.get("response_format", "text")
+        )
+        if fmt in ("json", "json_object"):
             payload["response_format"] = {"type": "json_object"}
         elif fmt == "json_schema":
-            schema_def: dict[str, Any] = dict(self.config.extra.get("json_schema_def", {}))
+            schema_def: dict[str, Any] = self.config.json_schema or dict(
+                self.config.extra.get("json_schema_def", {})
+            )
             if schema_def:
                 payload["response_format"] = {
                     "type": "json_schema",
@@ -379,7 +384,7 @@ class GenericProvider(Provider):
             else:
                 logger.warning(
                     "GenericProvider: response_format='json_schema' requested but "
-                    "no 'json_schema_def' supplied in config.extra — falling back to text."
+                    "no json_schema supplied — falling back to text."
                 )
 
         return payload

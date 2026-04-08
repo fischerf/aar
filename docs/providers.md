@@ -45,11 +45,13 @@ Enable reasoning extraction for models like `deepseek-r1`:
 ProviderConfig(name="ollama", model="deepseek-r1", extra={"supports_reasoning": True})
 ```
 
-Enable vision for models with a vision encoder (see [Image input](development.md#image-input-multimodal)):
+Enable vision for models with a vision encoder (see [Multimodal input](development.md#multimodal-input-images-audio-video)):
 
 ```python
 ProviderConfig(name="ollama", model="qwen2.5vl:7b", extra={"supports_vision": True})
 ```
+
+Audio note: Gemma 4 supports audio at the model level, but Ollama's API does not yet expose audio input (as of v0.20). Audio blocks attached via `@file` will be dropped with a warning. The framework types are ready for when Ollama adds support.
 
 ## Generic (OpenAI-compatible)
 

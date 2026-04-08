@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from typing import Any, Callable
 
@@ -63,7 +65,7 @@ class Agent:
             approval_callback,
             shell_path=self.config.shell_path,
         )
-        self._on_event: Callable[[Event], Any] | None = None
+        self._on_event: list[Callable[[Event], Any]] = []
 
         # Register built-in tools based on config
         self._register_builtins()
@@ -88,13 +90,18 @@ class Agent:
                 del self.registry._tools[name]
 
     def on_event(self, callback: Callable[[Event], Any]) -> None:
-        """Set a callback that fires for every event during a run."""
-        self._on_event = callback
+        """Register a callback that fires for every event during a run.
+
+        Multiple callbacks are supported; each is called in registration order.
+        Both sync and async callables are accepted.
+        """
+        self._on_event.append(callback)
 
     async def run(
         self,
         prompt: str | list[ContentBlock],
         session: Session | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> Session:
         """Run the agent with a user prompt.
 
@@ -103,6 +110,8 @@ class Agent:
                 :class:`~agent.core.events.ContentBlock` objects for multimodal
                 (text + image) input.
             session: Optional existing session to continue.
+            cancel_event: Optional asyncio.Event; set it to request cooperative
+                cancellation of the agent loop.
 
         Returns:
             The completed session.
@@ -114,12 +123,20 @@ class Agent:
         session.add_user_message(prompt)
         session.state = AgentState.RUNNING
 
+        def _dispatch(event: Event) -> None:
+            for cb in self._on_event:
+                if inspect.iscoroutinefunction(cb):
+                    asyncio.ensure_future(cb(event))
+                else:
+                    cb(event)
+
         session = await run_loop(
             session=session,
             provider=self.provider,
             tool_executor=self.executor,
             config=self.config,
-            on_event=self._on_event,
+            on_event=_dispatch if self._on_event else None,
+            cancel_event=cancel_event,
         )
 
         return session

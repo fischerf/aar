@@ -216,17 +216,36 @@ config = AgentConfig(
 
 ---
 
-## Image input (multimodal)
+## Multimodal input (image · audio · video)
 
-Vision-capable models accept images alongside text. Use `ContentBlock` lists instead of plain strings.
+Multimodal-capable models accept images and audio alongside text. Pass a list of `ContentBlock` objects instead of a plain string. Media blocks should come **before** text for best results.
+
+### Quick CLI / TUI attachment
+
+Use the `@file` syntax — aar detects the file type automatically:
+
+```
+# image
+What error is shown here? @screenshot.png
+
+# audio
+Transcribe this recording. @meeting.wav
+
+# mixed
+Compare what you see and hear. @chart.png @explanation.mp3
+```
+
+Supported types: images (`.png`, `.jpg`, `.gif`, `.webp`, `.bmp`, `.tiff`), audio (`.wav`, `.mp3`, `.ogg`, `.flac`, `.m4a`). Video is typed but not yet wired to any provider.
+
+### Images
 
 ```python
 from agent.core.events import TextBlock, ImageURLBlock, ImageURL
 
-# HTTP/HTTPS image
+# HTTP/HTTPS URL
 parts = [
-    TextBlock(text="What error is shown in this screenshot?"),
     ImageURLBlock(image_url=ImageURL(url="https://example.com/screenshot.png")),
+    TextBlock(text="What error is shown in this screenshot?"),
 ]
 response = await agent.chat(parts)
 
@@ -234,41 +253,98 @@ response = await agent.chat(parts)
 import base64
 data = base64.b64encode(open("diagram.png", "rb").read()).decode()
 parts = [
-    TextBlock(text="Describe the architecture in this diagram."),
     ImageURLBlock(image_url=ImageURL(url=f"data:image/png;base64,{data}")),
+    TextBlock(text="Describe the architecture in this diagram."),
 ]
 response = await agent.chat(parts)
+
+# Or let the helper encode for you
+from agent.core.multimodal import file_to_content_block
+from pathlib import Path
+
+parts = [
+    file_to_content_block(Path("diagram.png")),   # → ImageURLBlock
+    TextBlock(text="Describe the architecture."),
+]
 ```
 
-### Ollama vision models
+### Audio
 
-Pull a vision model and point the provider at it:
+> **Limitation:** Ollama's API does not yet support audio input (as of v0.20). The framework types (`AudioBlock`, `AudioData`) exist and audio files can be attached with `@file`, but audio blocks will be **dropped with a warning** when using Ollama. This will work automatically once Ollama adds audio API support. Gemma 4 supports audio at the model level — only the API bridge is missing.
 
-```bash
-ollama pull qwen2.5vl:7b
-```
+The `AudioBlock` type is ready for providers that support audio (or future Ollama versions):
 
 ```python
-ProviderConfig(
-    name="ollama",
-    model="qwen2.5vl:7b",
-    extra={"supports_vision": True},   # default True for Ollama
-)
+from agent.core.events import AudioBlock, AudioData, TextBlock
+import base64
+
+data = base64.b64encode(open("meeting.wav", "rb").read()).decode()
+parts = [
+    AudioBlock(audio=AudioData(url=f"data:audio/wav;base64,{data}", format="wav")),
+    TextBlock(text="Summarise the key action items from this meeting recording."),
+]
+response = await agent.chat(parts)
+
+# Or use the helper (detects format from extension)
+from agent.core.multimodal import file_to_content_block
+parts = [
+    file_to_content_block(Path("meeting.wav")),   # → AudioBlock
+    TextBlock(text="Summarise the key action items."),
+]
 ```
 
-Compatible Ollama models: `qwen2.5vl`, `llava`, `minicpm-v`, `moondream`, `bakllava`.
+### Mixed image + audio (future — requires Ollama audio API support)
+
+> **Note:** The image part works now. Audio requires Ollama to add API support — audio blocks are
+> currently dropped with a warning. The framework types are ready.
+
+```python
+parts = [
+    file_to_content_block(Path("dashboard.png")),  # image first — works now
+    file_to_content_block(Path("notes.wav")),       # audio — dropped until Ollama supports it
+    TextBlock(text="The image is a dashboard screenshot. The audio is my verbal annotation. Describe what I'm pointing out."),
+]
+```
+
+### Video (prepared, not yet implemented)
+
+`VideoBlock` and `VideoData` types exist for future use — passing a video file currently raises `ValueError`. Use the `@file` CLI syntax with a `.mp4` to see the error message; support will be added once providers expose a stable video API.
+
+### Ollama multimodal models
+
+| Model | Vision | Audio | Notes |
+|---|---|---|---|
+| `gemma4:e4b` | ✓ | model ✓ / API ✗ | 8B MoE; audio supported by model but not yet by Ollama API |
+| `qwen2.5vl:7b` | ✓ | — | Strong vision-only model |
+| `llava:13b` | ✓ | — | Reliable vision; good for diagrams |
+| `minicpm-v` | ✓ | — | Fast, small vision model |
+
+```bash
+ollama pull gemma4:e4b    # vision (audio when Ollama API supports it)
+ollama pull qwen2.5vl:7b  # vision only
+```
 
 ### Image prompting tips
 
+- **Put media before text** — Gemma 4 and most vision models attend better when the image or audio comes first in the content list.
 - **Be specific about what to extract.** "What does this image show?" is weak. "List every label visible in this UI screenshot" or "Identify the bottleneck in this flame graph" are far better.
 - **One image per question** works better than sending multiple images and asking a single vague question.
-- **Use `detail: "high"`** (OpenAI) for dense images like code screenshots, charts, or technical diagrams where fine detail matters:
+- **Use `detail: "high"`** (OpenAI) for dense images like code screenshots, charts, or technical diagrams:
   ```python
   ImageURLBlock(image_url=ImageURL(url="...", detail="high"))
   ```
 - **Describe the context** the model doesn't have. "This is a screenshot of a React component failing its snapshot test" is better than just attaching the image.
 - **Ask for structured output** when you need to act on the result:
   > Look at this database schema diagram. List every table name and its columns as a JSON object.
+
+### Audio prompting tips (for future use)
+
+> These tips apply once Ollama (or another provider) supports audio input. The framework is ready.
+
+- **Keep clips short and focused** — under 30 seconds per clip for Gemma 4; longer audio should be split.
+- **State the task before the clip makes sense** if the audio is ambiguous: "This is a customer support call. Identify the main complaint and the resolution offered."
+- **Specify the expected output format**: "Return a JSON object with keys: speaker, summary, action_items."
+- **Mono WAV at 16 kHz** is the most portable format across audio-capable models; avoid stereo or high-sample-rate files when compatibility matters.
 
 ---
 
@@ -429,6 +505,68 @@ aar tui  --provider ollama --model qwen3.5:9b --verbose
 - **`num_ctx` must be explicit** — forgetting it is the most common source of truncated
   responses and confused tool calls.
 
+### Ollama — gemma4:e4b
+
+`gemma4:e4b` (Gemma 4 E4B, 8B MoE) is Google's recommended small multimodal model and the best local option when you need **both image and audio input**. It has a 128 K context window and supports 140+ languages.
+
+```bash
+ollama pull gemma4:e4b
+```
+
+#### Minimal aar config
+
+```python
+ProviderConfig(
+    name="ollama",
+    model="gemma4:e4b",
+    max_tokens=8192,
+    temperature=1.0,
+    extra={
+        "supports_vision": True,   # image input (default True)
+        "supports_tools": True,
+        "top_p": 0.95,
+        "top_k": 64,
+        "min_p": 0.0,
+    },
+)
+```
+
+#### Image input
+
+```python
+from agent.core.multimodal import file_to_content_block
+from agent.core.events import TextBlock
+from pathlib import Path
+
+# Put the image BEFORE the text — Gemma 4 attends better in this order
+parts = [
+    file_to_content_block(Path("chart.png")),
+    TextBlock(text="What trend does this chart show? Quote the exact axis labels."),
+]
+response = await agent.chat(parts)
+```
+
+Or from the CLI:
+```bash
+aar run "What trend does this chart show? @chart.png"
+```
+
+#### Audio input (not yet available)
+
+Gemma 4 E4B supports audio at the model level (up to ~30 s), but Ollama's API does not expose audio input as of v0.20. Audio blocks attached with `@file` will be dropped with a warning. The framework types are ready — this will work automatically once Ollama adds audio support.
+
+#### What gemma4:e4b excels at
+
+- **Image understanding** — charts, diagrams, screenshots, OCR, UI analysis
+- **Lightweight** — runs comfortably on 8 GB VRAM at Q4 quantisation
+- **Multilingual** — 140+ languages
+
+#### What to watch out for
+
+- **Audio not yet available** — Ollama's API doesn't support audio input yet (v0.20). Audio blocks are dropped with a warning.
+- **No tool calling with images** — Gemma 4 does not reliably combine tool use and image input in the same turn. Send images in a separate turn before or after tool-heavy turns.
+- **HTTP image URLs** are not supported via Ollama's native `/api/chat` endpoint — always base-64 encode local files (the `@file` syntax does this automatically).
+
 ---
 
 ## Common patterns
@@ -480,6 +618,74 @@ session = await agent.run("Wrap the whole script in a try/except that rolls back
 session = await agent.run("Run it with bash: python scripts/migrate.py --dry-run", session)
 ```
 
+### Image → code
+
+```python
+from agent.core.multimodal import file_to_content_block
+from agent.core.events import TextBlock
+from pathlib import Path
+
+# Screenshot of a UI → implement it
+parts = [
+    file_to_content_block(Path("mockup.png")),
+    TextBlock(text="Implement this UI mockup as a React component using Tailwind CSS. Write it to src/components/Dashboard.tsx."),
+]
+session = await agent.run(parts)
+
+# Or from the CLI:
+# aar run "Implement this mockup as a React component. Write to src/components/Dashboard.tsx. @mockup.png"
+```
+
+### Audio → structured notes (future — requires Ollama audio API support)
+
+> **Note:** This pattern is ready at the framework level but requires Ollama to add audio API
+> support. Currently audio blocks are dropped with a warning.
+
+```python
+from agent.core.multimodal import file_to_content_block
+from agent.core.events import TextBlock
+from pathlib import Path
+
+parts = [
+    file_to_content_block(Path("standup.wav")),
+    TextBlock(text="""
+This is a 5-minute standup recording. Extract:
+- What each person said they completed yesterday
+- What they are working on today
+- Any blockers mentioned
+
+Return as JSON with one entry per speaker.
+"""),
+]
+response = await agent.chat(parts)
+
+# Or from the CLI:
+# aar run "Extract standup notes as JSON. @standup.wav"
+```
+
+### Chart / diagram analysis with follow-up
+
+```python
+from agent.core.multimodal import file_to_content_block
+from agent.core.events import TextBlock
+from pathlib import Path
+
+session = None
+
+# Turn 1: describe the chart
+session = await agent.run(
+    [file_to_content_block(Path("latency_p99.png")),
+     TextBlock(text="Describe this latency chart: what are the axes, what time range does it cover, and where are the spikes?")],
+    session,
+)
+
+# Turn 2: act on what was described (text only — image stays in context)
+session = await agent.run(
+    "Search the codebase for the code paths most likely responsible for the spikes you identified.",
+    session,
+)
+```
+
 ---
 
 ## What to avoid
@@ -492,3 +698,6 @@ session = await agent.run("Run it with bash: python scripts/migrate.py --dry-run
 | Very long context with no compaction | Token cost grows quadratically | Compact sessions periodically |
 | Asking the model to remember things across separate sessions | Sessions are independent | Use `--session` to resume |
 | Telling a reasoning model to "think step by step" | It is already thinking; adds noise | Trust the model; focus on the task |
+| Combining tool calls and images in the same turn (Gemma 4) | Gemma 4 does not reliably do both at once | Send images first, then ask for tool-heavy follow-up in the next turn |
+| Expecting audio to work with Ollama | Ollama's API does not support audio input (as of v0.20) | Audio blocks are dropped with a warning; wait for Ollama to add support |
+| Using HTTP image URLs with Ollama | Ollama's native `/api/chat` only accepts base-64 | Use local files with `@file` syntax or `file_to_content_block()` |
