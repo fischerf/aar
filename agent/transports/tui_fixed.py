@@ -541,9 +541,9 @@ class AnswerBlock(Static):
         self._token_count += 1
         self.raw = self._buffer
         if self._token_count % self._BATCH == 0:
-            self._render()
+            self._do_render()
 
-    def _render(self) -> None:
+    def _do_render(self) -> None:
         t = self._theme
         self.update(
             Panel(
@@ -559,7 +559,7 @@ class AnswerBlock(Static):
         if content is not None:
             self._buffer = content
         self.raw = self._buffer
-        self._render()
+        self._do_render()
 
     async def on_click(self, event: Click) -> None:
         self._selected = not self._selected
@@ -651,9 +651,7 @@ class ChatBody(VerticalScroll):
     def get_all_text(self) -> str:
         """Concatenate raw text from all content blocks."""
         blocks = list(self.query("ThinkingBlock, AnswerBlock, RichBlock"))
-        return "\n\n".join(
-            getattr(b, "raw", "") for b in blocks if getattr(b, "raw", "")
-        )
+        return "\n\n".join(getattr(b, "raw", "") for b in blocks if getattr(b, "raw", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -1432,9 +1430,7 @@ class AarFixedApp(App):
         elif stripped.lower().startswith("/theme"):
             parts = stripped.split(maxsplit=1)
             if len(parts) == 1:
-                await _write(
-                    Text.from_markup(f"[{t.dim_text}]Current theme:[/] [bold]{t.name}[/]")
-                )
+                await _write(Text.from_markup(f"[{t.dim_text}]Current theme:[/] [bold]{t.name}[/]"))
                 for tname in self._theme_registry.list_names():
                     marker = " *" if tname == t.name else ""
                     await _write(Text.from_markup(f"  [{t.dim_text}]{tname}{marker}[/]"))
