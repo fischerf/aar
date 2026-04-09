@@ -112,10 +112,10 @@ class TestModelPricing:
     """Tests for pricing table lookup via get_pricing()."""
 
     def test_get_pricing_exact_match(self) -> None:
-        pricing = get_pricing("gpt-4o")
+        pricing = get_pricing("gpt-5.4")
         assert pricing is not None
         assert pricing.input_per_million == 2.50
-        assert pricing.output_per_million == 10.0
+        assert pricing.output_per_million == 15.0
 
     def test_get_pricing_prefix_match(self) -> None:
         pricing = get_pricing("claude-sonnet-4-20250514")
@@ -129,11 +129,11 @@ class TestModelPricing:
 
     def test_get_pricing_prefers_longer_prefix(self) -> None:
         """More-specific prefix should win over shorter one."""
-        pricing_mini = get_pricing("gpt-4o-mini")
-        pricing_base = get_pricing("gpt-4o")
+        pricing_mini = get_pricing("gpt-5.4-mini")
+        pricing_base = get_pricing("gpt-5.4")
         assert pricing_mini is not None
         assert pricing_base is not None
-        # gpt-4o-mini is cheaper than gpt-4o
+        # gpt-5.4-mini is cheaper than gpt-5.4
         assert pricing_mini.input_per_million < pricing_base.input_per_million
 
 

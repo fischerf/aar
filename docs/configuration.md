@@ -163,15 +163,26 @@ You can cap how many tokens or how much estimated cost a single agent run is all
 
 ### How token tracking works
 
-After every provider call the agent reads `ProviderMeta.usage` (input tokens + output tokens) and adds the values to a running total for the current run. Once the accumulated total exceeds `token_budget` (if non-zero), the loop emits an `ErrorEvent` and stops with `AgentState.BUDGET_EXCEEDED`.
+Token counts are read from the `ProviderMeta` event that fires after every provider call — for both streaming and non-streaming responses. In streaming mode the final chunk from the provider carries the usage data; `_consume_stream()` captures it and attaches it to the response before the event is emitted. See [Tokens, costs, and budgets](tokens.md) for the full pipeline, per-provider details, and how each transport displays the counts.
 
 ### How cost estimation works
 
-Aar ships a built-in pricing table keyed by model-name prefix. After each provider call the framework multiplies token counts by the matching per-token price to produce an estimated USD cost. The estimate is **approximate** — prompt-caching discounts, batching, and future price changes are not reflected.
+Aar loads a built-in pricing table from `agent/core/pricing.json` (shipped with the package). If `~/.aar/pricing.json` exists it is merged on top, letting you extend or override any entry. After each provider call the framework multiplies token counts by the matching per-token price to produce an estimated USD cost. The estimate is **approximate** — prompt-caching discounts, batching, and future price changes are not reflected.
 
 - Cost is accumulated across all steps in the run, just like tokens.
 - When `cost_limit` (if > 0) is exceeded the agent stops the same way as for `token_budget`.
 - Local or Ollama models that don't match any pricing-table entry will report **$0.00** cost.
+
+To add prices for custom or local models (e.g. Ollama), create or edit `~/.aar/pricing.json`:
+
+```json
+{
+  "_comment": "USD per 1M tokens. Keys are model-name prefixes.",
+  "gemma4": { "input_per_million": 0.05, "output_per_million": 0.10, "cache_read_per_million": 0.0, "cache_write_per_million": 0.0 }
+}
+```
+
+Run `aar init` to get `~/.aar/pricing.template.json` — a copy of the full built-in pricing table — as a reference.
 
 ### Warning thresholds (TUI only)
 
@@ -210,6 +221,8 @@ config = AgentConfig(
   "cost_warning_threshold": 0.9
 }
 ```
+
+> For full details on how token counts flow through the system, how each transport displays them, and per-provider caveats, see **[Tokens, costs, and budgets](tokens.md)**.
 
 ## Configurable system prompt
 

@@ -788,7 +788,7 @@ def serve(
 def init(
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config files"),
 ) -> None:
-    """Create ~/.aar/config.json and ~/.aar/mcp_servers.json with default values."""
+    """Create ~/.aar/config.json, ~/.aar/mcp_servers.json, and pricing/theme templates."""
     import json as _json
 
     _USER_DIR.mkdir(parents=True, exist_ok=True)
@@ -824,6 +824,25 @@ def init(
         ]
     }
 
+    # Pricing template — copy of the built-in pricing.json so users can see the
+    # format and add custom model prices (e.g. local Ollama models).
+    _USER_PRICING_TEMPLATE = _USER_DIR / "pricing.template.json"
+    from agent.core.tokens import get_builtin_pricing_path as _get_builtin_pricing_path
+
+    try:
+        _pricing_raw = _json.loads(_get_builtin_pricing_path().read_text(encoding="utf-8"))
+        # Inject a top-level hint so users know what to do with this file.
+        _pricing_raw["_usage"] = (
+            "Copy this file to pricing.json in the same directory (~/.aar/) "
+            "to activate custom prices. Entries here override the built-in table. "
+            "Keys starting with '_' are ignored. Values are USD per 1 million tokens."
+        )
+    except Exception:
+        _pricing_raw = {
+            "_comment": "USD per 1 million tokens. Keys are model-name prefixes.",
+            "_usage": "Copy this file to pricing.json to activate custom prices.",
+        }
+
     # Theme directory and files
     _USER_THEMES_DIR = _USER_DIR / "themes"
     _USER_THEMES_DIR.mkdir(parents=True, exist_ok=True)
@@ -850,6 +869,7 @@ def init(
         (_USER_CONFIG, default_config),
         (_USER_MCP_CONFIG, default_mcp),
         (_USER_MCP_EXAMPLE, example_mcp),
+        (_USER_PRICING_TEMPLATE, _pricing_raw),
         (_USER_THEME_EXAMPLE, example_theme),
         (_USER_THEME_SCHEMA, theme_schema),
     ]:
@@ -874,10 +894,15 @@ def init(
         )
         console.print("  3. Optionally add global rules to [bold]~/.aar/rules.md[/].")
         console.print(
-            f"  4. Create custom themes in [bold]{_USER_THEMES_DIR}[/]"
+            f"  4. To add custom model prices (e.g. local Ollama models), copy"
+            f" [bold]{_USER_PRICING_TEMPLATE}[/] to [bold]{_USER_DIR / 'pricing.json'}[/]"
+            f" and edit the entries."
+        )
+        console.print(
+            f"  5. Create custom themes in [bold]{_USER_THEMES_DIR}[/]"
             f" — see [bold]{_USER_THEME_EXAMPLE}[/] for a template."
         )
-        console.print("  5. Run [bold]aar chat[/] — no flags needed.")
+        console.print("  6. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
