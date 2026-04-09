@@ -181,7 +181,31 @@ class AnthropicProvider(Provider):
                                     "arguments": parsed_args,
                                 }
                             )
-                    yield StreamDelta(done=True)
+                    # Build usage metadata from the final message
+                    stream_meta: ProviderMeta | None = None
+                    try:
+                        final_msg = stream.get_final_message()
+                        usage: dict[str, int] = {
+                            "input_tokens": final_msg.usage.input_tokens,
+                            "output_tokens": final_msg.usage.output_tokens,
+                        }
+                        if hasattr(final_msg.usage, "cache_read_input_tokens"):
+                            cache_read = final_msg.usage.cache_read_input_tokens
+                            if cache_read:
+                                usage["cache_read_tokens"] = cache_read
+                        if hasattr(final_msg.usage, "cache_creation_input_tokens"):
+                            cache_write = final_msg.usage.cache_creation_input_tokens
+                            if cache_write:
+                                usage["cache_write_tokens"] = cache_write
+                        stream_meta = ProviderMeta(
+                            provider="anthropic",
+                            model=final_msg.model,
+                            usage=usage,
+                            request_id=final_msg.id,
+                        )
+                    except Exception:
+                        pass
+                    yield StreamDelta(done=True, meta=stream_meta)
                     return
 
         # Fallback sentinel

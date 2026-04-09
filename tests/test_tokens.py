@@ -542,3 +542,172 @@ class TestSessionTokenFields:
         session.total_input_tokens = 100
         session.total_output_tokens = 50
         assert session.total_tokens == 150
+
+
+# ---------------------------------------------------------------------------
+# TestStreamingTokenTracking
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingTokenTracking:
+    """Tests that token usage flows through streaming providers correctly.
+
+    The root cause of tokens not displaying was that _consume_stream() in
+    loop.py returned ProviderResponse(meta=None) — the StreamDelta had no
+    way to carry usage data.  These tests verify the fix end-to-end.
+    """
+
+    @pytest.mark.asyncio
+    async def test_streaming_tokens_accumulated_on_session(self, tool_registry) -> None:
+        """Streaming run should accumulate tokens on the session."""
+        from agent.core.events import ProviderMeta
+        from agent.providers.base import StreamDelta
+        from tests.conftest import StreamingMockProvider
+
+        provider = StreamingMockProvider()
+        meta = ProviderMeta(
+            provider="mock_stream",
+            model="mock-stream-1",
+            usage={"input_tokens": 42, "output_tokens": 18},
+        )
+        provider.enqueue_stream(
+            [
+                StreamDelta(text="Hello "),
+                StreamDelta(text="world!"),
+                StreamDelta(done=True, meta=meta),
+            ]
+        )
+
+        config = AgentConfig(
+            provider=ProviderConfig(name="mock_stream", model="mock-stream-1"),
+            max_steps=10,
+            timeout=30.0,
+            streaming=True,
+        )
+        session = Session()
+        session.add_user_message("Hi")
+
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+        result = await run_loop(session, provider, executor, config)
+
+        assert result.state == AgentState.COMPLETED
+        assert result.total_input_tokens == 42
+        assert result.total_output_tokens == 18
+        assert result.total_tokens == 60
+
+    @pytest.mark.asyncio
+    async def test_streaming_emits_provider_meta_event(self, tool_registry) -> None:
+        """Streaming run should emit a ProviderMeta event with usage data."""
+        from agent.core.events import ProviderMeta
+        from agent.providers.base import StreamDelta
+        from tests.conftest import StreamingMockProvider
+
+        provider = StreamingMockProvider()
+        meta = ProviderMeta(
+            provider="mock_stream",
+            model="mock-stream-1",
+            usage={"input_tokens": 100, "output_tokens": 50},
+        )
+        provider.enqueue_stream(
+            [
+                StreamDelta(text="response"),
+                StreamDelta(done=True, meta=meta),
+            ]
+        )
+
+        config = AgentConfig(
+            provider=ProviderConfig(name="mock_stream", model="mock-stream-1"),
+            max_steps=10,
+            timeout=30.0,
+            streaming=True,
+        )
+        session = Session()
+        session.add_user_message("Hi")
+
+        events_received: list = []
+
+        def capture(event):
+            events_received.append(event)
+
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+        await run_loop(session, provider, executor, config, on_event=capture)
+
+        meta_events = [e for e in events_received if isinstance(e, ProviderMeta)]
+        assert len(meta_events) == 1
+        assert meta_events[0].usage["input_tokens"] == 100
+        assert meta_events[0].usage["output_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_streaming_without_meta_still_works(self, tool_registry) -> None:
+        """Streaming run without meta on the final delta should still complete."""
+        from agent.providers.base import StreamDelta
+        from tests.conftest import StreamingMockProvider
+
+        provider = StreamingMockProvider()
+        provider.enqueue_stream(
+            [
+                StreamDelta(text="no meta here"),
+                StreamDelta(done=True),  # no meta
+            ]
+        )
+
+        config = AgentConfig(
+            provider=ProviderConfig(name="mock_stream", model="mock-stream-1"),
+            max_steps=10,
+            timeout=30.0,
+            streaming=True,
+        )
+        session = Session()
+        session.add_user_message("Hi")
+
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+        result = await run_loop(session, provider, executor, config)
+
+        assert result.state == AgentState.COMPLETED
+        assert result.total_input_tokens == 0
+        assert result.total_output_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_token_budget_enforced(self, tool_registry) -> None:
+        """Token budget should be enforced during streaming runs."""
+        from agent.core.events import ProviderMeta
+        from agent.providers.base import StreamDelta
+        from tests.conftest import StreamingMockProvider
+
+        provider = StreamingMockProvider()
+        # First call: 25 tokens (exceeds budget of 20)
+        meta1 = ProviderMeta(
+            provider="mock_stream",
+            model="mock-stream-1",
+            usage={"input_tokens": 15, "output_tokens": 10},
+        )
+        provider.enqueue_stream(
+            [
+                StreamDelta(text="first"),
+                StreamDelta(done=True, meta=meta1),
+            ]
+        )
+        # Second call should never happen
+        provider.enqueue_stream(
+            [
+                StreamDelta(text="second"),
+                StreamDelta(done=True, meta=meta1),
+            ]
+        )
+
+        config = AgentConfig(
+            provider=ProviderConfig(name="mock_stream", model="mock-stream-1"),
+            max_steps=10,
+            timeout=30.0,
+            streaming=True,
+            token_budget=20,
+        )
+        session = Session()
+        session.add_user_message("Hi")
+
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+        result = await run_loop(session, provider, executor, config)
+
+        assert result.state == AgentState.BUDGET_EXCEEDED
+        assert result.total_tokens == 25
+        assert result.step_count == 1

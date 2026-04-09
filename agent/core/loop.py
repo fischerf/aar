@@ -10,6 +10,7 @@ from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
+    ProviderMeta,
     ReasoningBlock,
     StopReason,
     StreamChunk,
@@ -265,6 +266,7 @@ async def _consume_stream(
     reasoning_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     stop_reason = ""
+    meta: ProviderMeta | None = None
 
     async for delta in provider.stream(messages=messages, tools=tools, system=system):
         # Emit chunk events for text and reasoning deltas
@@ -296,6 +298,7 @@ async def _consume_stream(
 
         if delta.done:
             _emit(session, on_event, StreamChunk(finished=True))
+            meta = delta.meta
             if tool_calls:
                 stop_reason = StopReason.TOOL_USE.value
             else:
@@ -311,6 +314,7 @@ async def _consume_stream(
         tool_calls=tool_calls,
         stop_reason=stop_reason,
         reasoning=reasoning_blocks,
+        meta=meta,
     )
 
 

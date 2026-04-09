@@ -243,6 +243,8 @@ class GenericProvider(Provider):
         # Accumulators for in-progress tool calls indexed by their position.
         # Structure: {index: {"id": str, "name": str, "arguments": str}}
         tool_acc: dict[int, dict[str, str]] = {}
+        stream_usage: dict[str, int] = {}
+        stream_model: str = self.config.model
 
         try:
             async with self._client.stream(
@@ -264,6 +266,18 @@ class GenericProvider(Provider):
                         chunk: dict[str, Any] = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
+
+                    # Capture usage if present (some endpoints include it)
+                    raw_usage: dict[str, Any] = chunk.get("usage") or {}
+                    if raw_usage:
+                        if "prompt_tokens" in raw_usage:
+                            stream_usage["input_tokens"] = int(raw_usage["prompt_tokens"])
+                        if "completion_tokens" in raw_usage:
+                            stream_usage["output_tokens"] = int(raw_usage["completion_tokens"])
+                        if "total_tokens" in raw_usage:
+                            stream_usage["total_tokens"] = int(raw_usage["total_tokens"])
+                    if chunk.get("model"):
+                        stream_model = chunk["model"]
 
                     choices: list[Any] = chunk.get("choices", [])
                     if not choices:
@@ -308,7 +322,14 @@ class GenericProvider(Provider):
                                     "arguments": parsed_args,
                                 }
                             )
-                        yield StreamDelta(done=True)
+                        stream_meta: ProviderMeta | None = None
+                        if stream_usage:
+                            stream_meta = ProviderMeta(
+                                provider="generic",
+                                model=stream_model,
+                                usage=stream_usage,
+                            )
+                        yield StreamDelta(done=True, meta=stream_meta)
                         return
 
         except httpx.TimeoutException as exc:
@@ -319,7 +340,14 @@ class GenericProvider(Provider):
             raise RuntimeError(f"Generic provider stream network error: {exc}") from exc
 
         # Fallback done sentinel if finish_reason never arrived
-        yield StreamDelta(done=True)
+        stream_meta_fb: ProviderMeta | None = None
+        if stream_usage:
+            stream_meta_fb = ProviderMeta(
+                provider="generic",
+                model=stream_model,
+                usage=stream_usage,
+            )
+        yield StreamDelta(done=True, meta=stream_meta_fb)
 
     async def close(self) -> None:
         await self._client.aclose()
