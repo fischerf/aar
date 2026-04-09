@@ -167,6 +167,8 @@ Token counts are read from the `ProviderMeta` event that fires after every provi
 
 ### How cost estimation works
 
+Run `aar init` to get `~/.aar/pricing.template.json` — a copy of the full built-in pricing table — as a reference. Rename to pricing.json and adjust if needed.
+
 Aar loads a built-in pricing table from `agent/core/pricing.json` (shipped with the package). If `~/.aar/pricing.json` exists it is merged on top, letting you extend or override any entry. After each provider call the framework multiplies token counts by the matching per-token price to produce an estimated USD cost. The estimate is **approximate** — prompt-caching discounts, batching, and future price changes are not reflected.
 
 - Cost is accumulated across all steps in the run, just like tokens.
@@ -181,8 +183,6 @@ To add prices for custom or local models (e.g. Ollama), create or edit `~/.aar/p
   "gemma4": { "input_per_million": 0.05, "output_per_million": 0.10, "cache_read_per_million": 0.0, "cache_write_per_million": 0.0 }
 }
 ```
-
-Run `aar init` to get `~/.aar/pricing.template.json` — a copy of the full built-in pricing table — as a reference.
 
 ### Warning thresholds (TUI only)
 
