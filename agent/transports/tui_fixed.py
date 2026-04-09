@@ -217,6 +217,11 @@ class FixedTUIRenderer:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
+                    self._header.streaming = True
+                    try:
+                        self._header.update(self._header.render())
+                    except Exception:
+                        self._header.refresh()
                 if self._current_thinking is None:
                     self._current_thinking = ThinkingBlock(self.theme)
                     self._mount_streaming(self._current_thinking)
@@ -225,6 +230,11 @@ class FixedTUIRenderer:
             if event.text:
                 if not self._streaming_active:
                     self._streaming_active = True
+                    self._header.streaming = True
+                    try:
+                        self._header.update(self._header.render())
+                    except Exception:
+                        self._header.refresh()
                 if self._stream_in_reasoning:
                     self._stream_in_reasoning = False
                     # Finalize thinking title so it no longer shows "..."
@@ -241,6 +251,11 @@ class FixedTUIRenderer:
                     self._current_thinking.finalize()
                 # _streaming_active stays True until AssistantMessage arrives
                 # so we know to finalize (not re-create) the answer block.
+                self._header.streaming = False
+                try:
+                    self._header.update(self._header.render())
+                except Exception:
+                    self._header.refresh()
             return
 
         # --- Final assistant message ------------------------------------------
@@ -751,6 +766,7 @@ class AarFixedApp(App):
         header.input_tokens = 0
         header.output_tokens = 0
         header.state = "idle"
+        header.streaming = False
         header.refresh()
         footer.step_count = 0
         footer.refresh()
@@ -785,6 +801,7 @@ class AarFixedApp(App):
                     )
                 try:
                     header = self.query_one(HeaderBar)
+                    header.streaming = False
                     header.state = "cancelled"
                     header.refresh()
                 except Exception:

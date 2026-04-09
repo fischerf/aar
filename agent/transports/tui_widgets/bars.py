@@ -43,6 +43,7 @@ class HeaderBar(Static):
         self.thinking_enabled: bool = True
         self.total_cost: float = 0.0
         self.warning_active: bool = False
+        self.streaming: bool = False
 
     def update_tokens(
         self, usage: dict[str, int], step_cost: float = 0.0, warning: bool = False
@@ -75,7 +76,8 @@ class HeaderBar(Static):
         if session:
             parts.append((session, h.session_style))
             parts.append(("  |  ", h.separator_style))
-        parts.append((self.state, h.state_style))
+        state_label = "streaming…" if self.streaming else self.state
+        parts.append((state_label, h.state_style))
         parts.append(("  |  ", h.separator_style))
         parts.append((thinking_label, h.tokens_style))
         return Text.assemble(*parts)

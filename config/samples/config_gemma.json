@@ -68,7 +68,7 @@
     "theme": "",
     "layout": {
       "reasoning": { "visible": false },
-      "token_usage": { "visible": false },
+      "token_usage": { "visible": true },
       "welcome": { "visible": true },
       "extensions": {
         "metrics": { "visible": true },
