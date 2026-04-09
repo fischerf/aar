@@ -14,7 +14,17 @@ At the very start of every session, before doing any work:
    git rev-parse --is-inside-work-tree 2>/dev/null
    ```
 
-2. **If it IS a Git repo**, create a shadow branch tied to this session:
+2. **If it IS a Git repo**, check whether any branches exist:
+   ```bash
+   git branch --list
+   ```
+   If the output is empty (no branches, e.g. a freshly `git init`-ed repo
+   with no commits), create an initial commit and a `main` branch:
+   ```bash
+   git checkout -b main
+   git commit --allow-empty -m "Initial commit"
+   ```
+   Then create a shadow branch tied to this session:
    ```bash
    git checkout -b .aar/session-<SESSION_ID>
    ```
@@ -98,10 +108,11 @@ an earlier point — e.g. "go back 3 steps and try something different":
    git branch -m .aar/session-<SESSION_ID> .aar/session-<SESSION_ID>-fork-<FORK_N>
    ```
 
-2. **Identify the fork point.** If the user said "revert N", count back N
+2. **Identify the fork point.** If the user said `/fork N`, count back N
    checkpoints from your recorded trail and extract that commit hash.
-   If no N was given, ask the user which checkpoint to branch from before
-   proceeding.
+   If no N was given (bare `/fork`), use the **current** checkpoint
+   (i.e. HEAD) as the fork point — this preserves the current attempt and
+   lets the user try a different approach from the same point.
 
 3. **Create the new branch from that hash:**
    ```bash
