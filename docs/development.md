@@ -321,6 +321,10 @@ agent.on_event(on_event)
 session = await agent.run("Do something")
 ```
 
+Use `agent.off_event(callback)` to unsubscribe a previously registered callback. Multiple
+callbacks are supported and called in registration order; a failing callback is logged and
+does not prevent subsequent callbacks from firing.
+
 Event types: `user_message`, `assistant_message`, `tool_call`, `tool_result`, `reasoning`, `provider_meta`, `error`, `session`.
 
 Timing fields are populated automatically by the runtime:

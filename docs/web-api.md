@@ -24,11 +24,12 @@ aar serve --port 8080
 | `--model`, `--provider`, `--api-key`, `--base-url` | yes | yes |
 | `--config <file>` | yes | yes |
 | `--read-only / --no-read-only` | yes | yes |
+| `--log-level` | yes | yes |
+| `--log-file` | yes | yes |
 | `--host`, `--port` | — | yes |
 | `--require-approval / --no-require-approval` | yes | — |
 | `--restrict-to-cwd / --no-restrict-to-cwd` | yes | — |
 | `--denied-paths`, `--allowed-paths` | yes | — |
-| `--log-level` | yes | — |
 | `--max-steps` | yes | — |
 | `--session` | yes | — |
 | `--mcp-config` | yes | — (see [MCP tools and the web server](mcp.md#mcp-tools-and-the-web-server)) |

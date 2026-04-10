@@ -44,6 +44,7 @@ config = AgentConfig(
     shell_path="",                                 # custom shell binary (see below)
     project_rules_dir=".agent",                    # project rules folder (see below)
     log_level="WARNING",                           # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    log_file=None,                                 # opt-in file logging path (append mode)
 )
 ```
 
@@ -155,7 +156,28 @@ config = AgentConfig(log_level="DEBUG")
 aar chat --log-level DEBUG
 aar run "do something" --log-level INFO
 aar tui --log-level WARNING
+aar serve --log-level DEBUG
 ```
+
+### Log file
+
+By default aar logs to stderr only (12-factor / container-friendly). Opt in to file logging
+with `log_file` in the config or `--log-file` on the CLI:
+
+```json
+{
+  "log_level": "DEBUG",
+  "log_file": "/var/log/aar/agent.log"
+}
+```
+
+```bash
+aar serve --log-level INFO --log-file /var/log/aar/agent.log
+aar chat --log-file ./debug.log
+```
+
+The file handler uses append mode and includes timestamps. Both stderr and file handlers are
+active when `log_file` is set.
 
 ## Token budget & cost limits
 
