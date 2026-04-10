@@ -38,7 +38,8 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Horizontal
+    from textual.containers import Horizontal, Vertical
+    from textual.screen import ModalScreen
     from textual.widgets import Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -92,7 +93,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
     _Block,
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
-from agent.transports.tui_widgets.input import HistoryInput  # noqa: F401
+from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
 # ---------------------------------------------------------------------------
@@ -480,25 +481,121 @@ class FixedTUIRenderer:
         t = self.theme
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
-            "Type your message and press Enter.\n"
+            "Type your message and press Ctrl+Enter to send.\n"
+            "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
             "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
             "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
             "[bold]Shortcuts:[/]\n"
-            "  [bold]Ctrl+T[/]  cycle theme    "
-            "  [bold]Ctrl+K[/]  toggle thinking panel\n"
-            "  [bold]Ctrl+L[/]  clear screen   "
-            "[bold]Ctrl+Y[/]  copy block (raw text)\n"
-            "  [bold]↑ / ↓[/]   input history  "
+            "  [bold]Ctrl+Enter[/]  send message   "
+            "  [bold]Ctrl+T[/]  cycle theme\n"
+            "  [bold]Ctrl+K[/]  toggle thinking panel   "
+            "[bold]Ctrl+L[/]  clear screen\n"
+            "  [bold]Ctrl+X[/]  cancel agent   "
+            "  [bold]Ctrl+P[/]  open/close terminal shell\n"
+            "  [bold]Ctrl+↑/↓[/]  input history   "
             "[bold]PgUp/PgDn[/]  scroll\n"
             "  [bold]Left click[/]  select block  "
-            "[bold]Right click[/]  copy + deselect"
+            "[bold]Right click[/]  deselect"
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
             raw="Aar Agent TUI (Textual) — welcome",
             kind="welcome",
         )
+
+
+# ---------------------------------------------------------------------------
+# TerminalModal — interactive shell modal (Ctrl+P)
+# ---------------------------------------------------------------------------
+
+
+class TerminalModal(ModalScreen):
+    """A modal overlay providing a simple interactive shell terminal."""
+
+    BINDINGS = [
+        Binding("ctrl+p", "close_terminal", "Close Terminal", show=False),
+        Binding("escape", "close_terminal", "Close Terminal", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    TerminalModal {
+        align: center middle;
+    }
+    TerminalModal > Vertical {
+        width: 80%;
+        height: 70%;
+        border: solid #666666;
+        background: #1a1a1a;
+    }
+    #terminal-title {
+        height: 1;
+        background: #2a2a2a;
+        color: #aaaaaa;
+        text-style: bold;
+        padding: 0 1;
+    }
+    #terminal-output {
+        height: 1fr;
+        background: #1a1a1a;
+        color: #e0e0e0;
+        padding: 0 1;
+        scrollbar-color: #555555;
+        scrollbar-background: #1a1a1a;
+    }
+    #terminal-input {
+        height: 3;
+        background: #222222;
+        color: #e0e0e0;
+        border: tall #444444;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("  Terminal Shell  (Esc or Ctrl+P to close)", id="terminal-title")
+            yield RichLog(id="terminal-output", markup=True, highlight=False)
+            yield Input(placeholder="$ ...", id="terminal-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#terminal-input", Input).focus()
+        output = self.query_one("#terminal-output", RichLog)
+        output.write("[dim]Shell ready. Type commands and press Enter. Type 'exit' to close.[/dim]")
+
+    async def on_input_submitted(self, event: "Input.Submitted") -> None:
+        """Run the shell command and display output."""
+        inp = self.query_one("#terminal-input", Input)
+        cmd = event.value.strip()
+        inp.value = ""
+        if not cmd:
+            inp.focus()
+            return
+        output = self.query_one("#terminal-output", RichLog)
+        output.write(f"[bold yellow]$ {cmd}[/bold yellow]")
+        if cmd in ("exit", "quit", "close"):
+            self.dismiss()
+            return
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            text = stdout.decode("utf-8", errors="replace") if stdout else ""
+            if text:
+                for line in text.splitlines():
+                    output.write(line)
+            if proc.returncode not in (0, None):
+                output.write(f"[dim](exit code {proc.returncode})[/dim]")
+        except asyncio.TimeoutError:
+            output.write("[red]Command timed out (30s)[/red]")
+        except Exception as exc:
+            output.write(f"[red]Error: {exc}[/red]")
+        inp.focus()
+
+    def action_close_terminal(self) -> None:
+        self.dismiss()
 
 
 # ---------------------------------------------------------------------------
@@ -512,11 +609,11 @@ class AarFixedApp(App):
     BINDINGS = [
         Binding("pageup", "scroll_up", "Page Up", show=False),
         Binding("pagedown", "scroll_down", "Page Down", show=False),
-        Binding("ctrl+c", "cancel_agent", "Cancel agent", show=False, priority=True),
+        Binding("ctrl+x", "cancel_agent", "Cancel agent", show=False, priority=True),
         Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False),
         Binding("ctrl+k", "toggle_thinking", "Toggle thinking", show=False, priority=True),
         Binding("ctrl+l", "clear_screen", "Clear screen", show=False),
-        Binding("ctrl+y", "copy_block", "Copy selected block", show=False),
+        Binding("ctrl+p", "toggle_terminal", "Terminal", show=False),
     ]
 
     CSS = """
@@ -539,7 +636,7 @@ class AarFixedApp(App):
         height: 1;
     }
     #user-input {
-        height: 3;
+        height: 5;
         padding: 0 1;
     }
     #footer-sep {
@@ -608,7 +705,7 @@ class AarFixedApp(App):
                     self._theme.footer.separator.style,
                     self._theme.footer.separator.character,
                 ),
-                HistoryInput(placeholder="> type your message...", id="user-input"),
+                HistoryTextArea(id="user-input", show_line_numbers=False),
             ],
             "footer": lambda: [
                 SeparatorBar(
@@ -735,7 +832,7 @@ class AarFixedApp(App):
 
         self._renderer.render_welcome()
 
-        self.query_one("#user-input", HistoryInput).focus()
+        self.query_one("#user-input", HistoryTextArea).focus()
 
     def apply_theme(self, theme: Theme) -> None:
         """Apply theme colors to Textual widget styles."""
@@ -763,7 +860,7 @@ class AarFixedApp(App):
 
         # Input
         try:
-            inp = self.query_one("#user-input", HistoryInput)
+            inp = self.query_one("#user-input", HistoryTextArea)
             inp.styles.background = fl.input_background
             ifield = fl.input_field
             inp.styles.border = (ifield.border_type, ifield.border_color)
@@ -879,7 +976,7 @@ class AarFixedApp(App):
         self._renderer.render_welcome()
 
     async def action_cancel_agent(self) -> None:
-        """Ctrl+C — cancel the running agent."""
+        """Ctrl+X — cancel the running agent."""
         if self._cancel_event is not None:
             self._cancel_event.set()
         for worker in self.workers:
@@ -909,41 +1006,23 @@ class AarFixedApp(App):
                 self._restore_input()
                 break
 
-    def action_copy_block(self) -> None:
-        """Ctrl+Y — copy the selected (or last) block's raw text to clipboard."""
-        self._do_copy_selected()
-
-    def _do_copy_selected(self) -> None:
-        """Copy selected block raw text, show feedback, deselect."""
-        try:
-            chat_body = self.query_one("#chat-body", ChatBody)
-        except Exception:
-            return
-        text = chat_body.get_selected_raw()
-        if not text:
-            text = chat_body.get_last_raw()
-        if text:
-            self.copy_to_clipboard(text)
-            # Deselect all selected blocks
-            for block in chat_body.query("RichBlock.selected"):
-                block._selected = False  # type: ignore[attr-defined]
-                block.remove_class("selected")
-            if self._renderer:
-                self._renderer._write(
-                    Text("Copied to clipboard", style=self._renderer.theme.dim_text),
-                    raw="Copied to clipboard",
-                    kind="system",
-                )
+    async def action_toggle_terminal(self) -> None:
+        """Ctrl+P — open/close the interactive terminal shell modal."""
+        for screen in self.screen_stack:
+            if isinstance(screen, TerminalModal):
+                self.pop_screen()
+                return
+        await self.push_screen(TerminalModal())
 
     # ------------------------------------------------------------------
     # Input handling
     # ------------------------------------------------------------------
 
-    async def on_input_submitted(self, event: "Input.Submitted") -> None:
-        """Handle user input from the Input widget."""
+    async def on_history_text_area_submitted(self, event: "HistoryTextArea.Submitted") -> None:
+        """Handle user input from the HistoryTextArea widget."""
         user_input = event.value
-        inp = self.query_one("#user-input", HistoryInput)
-        inp.value = ""
+        inp = self.query_one("#user-input", HistoryTextArea)
+        inp.text = ""
         stripped = user_input.strip()
         if not stripped:
             return
@@ -1035,10 +1114,6 @@ class AarFixedApp(App):
         elif stripped.lower() == "/think":
             self._renderer.toggle_thinking()
             return
-        elif stripped.lower() == "/copy":
-            self._do_copy_selected()
-            return
-
         # --- Parse multimodal attachments --------------------------------
         content = parse_multimodal_input(stripped)
         if isinstance(content, list):
@@ -1061,7 +1136,6 @@ class AarFixedApp(App):
         # --- Run agent (in worker so the UI event loop stays responsive) ---
         header.state = "running"
         header.refresh()
-        inp.placeholder = "working..."
         inp.disabled = True
         chat_body.auto_scroll = True
 
@@ -1129,8 +1203,7 @@ class AarFixedApp(App):
     def _restore_input(self) -> None:
         """Re-enable the input widget after the agent finishes."""
         try:
-            inp = self.query_one("#user-input", HistoryInput)
-            inp.placeholder = "> type your message..."
+            inp = self.query_one("#user-input", HistoryTextArea)
             inp.disabled = False
             inp.focus()
         except Exception:

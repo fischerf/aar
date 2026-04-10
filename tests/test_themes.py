@@ -49,6 +49,7 @@ from agent.transports.tui_fixed import (
     FooterBar,
     HeaderBar,
     HistoryInput,
+    HistoryTextArea,
     ThinkingPanel,
     _Block,
 )
@@ -830,7 +831,8 @@ class TestFooterBarKeyHints:
         assert "Ctrl+T" in plain
         assert "Ctrl+K" in plain
         assert "Ctrl+L" in plain
-        assert "Ctrl+Y" in plain
+        assert "Ctrl+X" in plain
+        assert "Ctrl+P" in plain
         assert "Ctrl+Q" in plain
 
 
@@ -891,7 +893,7 @@ class TestAarFixedAppStartup:
             assert app.query_one(HeaderBar) is not None
             assert app.query_one(FooterBar) is not None
             assert app.query_one(ChatBody) is not None
-            assert app.query_one(HistoryInput) is not None
+            assert app.query_one(HistoryTextArea) is not None
 
     @pytest.mark.asyncio
     async def test_app_renders_welcome(self) -> None:
@@ -920,9 +922,9 @@ class TestAarFixedAppStartup:
         config = AgentConfig()
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            inp = app.query_one("#user-input", HistoryInput)
-            inp.value = "/theme"
-            await pilot.press("enter")
+            inp = app.query_one("#user-input", HistoryTextArea)
+            inp.text = "/theme"
+            await pilot.press("ctrl+enter")
             await pilot.pause()
             # /theme writes RichBlock entries into the chat body
             chat_body = app.query_one("#chat-body", ChatBody)
@@ -958,13 +960,13 @@ class TestAarFixedAppStartup:
         config = AgentConfig()
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            inp = app.query_one("#user-input", HistoryInput)
+            inp = app.query_one("#user-input", HistoryTextArea)
             # Type and submit two slash commands (these don't trigger agent.run)
-            inp.value = "/theme"
-            await pilot.press("enter")
+            inp.text = "/theme"
+            await pilot.press("ctrl+enter")
             await pilot.pause()
-            inp.value = "/tools"
-            await pilot.press("enter")
+            inp.text = "/tools"
+            await pilot.press("ctrl+enter")
             await pilot.pause()
             # History should have two entries
             assert inp._history == ["/theme", "/tools"]
