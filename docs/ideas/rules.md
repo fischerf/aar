@@ -26,7 +26,7 @@ At the very start of every session, before doing any work:
    ```
    Then create a shadow branch tied to this session:
    ```bash
-   git checkout -b .aar/session-<SESSION_ID>
+   git checkout -b aar/session-<SESSION_ID>
    ```
    Record the branch name and the starting commit hash. You will use these
    throughout the session.
@@ -71,7 +71,7 @@ Print this checkpoint line in your response so the user can see the trail.
 |---|---|
 | `git diff HEAD~1` | See exactly what the last tool execution changed |
 | `git diff <hash1> <hash2>` | Compare any two checkpoints |
-| `git log --oneline .aar/session-<ID>` | List all checkpoints this session |
+| `git log --oneline aar/session-<ID>` | List all checkpoints this session |
 | `git blame <file>` | Understand authorship/history of existing code |
 | `git log --all --grep="<keyword>"` | Search history for architectural decisions |
 
@@ -105,7 +105,7 @@ an earlier point — e.g. "go back 3 steps and try something different":
    auto-generated name using the session ID and a fork counter (fork-1,
    fork-2, etc.) so it is never lost:
    ```bash
-   git branch -m .aar/session-<SESSION_ID> .aar/session-<SESSION_ID>-fork-<FORK_N>
+   git branch -m aar/session-<SESSION_ID> aar/session-<SESSION_ID>-fork-<FORK_N>
    ```
 
 2. **Identify the fork point.** If the user said `/fork N`, count back N
@@ -116,7 +116,7 @@ an earlier point — e.g. "go back 3 steps and try something different":
 
 3. **Create the new branch from that hash:**
    ```bash
-   git checkout -b .aar/session-<SESSION_ID> <fork-point-hash>
+   git checkout -b aar/session-<SESSION_ID> <fork-point-hash>
    ```
    This new branch becomes the active shadow branch for the rest of the
    session. Your checkpoint counter continues from where it left off —
@@ -131,14 +131,14 @@ an earlier point — e.g. "go back 3 steps and try something different":
 
 5. **Confirm the fork to the user:**
    ```
-   [FORK preserved=.aar/session-<SESSION_ID>-fork-<FORK_N> active=.aar/session-<SESSION_ID>
+   [FORK preserved=aar/session-<SESSION_ID>-fork-<FORK_N> active=aar/session-<SESSION_ID>
     forked-from=turn-<N> hash=<short_hash>]
    ```
    Then ask: "What approach would you like to try?"
 
 **Multiple forks are allowed.** Each `/fork` increments the fork counter and
 produces a new auto-named branch. The user can later compare them with
-`git diff .aar/session-<ID>-fork-1 .aar/session-<ID>-fork-2` or ask you to
+`git diff aar/session-<ID>-fork-1 aar/session-<ID>-fork-2` or ask you to
 do so.
 
 **At `/done`**, if multiple fork branches exist, list them all by their
@@ -155,7 +155,7 @@ When the user signals they are satisfied:
    - Run:
      ```bash
      git checkout <ORIGINAL_BRANCH>
-     git merge --squash .aar/session-<SESSION_ID>
+     git merge --squash aar/session-<SESSION_ID>
      git commit -m "<YOUR_GENERATED_MESSAGE>"
      ```
 3. If no, leave the shadow branch in place and report its name so the user
@@ -173,5 +173,5 @@ When the user signals they are satisfied:
   has a visible undo trail.
 - If Git operations fail (e.g., nothing to commit, merge conflicts), report
   the issue clearly and do not silently swallow errors.
-- Shadow branches (`.aar/session-*`) are yours to manage. Clean them up after
+- Shadow branches (`aar/session-*`) are yours to manage. Clean them up after
   a successful `/done` merge unless the user asks to keep them.
