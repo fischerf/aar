@@ -25,6 +25,7 @@ MarkdownStream approach: all content lives in one unified scroll container.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -66,6 +67,7 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
+from agent.transports.keybinds import KeyBinds
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
@@ -495,16 +497,15 @@ class FixedTUIRenderer:
 
 
 # ---------------------------------------------------------------------------
-# TerminalModal — interactive shell modal (Ctrl+P)
+# TerminalModal — command terminal modal (default: Ctrl+P)
 # ---------------------------------------------------------------------------
 
 
 class TerminalModal(ModalScreen):
-    """A modal overlay providing a simple interactive shell terminal."""
+    """A modal overlay providing a simple interactive shell / command terminal."""
 
     BINDINGS = [
-        Binding("ctrl+p", "close_terminal", "Close Terminal", show=False),
-        Binding("escape", "close_terminal", "Close Terminal", show=False),
+        Binding("escape", "close_terminal", "Close", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -540,16 +541,57 @@ class TerminalModal(ModalScreen):
     }
     """
 
+    def __init__(self, close_key: str = "ctrl+p") -> None:
+        self._close_key = close_key
+        # Each subprocess is independent, so `cd` must be tracked as state
+        # and forwarded as cwd= to every new subprocess.
+        self._cwd: "Path" = Path.cwd()
+        super().__init__()
+
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static("  Terminal Shell  (Esc or Ctrl+P to close)", id="terminal-title")
+            yield Static("  Terminal  (Esc to close)", id="terminal-title")
             yield RichLog(id="terminal-output", markup=True, highlight=False)
             yield Input(placeholder="$ ...", id="terminal-input")
 
     def on_mount(self) -> None:
         self.query_one("#terminal-input", Input).focus()
         output = self.query_one("#terminal-output", RichLog)
-        output.write("[dim]Shell ready. Type commands and press Enter. Type 'exit' to close.[/dim]")
+        output.write(f"[dim]cwd: {self._cwd}[/dim]")
+        output.write("[dim]Type commands and press Enter.  'exit' to close.[/dim]")
+
+    async def _on_key(self, event: object) -> None:
+        """Close the terminal when the configured terminal key is pressed."""
+        if getattr(event, "key", "") == self._close_key:
+            self.dismiss()
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+
+    def _handle_cd(self, cmd: str, output: "RichLog") -> None:
+        """Handle the ``cd`` built-in by updating ``self._cwd``.
+
+        ``cd`` is a shell built-in that only affects the shell process that
+        runs it.  Because every command here spawns a *fresh* subprocess, a
+        bare ``cd`` would evaporate the moment the subprocess exits.  We
+        therefore intercept ``cd`` ourselves, update ``self._cwd``, and pass
+        that directory as ``cwd=`` to every future subprocess.
+        """
+        raw = cmd[2:].strip() if cmd.startswith("cd") and len(cmd) > 2 else ""
+        if not raw or raw == "~":
+            target = Path.home()
+        else:
+            # Strip optional surrounding quotes
+            target = Path(raw.strip("'\"")).expanduser()
+            if not target.is_absolute():
+                target = self._cwd / target
+        resolved = target.resolve()
+        if resolved.is_dir():
+            self._cwd = resolved
+            output.write(f"[dim]{self._cwd}[/dim]")
+        else:
+            output.write(f"[red]cd: {raw}: No such file or directory[/red]")
 
     async def on_input_submitted(self, event: "Input.Submitted") -> None:
         """Run the shell command and display output."""
@@ -560,15 +602,24 @@ class TerminalModal(ModalScreen):
             inp.focus()
             return
         output = self.query_one("#terminal-output", RichLog)
-        output.write(f"[bold yellow]$ {cmd}[/bold yellow]")
+        output.write(f"[bold yellow]{self._cwd}$ {cmd}[/bold yellow]")
+
         if cmd in ("exit", "quit", "close"):
             self.dismiss()
             return
+
+        # Handle `cd` as a built-in so the working directory persists across commands.
+        if cmd == "cd" or cmd.startswith("cd ") or cmd.startswith("cd\t"):
+            self._handle_cd(cmd, output)
+            inp.focus()
+            return
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                cwd=self._cwd,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
             text = stdout.decode("utf-8", errors="replace") if stdout else ""
@@ -595,14 +646,23 @@ class TerminalModal(ModalScreen):
 class AarFixedApp(App):
     """Full-screen Textual application for the Textual TUI mode."""
 
+    # Class-level BINDINGS with stable IDs so set_keymap() can remap them
+    # from keybinds.json at startup.  Priority is preserved through remapping.
     BINDINGS = [
-        Binding("pageup", "scroll_up", "Page Up", show=False),
-        Binding("pagedown", "scroll_down", "Page Down", show=False),
-        Binding("ctrl+x", "cancel_agent", "Cancel agent", show=False, priority=True),
-        Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False),
-        Binding("ctrl+k", "toggle_thinking", "Toggle thinking", show=False, priority=True),
-        Binding("ctrl+l", "clear_screen", "Clear screen", show=False),
-        Binding("ctrl+p", "toggle_terminal", "Terminal", show=False),
+        Binding("pageup", "scroll_up", "Page Up", show=False, id="aar-scroll-up"),
+        Binding("pagedown", "scroll_down", "Page Down", show=False, id="aar-scroll-down"),
+        Binding("ctrl+x", "cancel_agent", "Cancel", show=False, priority=True, id="aar-cancel"),
+        Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False, id="aar-cycle-theme"),
+        Binding(
+            "ctrl+k",
+            "toggle_thinking",
+            "Toggle thinking",
+            show=False,
+            priority=True,
+            id="aar-toggle-thinking",
+        ),
+        Binding("ctrl+l", "clear_screen", "Clear screen", show=False, id="aar-clear-screen"),
+        Binding("ctrl+p", "toggle_terminal", "Terminal", show=False, id="aar-terminal"),
     ]
 
     CSS = """
@@ -643,6 +703,7 @@ class AarFixedApp(App):
         registry: ThemeRegistry | None = None,
         verbose: bool = False,
         session_id: str | None = None,
+        keybinds: KeyBinds | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
@@ -656,6 +717,7 @@ class AarFixedApp(App):
         self._store = SessionStore(config.session_dir)
         self._renderer: FixedTUIRenderer | None = renderer
         self._cancel_event: asyncio.Event | None = None
+        self._keybinds: KeyBinds = keybinds if keybinds is not None else KeyBinds()
 
     # ------------------------------------------------------------------
     # Compose the widget tree from theme layout config
@@ -694,14 +756,20 @@ class AarFixedApp(App):
                     self._theme.footer.separator.style,
                     self._theme.footer.separator.character,
                 ),
-                HistoryTextArea(id="user-input", show_line_numbers=False),
+                HistoryTextArea(
+                    id="user-input",
+                    show_line_numbers=False,
+                    send_key=self._keybinds.send.key,
+                    history_prev_key=self._keybinds.history_prev.key,
+                    history_next_key=self._keybinds.history_next.key,
+                ),
             ],
             "footer": lambda: [
                 SeparatorBar(
                     self._theme.footer.separator.style,
                     self._theme.footer.separator.character,
                 ),
-                FooterBar(self._theme),
+                FooterBar(self._theme, self._keybinds),
             ],
         }
 
@@ -730,6 +798,32 @@ class AarFixedApp(App):
         return _approval
 
     def on_mount(self) -> None:
+        # ------------------------------------------------------------------
+        # Remap BINDINGS keys from keybinds.json via Textual's keymap API.
+        # This preserves priority=True on the class-level Binding definitions
+        # while still honouring the user's configured key strings.
+        # ------------------------------------------------------------------
+        kb = self._keybinds
+
+        # Warn about any bindings that look invalid or unsupported.
+        import logging as _logging
+
+        _tui_log = _logging.getLogger(__name__)
+        for field_name, warning in kb.validate_all():
+            _tui_log.warning("keybind '%s': %s", field_name, warning)
+
+        self.set_keymap(
+            {
+                "aar-scroll-up": kb.scroll_up.key,
+                "aar-scroll-down": kb.scroll_down.key,
+                "aar-cancel": kb.cancel.key,
+                "aar-cycle-theme": kb.cycle_theme.key,
+                "aar-toggle-thinking": kb.toggle_thinking.key,
+                "aar-clear-screen": kb.clear_screen.key,
+                "aar-terminal": kb.terminal.key,
+            }
+        )
+
         chat_body = self.query_one("#chat-body", ChatBody)
         thinking_panel = self.query_one(ThinkingPanel)
         header = self.query_one(HeaderBar)
@@ -996,12 +1090,12 @@ class AarFixedApp(App):
                 break
 
     async def action_toggle_terminal(self) -> None:
-        """Ctrl+P — open/close the interactive terminal shell modal."""
+        """Open/close the command terminal modal (default: Ctrl+P)."""
         for screen in self.screen_stack:
             if isinstance(screen, TerminalModal):
                 self.pop_screen()
                 return
-        await self.push_screen(TerminalModal())
+        await self.push_screen(TerminalModal(close_key=self._keybinds.terminal.key))
 
     # ------------------------------------------------------------------
     # Input handling
@@ -1229,6 +1323,8 @@ async def run_tui_fixed(
         LayoutConfig.model_validate(config.tui.layout) if config.tui.layout else LayoutConfig()
     )
 
+    keybinds = KeyBinds.load()
+
     agent = agent or Agent(config=config)
 
     app = AarFixedApp(
@@ -1239,5 +1335,6 @@ async def run_tui_fixed(
         registry=registry,
         verbose=verbose,
         session_id=session_id,
+        keybinds=keybinds,
     )
     await app.run_async()

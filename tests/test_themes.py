@@ -19,6 +19,7 @@ from agent.core.events import (
     ToolCall,
     ToolResult,
 )
+from agent.transports.keybinds import KeyBind, KeyBinds
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
     BUILTIN_THEMES,
@@ -824,16 +825,43 @@ class TestHeaderBarThinking:
 
 
 class TestFooterBarKeyHints:
-    def test_footer_shows_keybindings(self) -> None:
+    def test_footer_shows_default_keybindings(self) -> None:
+        """Default keybinds produce the expected Ctrl+? labels."""
+        bar = FooterBar(DEFAULT_THEME)  # keybinds=None → defaults
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "Ctrl+S" in plain  # send
+        assert "Ctrl+X" in plain  # cancel
+        assert "Ctrl+T" in plain  # cycle_theme
+        assert "Ctrl+K" in plain  # toggle_thinking
+        assert "Ctrl+L" in plain  # clear_screen
+        assert "Ctrl+P" in plain  # terminal
+        assert "Ctrl+Q" in plain  # exit (always present)
+
+    def test_footer_shows_terminal_label(self) -> None:
+        """The terminal action label is 'terminal' by default."""
         bar = FooterBar(DEFAULT_THEME)
         rendered = bar.render()
         plain = rendered.plain
-        assert "Ctrl+T" in plain
-        assert "Ctrl+K" in plain
-        assert "Ctrl+L" in plain
-        assert "Ctrl+X" in plain
-        assert "Ctrl+P" in plain
-        assert "Ctrl+Q" in plain
+        assert "terminal" in plain
+
+    def test_footer_label_customisable(self) -> None:
+        """A custom label on a KeyBind is shown in the footer."""
+        kb = KeyBinds(terminal=KeyBind(key="ctrl+p", label="palette"))
+        bar = FooterBar(DEFAULT_THEME, keybinds=kb)
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "palette" in plain
+
+    def test_footer_reflects_custom_keybinds(self) -> None:
+        """Overriding a key in KeyBinds is reflected in the footer."""
+        kb = KeyBinds(send="ctrl+m", terminal="ctrl+g")
+        bar = FooterBar(DEFAULT_THEME, keybinds=kb)
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "Ctrl+M" in plain  # custom send key
+        assert "Ctrl+G" in plain  # custom terminal key
+        assert "Ctrl+S" not in plain  # default send should be absent
 
 
 # ------------------------------------------------------------------
@@ -846,9 +874,8 @@ class TestWelcomeShortcuts:
         renderer, log = _fixed_renderer()
         renderer.render_welcome()
         output = log.rendered_text()
-        assert "Ctrl+T" in output
-        assert "Ctrl+K" in output
-        assert "input history" in output
+        assert "Aar Agent TUI (Textual)" in output
+        assert "Ctrl+S" in output  # send key shown in welcome text
 
 
 # ------------------------------------------------------------------

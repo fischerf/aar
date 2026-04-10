@@ -17,6 +17,7 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from agent.safety.permissions import ApprovalResult
+from agent.transports.keybinds import KeyBinds
 from agent.transports.themes.models import Theme
 
 
@@ -94,31 +95,42 @@ class FooterBar(Static):
     }
     """
 
-    def __init__(self, theme: Theme) -> None:
+    def __init__(self, theme: Theme, keybinds: KeyBinds | None = None) -> None:
         super().__init__()
         self.theme = theme
         self.step_count: int = 0
         self.theme_name: str = theme.name
+        self._keybinds = keybinds if keybinds is not None else KeyBinds()
 
     def render(self) -> Text:  # type: ignore[override]
         f = self.theme.footer
+        kb = self._keybinds
+
+        def fmt_key(k: str) -> str:
+            """Format a Textual key string as a display label, e.g. 'ctrl+s' → 'Ctrl+S'."""
+            return "+".join(part.capitalize() for part in k.split("+"))
+
+        def lbl(bind_label: str, fallback: str) -> str:
+            """Return the configured label, or *fallback* if the label is empty."""
+            return f" {bind_label if bind_label else fallback}  "
+
         return Text.assemble(
             (f"step: {self.step_count}", f.step_style),
             ("  |  ", f.separator_style),
             (f"theme: {self.theme_name}", f.theme_style),
             ("  |  ", f.separator_style),
-            ("Ctrl+S", f.step_style),
-            (" send  ", f.separator_style),
-            ("Ctrl+X", f.step_style),
-            (" cancel  ", f.separator_style),
-            ("Ctrl+T", f.step_style),
-            (" theme  ", f.separator_style),
-            ("Ctrl+K", f.step_style),
-            (" think display  ", f.separator_style),
-            ("Ctrl+L", f.step_style),
-            (" clear  ", f.separator_style),
-            ("Ctrl+P", f.step_style),
-            (" terminal  ", f.separator_style),
+            (fmt_key(kb.send.key), f.step_style),
+            (lbl(kb.send.label, "send"), f.separator_style),
+            (fmt_key(kb.cancel.key), f.step_style),
+            (lbl(kb.cancel.label, "cancel"), f.separator_style),
+            (fmt_key(kb.cycle_theme.key), f.step_style),
+            (lbl(kb.cycle_theme.label, "theme"), f.separator_style),
+            (fmt_key(kb.toggle_thinking.key), f.step_style),
+            (lbl(kb.toggle_thinking.label, "think"), f.separator_style),
+            (fmt_key(kb.clear_screen.key), f.step_style),
+            (lbl(kb.clear_screen.label, "clear"), f.separator_style),
+            (fmt_key(kb.terminal.key), f.step_style),
+            (lbl(kb.terminal.label, "terminal"), f.separator_style),
             ("Ctrl+Q", f.step_style),
             (" exit", f.separator_style),
         )

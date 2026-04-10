@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 try:
-    from textual.binding import Binding
     from textual.message import Message
     from textual.widgets import Input, TextArea
 except ImportError as exc:  # pragma: no cover
@@ -101,11 +100,17 @@ class HistoryTextArea(TextArea):
             self.textarea = textarea
             self.value = value
 
-    BINDINGS = [
-        Binding("ctrl+s", "submit_message", "Send", show=False, priority=True),
-    ]
-
-    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+    def __init__(
+        self,
+        *args,
+        send_key: str = "ctrl+s",
+        history_prev_key: str = "ctrl+up",
+        history_next_key: str = "ctrl+down",
+        **kwargs,
+    ) -> None:
+        self._send_key = send_key
+        self._history_prev_key = history_prev_key
+        self._history_next_key = history_next_key
         self._history: list[str] = []
         self._history_index: int = -1
         self._draft: str = ""
@@ -140,9 +145,15 @@ class HistoryTextArea(TextArea):
         self._draft = ""
 
     async def _on_key(self, event: object) -> None:
-        """Handle ctrl+up/down for history navigation."""
+        """Handle send key and history navigation."""
         key = getattr(event, "key", "")
-        if key == "ctrl+up":
+        if key == self._send_key:
+            self.action_submit_message()
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+        elif key == self._history_prev_key:
             if not self._history:
                 return
             if self._history_index == -1:
@@ -155,7 +166,7 @@ class HistoryTextArea(TextArea):
                 event.prevent_default()  # type: ignore[union-attr]
             if hasattr(event, "stop"):
                 event.stop()  # type: ignore[union-attr]
-        elif key == "ctrl+down":
+        elif key == self._history_next_key:
             if self._history_index == -1:
                 return
             if self._history_index < len(self._history) - 1:
