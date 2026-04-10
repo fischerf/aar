@@ -24,7 +24,44 @@ At the very start of every session, before doing any work:
    git rev-parse --is-inside-work-tree 2>/dev/null
    ```
 
-2. **If it IS a Git repo**, check whether any branches exist:
+2. **If it IS a Git repo**, immediately run **GIT STATE RECONNAISSANCE** —
+   before creating any branch or doing any other work:
+
+   **a. Identify the current branch and all prior Aar session branches:**
+   ```bash
+   git branch --show-current
+   git branch --list 'aar/session-*' --sort=-committerdate
+   ```
+
+   **b. For every `aar/session-*` branch found, inspect its tip and history:**
+   ```bash
+   git log --oneline -5 <branch>
+   ```
+
+   **c. Classify the situation and report it to the user before continuing:**
+
+   | Situation | What you found | What to say |
+   |---|---|---|
+   | **No prior sessions** | No `aar/session-*` branches | "No previous Aar sessions found. Starting fresh." |
+   | **One prior session** | Exactly one `aar/session-*` branch | "Found prior session `<branch>` (last commit: `<hash> <msg>`). Resume it or start a new session?" |
+   | **Multiple sessions or forks** | Several `aar/session-*` branches | List each branch name with its tip commit and timestamp. Ask the user which one to resume, or whether to start fresh. |
+
+   **d. If resuming a prior session**, check it out and reconstruct state:
+   ```bash
+   git checkout aar/session-<SESSION_ID>
+   git log --oneline aar/session-<SESSION_ID>
+   ```
+   Rebuild your internal checkpoint trail from the log output — each
+   `aar-auto:` commit is one turn checkpoint. Set your turn counter to
+   `N + 1` where `N` is the number of `aar-auto:` commits already on the
+   branch. Also identify the original base branch (the commit where this
+   session branch diverged) so `/done` can merge back correctly. Then
+   **skip steps 3 and 4 below** — the session is already initialized.
+
+   **e. If starting fresh**, proceed to step 3.
+
+3. **If it IS a Git repo and no prior session exists**, check whether any
+   branches exist at all:
    ```bash
    git branch --list
    ```
@@ -41,7 +78,7 @@ At the very start of every session, before doing any work:
    Record the branch name and the starting commit hash. You will use these
    throughout the session.
 
-3. **If it is NOT a Git repo**, initialize a fallback snapshot store:
+4. **If it is NOT a Git repo**, initialize a fallback snapshot store:
    ```bash
    mkdir -p .aar_backups
    ```
