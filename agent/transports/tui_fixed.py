@@ -38,6 +38,7 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
+    from textual.containers import Horizontal
     from textual.widgets import Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -92,6 +93,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput  # noqa: F401
+from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # FixedTUIRenderer — routes agent events to the appropriate widgets
@@ -113,6 +115,7 @@ class FixedTUIRenderer:
         footer: FooterBar,
         log: "RichLog | SelectableRichLog | None" = None,
         chat_body: ChatBody | None = None,
+        thinking_panel: "ThinkingPanel | None" = None,
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
@@ -120,6 +123,7 @@ class FixedTUIRenderer:
     ) -> None:
         self._log = log
         self._chat_body = chat_body
+        self._thinking_panel: ThinkingPanel | None = thinking_panel
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -133,6 +137,7 @@ class FixedTUIRenderer:
         self._config: AgentConfig | None = config
         self._streaming_active = False
         self._stream_in_reasoning = False
+        self._panel_thinking_active: bool = False  # True while a step's reasoning is streaming
         # Live streaming widget references (app mode only)
         self._current_thinking: ThinkingBlock | None = None
         self._current_answer: AnswerBlock | None = None
@@ -171,6 +176,8 @@ class FixedTUIRenderer:
         self._header.theme = theme
         self._footer.theme = theme
         self._footer.theme_name = theme.name
+        if self._thinking_panel is not None:
+            self._thinking_panel.apply_theme(theme, theme.fixed_layout.thinking_panel)
         app.apply_theme(theme)
         self._write(
             Text(f"Switched to theme: {theme.name}", style=theme.dim_text),
@@ -195,14 +202,16 @@ class FixedTUIRenderer:
     # ------------------------------------------------------------------
 
     def toggle_thinking(self) -> bool:
-        """Toggle reasoning block visibility. Returns the new state."""
+        """Toggle the thinking side panel. Returns the new visibility state."""
         self._thinking_visible = not self._thinking_visible
         self._header.thinking_enabled = self._thinking_visible
         self._header.refresh()
-        label = "enabled" if self._thinking_visible else "disabled"
+        if self._thinking_panel is not None:
+            self._thinking_panel.styles.display = "block" if self._thinking_visible else "none"
+        label = "shown" if self._thinking_visible else "hidden"
         self._write(
-            Text(f"Thinking display {label}", style=self.theme.dim_text),
-            raw=f"Thinking display {label}",
+            Text(f"Thinking panel {label}", style=self.theme.dim_text),
+            raw=f"Thinking panel {label}",
             kind="system",
         )
         return self._thinking_visible
@@ -217,7 +226,7 @@ class FixedTUIRenderer:
 
         # --- Streaming tokens -------------------------------------------------
         if isinstance(event, StreamChunk):
-            if event.reasoning_text and self._thinking_visible:
+            if event.reasoning_text:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
@@ -226,10 +235,18 @@ class FixedTUIRenderer:
                         self._header.update(self._header.render())
                     except Exception:
                         self._header.refresh()
-                if self._current_thinking is None:
-                    self._current_thinking = ThinkingBlock(self.theme)
-                    self._mount_streaming(self._current_thinking)
-                self._current_thinking.append(event.reasoning_text)
+                if self._thinking_panel is not None:
+                    # Route reasoning to the side panel
+                    if not self._panel_thinking_active:
+                        self._panel_thinking_active = True
+                        self._thinking_panel.begin_step(self._step_count + 1)
+                    self._thinking_panel.append(event.reasoning_text)
+                elif self._thinking_visible:
+                    # Fallback: no panel — stream inline to chat body (test mode)
+                    if self._current_thinking is None:
+                        self._current_thinking = ThinkingBlock(self.theme)
+                        self._mount_streaming(self._current_thinking)
+                    self._current_thinking.append(event.reasoning_text)
 
             if event.text:
                 if not self._streaming_active:
@@ -241,8 +258,8 @@ class FixedTUIRenderer:
                         self._header.refresh()
                 if self._stream_in_reasoning:
                     self._stream_in_reasoning = False
-                    # Finalize thinking title so it no longer shows "..."
-                    if self._current_thinking is not None:
+                    # Finalize inline thinking block if panel is not in use
+                    if self._thinking_panel is None and self._current_thinking is not None:
                         self._current_thinking.finalize()
                 if self._current_answer is None:
                     self._current_answer = AnswerBlock(self.theme)
@@ -251,8 +268,13 @@ class FixedTUIRenderer:
 
             if event.finished:
                 self._stream_in_reasoning = False
-                if self._current_thinking is not None:
+                if self._thinking_panel is not None:
+                    if self._panel_thinking_active:
+                        self._thinking_panel.finalize_step()
+                        self._panel_thinking_active = False
+                elif self._current_thinking is not None:
                     self._current_thinking.finalize()
+                    self._current_thinking = None
                 # _streaming_active stays True until AssistantMessage arrives
                 # so we know to finalize (not re-create) the answer block.
                 self._header.streaming = False
@@ -271,9 +293,14 @@ class FixedTUIRenderer:
                 if self._current_answer is not None:
                     self._current_answer.finalize(event.content)
                     self._current_answer = None
+                # Fallback: finalize inline thinking block if panel is not in use
                 if self._current_thinking is not None:
                     self._current_thinking.finalize()
                     self._current_thinking = None
+                # Panel: finalize if still active (e.g. reasoning-only response)
+                if self._thinking_panel is not None and self._panel_thinking_active:
+                    self._thinking_panel.finalize_step()
+                    self._panel_thinking_active = False
             else:
                 # No streaming (e.g. non-streaming provider): write static block.
                 if not self.layout.assistant.visible:
@@ -352,21 +379,28 @@ class FixedTUIRenderer:
 
         # --- Reasoning block (non-streaming) ----------------------------------
         elif isinstance(event, ReasoningBlock) and event.content:
-            if not self.layout.reasoning.visible or not self._thinking_visible:
+            if not self.layout.reasoning.visible:
                 return
             text = event.content
-            if len(text) > 500:
-                text = text[:500] + "..."
-            self._write(
-                Panel(
-                    Text(text, style=f"italic {t.reasoning.border_style}"),
-                    title=f"[{t.reasoning.title_style}]Thinking[/]",
-                    border_style=t.reasoning.border_style,
-                    padding=t.reasoning.padding,
-                ),
-                raw=text,
-                kind="reasoning",
-            )
+            if self._thinking_panel is not None:
+                # Route to the side panel — no truncation needed there
+                self._thinking_panel.add_static_block(text, self._step_count + 1)
+            else:
+                # Fallback: write inline to chat body (test mode or panel-less mode)
+                if not self._thinking_visible:
+                    return
+                if len(text) > 500:
+                    text = text[:500] + "..."
+                self._write(
+                    Panel(
+                        Text(text, style=f"italic {t.reasoning.border_style}"),
+                        title=f"[{t.reasoning.title_style}]Thinking[/]",
+                        border_style=t.reasoning.border_style,
+                        padding=t.reasoning.padding,
+                    ),
+                    raw=text,
+                    kind="reasoning",
+                )
 
         # --- Error ------------------------------------------------------------
         elif isinstance(event, ErrorEvent):
@@ -452,7 +486,7 @@ class FixedTUIRenderer:
             "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
             "[bold]Shortcuts:[/]\n"
             "  [bold]Ctrl+T[/]  cycle theme    "
-            "[bold]Ctrl+K[/]  toggle thinking display\n"
+            "  [bold]Ctrl+K[/]  toggle thinking panel\n"
             "  [bold]Ctrl+L[/]  clear screen   "
             "[bold]Ctrl+Y[/]  copy block (raw text)\n"
             "  [bold]↑ / ↓[/]   input history  "
@@ -489,8 +523,17 @@ class AarFixedApp(App):
     Screen {
         layout: vertical;
     }
+    #body-split {
+        height: 1fr;
+        width: 100%;
+    }
     #chat-body {
+        width: 1fr;
+        height: 100%;
         min-height: 4;
+    }
+    ThinkingPanel {
+        height: 100%;
     }
     #input-sep {
         height: 1;
@@ -532,6 +575,17 @@ class AarFixedApp(App):
     # Compose the widget tree from theme layout config
     # ------------------------------------------------------------------
 
+    def _make_body_split(self) -> Horizontal:
+        """Build the horizontal body container: ChatBody + ThinkingPanel side by side."""
+        tp_cfg = self._theme.fixed_layout.thinking_panel
+        panel = ThinkingPanel(self._theme, tp_cfg)
+        if tp_cfg.side == "left":
+            panel.add_class("_left_side")
+        body = ChatBody(id="chat-body")
+        if tp_cfg.side == "left":
+            return Horizontal(panel, body, id="body-split")
+        return Horizontal(body, panel, id="body-split")
+
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
 
@@ -547,9 +601,7 @@ class AarFixedApp(App):
                     self._theme.header.separator.character,
                 ),
             ],
-            "body": lambda: [
-                ChatBody(id="chat-body"),
-            ],
+            "body": lambda: [self._make_body_split()],
             "input": lambda: [
                 ApprovalBar(),
                 SeparatorBar(
@@ -593,6 +645,7 @@ class AarFixedApp(App):
 
     def on_mount(self) -> None:
         chat_body = self.query_one("#chat-body", ChatBody)
+        thinking_panel = self.query_one(ThinkingPanel)
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
 
@@ -605,6 +658,7 @@ class AarFixedApp(App):
 
         self._renderer = FixedTUIRenderer(
             chat_body=chat_body,
+            thinking_panel=thinking_panel,
             header=header,
             footer=footer,
             verbose=self._verbose,
@@ -614,6 +668,31 @@ class AarFixedApp(App):
         )
 
         self._agent.on_event(self._renderer.render_event)
+
+        # Apply thinking panel styles from theme
+        tp_cfg = fl.thinking_panel
+        thinking_panel.styles.background = tp_cfg.background
+        thinking_panel.styles.width = tp_cfg.width
+        sb = tp_cfg.scrollbar
+        thinking_panel.styles.scrollbar_color = sb.color
+        thinking_panel.styles.scrollbar_color_hover = sb.color_hover
+        thinking_panel.styles.scrollbar_color_active = sb.color_active
+        thinking_panel.styles.scrollbar_background = sb.background
+        thinking_panel.styles.scrollbar_background_hover = sb.background_hover
+        thinking_panel.styles.scrollbar_background_active = sb.background_active
+        thinking_panel.styles.scrollbar_size_vertical = sb.size
+        border_color = tp_cfg.border_style
+        if tp_cfg.side == "left":
+            thinking_panel.styles.border_right = ("solid", border_color)
+            thinking_panel.styles.border_left = None
+        else:
+            thinking_panel.styles.border_left = ("solid", border_color)
+            thinking_panel.styles.border_right = None
+        # Start hidden if not enabled in theme config
+        if not tp_cfg.enabled:
+            thinking_panel.styles.display = "none"
+            self._renderer._thinking_visible = False
+            self._renderer._header.thinking_enabled = False
 
         approval_cb = self._make_approval_callback()
         if hasattr(self._agent, "executor") and hasattr(self._agent.executor, "permissions"):
@@ -729,6 +808,16 @@ class AarFixedApp(App):
         except Exception:
             pass
 
+        # Thinking panel
+        try:
+            panel = self.query_one(ThinkingPanel)
+            panel.apply_theme(theme, theme.fixed_layout.thinking_panel)
+            # Preserve current visibility state
+            if self._renderer and not self._renderer._thinking_visible:
+                panel.styles.display = "none"
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Key binding actions
     # ------------------------------------------------------------------
@@ -780,6 +869,13 @@ class AarFixedApp(App):
         self._renderer._stream_in_reasoning = False
         self._renderer._current_thinking = None
         self._renderer._current_answer = None
+        self._renderer._panel_thinking_active = False
+        # Clear the thinking panel
+        try:
+            thinking_panel = self.query_one(ThinkingPanel)
+            await thinking_panel.clear_log()
+        except Exception:
+            pass
         self._renderer.render_welcome()
 
     async def action_cancel_agent(self) -> None:
