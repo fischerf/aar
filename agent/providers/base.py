@@ -29,6 +29,7 @@ class StreamDelta:
     tool_call_delta: dict[str, Any] | None = None
     reasoning_delta: str = ""
     done: bool = False
+    meta: ProviderMeta | None = None
 
 
 @dataclass

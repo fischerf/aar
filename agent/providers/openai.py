@@ -151,6 +151,7 @@ class OpenAIProvider(Provider):
             "model": self.config.model,
             "messages": api_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
 
         if tools:
@@ -174,10 +175,19 @@ class OpenAIProvider(Provider):
 
         # Accumulators for tool call fragments
         tool_acc: dict[int, dict[str, str]] = {}
+        stream_usage: dict[str, int] = {}
 
         stream_resp = await self._client.chat.completions.create(**kwargs)
 
         async for chunk in stream_resp:
+            # Capture usage from the final chunk (when stream_options.include_usage=True)
+            if hasattr(chunk, "usage") and chunk.usage:
+                stream_usage = {
+                    "input_tokens": chunk.usage.prompt_tokens or 0,
+                    "output_tokens": chunk.usage.completion_tokens or 0,
+                    "total_tokens": chunk.usage.total_tokens or 0,
+                }
+
             if not chunk.choices:
                 continue
 
@@ -216,11 +226,16 @@ class OpenAIProvider(Provider):
                             "arguments": parsed_args,
                         }
                     )
-                yield StreamDelta(done=True)
-                return
 
-        # Fallback sentinel
-        yield StreamDelta(done=True)
+        # Build meta from captured usage (arrives after finish_reason)
+        stream_meta: ProviderMeta | None = None
+        if stream_usage:
+            stream_meta = ProviderMeta(
+                provider="openai",
+                model=self.config.model,
+                usage=stream_usage,
+            )
+        yield StreamDelta(done=True, meta=stream_meta)
 
 
 def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:

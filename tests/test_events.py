@@ -254,6 +254,7 @@ class TestStopReason:
             "max_tokens",
             "timeout",
             "max_steps",
+            "budget_exceeded",
             "cancelled",
             "error",
         }

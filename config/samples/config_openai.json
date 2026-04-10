@@ -1,20 +1,10 @@
 {
   "provider": {
-    "name": "ollama",
-    "model": "gemma4:e4b",
-    "base_url": "http://localhost:11434",
-    "temperature": 1.0,
+    "name": "openai",
+    "model": "gpt-5.4-mini",
+    "temperature": 0.0,
     "max_tokens": 8192,
-    "extra": {
-      "num_ctx": 32768,
-      "top_p": 0.95,
-      "top_k": 64,
-      "min_p": 0.0,
-      "supports_reasoning": true,
-      "supports_tools": true,
-      "supports_vision": true,
-      "keep_alive": "10m"
-    }
+    "extra": {}
   },
   "tools": {
     "enabled_builtins": [
@@ -25,7 +15,7 @@
       "bash"
     ],
     "allowed_paths": [],
-    "command_timeout": 80,
+    "command_timeout": 30,
     "max_output_chars": 50000
   },
   "safety": {
@@ -65,26 +55,18 @@
     "log_all_commands": true
   },
   "tui": {
-    "theme": "",
-    "layout": {
-      "reasoning": { "visible": false },
-      "token_usage": { "visible": true },
-      "welcome": { "visible": true },
-      "extensions": {
-        "metrics": { "visible": true },
-        "custom_panel": { "visible": false }
-      }
-    }
+    "theme": "default",
+    "layout": {}
   },
-  "max_steps": 150,
+  "max_steps": 50,
   "max_tokens_per_turn": 8192,
-  "timeout": 500.0,
+  "timeout": 300.0,
   "max_retries": 3,
   "streaming": true,
-  "context_window": 32768,
+  "context_window": 200000,
   "context_strategy": "sliding_window",
-  "token_budget": 0,
-  "cost_limit": 0.0,
+  "token_budget": 500000,
+  "cost_limit": 5.0,
   "token_warning_threshold": 0.8,
   "cost_warning_threshold": 0.8,
   "session_dir": ".agent/sessions",

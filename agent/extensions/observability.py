@@ -33,6 +33,7 @@ class StepMetrics:
     tool_calls: list[ToolCallMetrics] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    cost: float = 0.0
 
     @property
     def total_tool_duration_ms(self) -> float:
@@ -52,6 +53,7 @@ class SessionMetrics:
     total_output_tokens: int = 0
     total_provider_duration_ms: float = 0.0
     total_tool_duration_ms: float = 0.0
+    total_cost: float = 0.0
     steps: list[StepMetrics] = field(default_factory=list)
 
     @property
@@ -90,6 +92,16 @@ def session_metrics(session: Session) -> SessionMetrics:
             metrics.total_input_tokens += current_step.input_tokens
             metrics.total_output_tokens += current_step.output_tokens
 
+            # Calculate cost for this step
+            from agent.core.tokens import TokenUsage, calculate_cost, get_pricing
+
+            usage_obj = TokenUsage.from_dict(event.usage)
+            pricing = get_pricing(event.model)
+            if pricing:
+                step_cost = calculate_cost(usage_obj, pricing)
+                current_step.cost = step_cost
+                metrics.total_cost += step_cost
+
         elif isinstance(event, ToolCall):
             metrics.total_tool_calls += 1
             pending_tool_names[event.tool_call_id] = event.tool_name
@@ -99,11 +111,13 @@ def session_metrics(session: Session) -> SessionMetrics:
             if event.is_error:
                 metrics.total_errors += 1
             if current_step is not None:
-                current_step.tool_calls.append(ToolCallMetrics(
-                    tool_name=event.tool_name,
-                    duration_ms=event.duration_ms,
-                    is_error=event.is_error,
-                ))
+                current_step.tool_calls.append(
+                    ToolCallMetrics(
+                        tool_name=event.tool_name,
+                        duration_ms=event.duration_ms,
+                        is_error=event.is_error,
+                    )
+                )
 
         elif isinstance(event, ErrorEvent):
             metrics.total_errors += 1

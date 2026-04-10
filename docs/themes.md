@@ -221,7 +221,7 @@ Layout controls which TUI sections are visible. Configure it in `~/.aar/config.j
 | `assistant` | Assistant message panels | visible |
 | `tool_call` | Tool invocation panels | visible |
 | `tool_result` | Tool output panels | visible |
-| `token_usage` | Token count display | visible |
+| `token_usage` | Per-turn token count line in the conversation body (default visible). In `tui --fixed` the header always shows cumulative counts regardless of this setting. | visible |
 
 Each section accepts:
 
@@ -267,7 +267,7 @@ Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io
 - **Command history** — press **↑ / ↓** to cycle through previous inputs
 - **Block selection** — left-click a block to highlight it; right-click to copy raw text and deselect
 - **Ctrl+Y** copies the selected (or last) block's raw text (markdown) to clipboard
-- **Fixed header** showing provider/model, token counts, session ID, agent state, thinking status
+- **Fixed header** showing provider/model, token counts (cumulative; updates after each response), session ID, agent state / streaming indicator, thinking status
 - **Fixed footer** showing step count, theme name, and keyboard shortcut hints
 - **Configurable layout** — reorder, resize, or hide regions per theme
 
@@ -333,7 +333,9 @@ All `/theme`, `/status`, `/tools`, `/policy`, `/clear`, and `/quit` commands wor
 | `provider_style` | Provider and model name |
 | `tokens_style` | Token count display |
 | `session_style` | Session ID |
-| `state_style` | Agent state (idle, running, etc.) |
+| `state_style` | Agent state label — shows `idle`, `running`, `streaming…` (while streaming), `completed`, etc. |
+| `tokens_warning_style` | Token count display when warning threshold is crossed (default: `bold red`) |
+| `usage_warning_style` | Per-turn token line in `tui` mode when warning threshold is crossed (default: `bold red`) |
 
 ### Footer styles
 

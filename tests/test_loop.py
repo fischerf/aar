@@ -13,8 +13,8 @@ from agent.core.events import (
     EventType,
     ProviderMeta,
     ReasoningBlock,
-    StreamChunk,
     StopReason,
+    StreamChunk,
     ToolCall,
     ToolResult,
 )
@@ -23,9 +23,7 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.providers.base import ProviderResponse, StreamDelta
 from agent.tools.execution import ToolExecutor
-
 from tests.conftest import MockProvider, StreamingMockProvider
-
 
 # ---------------------------------------------------------------------------
 # Loop termination
@@ -545,6 +543,54 @@ async def test_agent_multiple_event_callbacks():
 
     assert len(collected_a) > 0
     assert len(collected_a) == len(collected_b)
+
+
+@pytest.mark.asyncio
+async def test_agent_event_callback_error_isolation():
+    """A failing callback must not prevent subsequent callbacks from firing."""
+    from agent.core.agent import Agent
+
+    collected: list = []
+
+    def bad_callback(event):
+        raise RuntimeError("boom")
+
+    provider = MockProvider()
+    provider.enqueue_text("Hello")
+
+    agent = Agent(
+        config=AgentConfig(provider=ProviderConfig(name="mock"), max_steps=5, timeout=10.0),
+        provider=provider,
+    )
+    agent.on_event(bad_callback)
+    agent.on_event(collected.append)
+
+    await agent.run("Hi")
+
+    # The second callback should still have received events despite the first one crashing
+    assert len(collected) > 0
+
+
+@pytest.mark.asyncio
+async def test_agent_off_event():
+    """off_event should remove a callback so it no longer fires."""
+    from agent.core.agent import Agent
+
+    collected: list = []
+
+    provider = MockProvider()
+    provider.enqueue_text("Hello")
+
+    agent = Agent(
+        config=AgentConfig(provider=ProviderConfig(name="mock"), max_steps=5, timeout=10.0),
+        provider=provider,
+    )
+    agent.on_event(collected.append)
+    agent.off_event(collected.append)
+
+    await agent.run("Hi")
+
+    assert len(collected) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -259,7 +259,18 @@ class OllamaProvider(Provider):
                                 "arguments": fn.get("arguments", {}),
                             }
                         )
-                    yield StreamDelta(done=True)
+                    # Build usage metadata from the final chunk
+                    usage: dict[str, int] = {}
+                    if "prompt_eval_count" in data:
+                        usage["input_tokens"] = data["prompt_eval_count"]
+                    if "eval_count" in data:
+                        usage["output_tokens"] = data["eval_count"]
+                    stream_meta = ProviderMeta(
+                        provider="ollama",
+                        model=data.get("model", self.config.model),
+                        usage=usage,
+                    )
+                    yield StreamDelta(done=True, meta=stream_meta)
                     return
 
         # Safety fallback

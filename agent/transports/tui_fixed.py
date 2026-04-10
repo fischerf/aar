@@ -25,7 +25,10 @@ MarkdownStream approach: all content lives in one unified scroll container.
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from agent.core.config import AgentConfig
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel
@@ -109,6 +112,7 @@ class FixedTUIRenderer:
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
+        config: "AgentConfig | None" = None,
     ) -> None:
         self._log = log
         self._chat_body = chat_body
@@ -116,11 +120,13 @@ class FixedTUIRenderer:
         self._footer = footer
         self._verbose = verbose
         self._usage_total: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self._total_cost: float = 0.0
         self._step_count = 0
         self.theme = theme or DEFAULT_THEME
         self.layout = layout or LayoutConfig()
         self._extension_panels: dict[str, Callable] = {}
         self._thinking_visible = True
+        self._config: AgentConfig | None = config
         self._streaming_active = False
         self._stream_in_reasoning = False
         # Live streaming widget references (app mode only)
@@ -211,6 +217,11 @@ class FixedTUIRenderer:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
+                    self._header.streaming = True
+                    try:
+                        self._header.update(self._header.render())
+                    except Exception:
+                        self._header.refresh()
                 if self._current_thinking is None:
                     self._current_thinking = ThinkingBlock(self.theme)
                     self._mount_streaming(self._current_thinking)
@@ -219,6 +230,11 @@ class FixedTUIRenderer:
             if event.text:
                 if not self._streaming_active:
                     self._streaming_active = True
+                    self._header.streaming = True
+                    try:
+                        self._header.update(self._header.render())
+                    except Exception:
+                        self._header.refresh()
                 if self._stream_in_reasoning:
                     self._stream_in_reasoning = False
                     # Finalize thinking title so it no longer shows "..."
@@ -235,6 +251,11 @@ class FixedTUIRenderer:
                     self._current_thinking.finalize()
                 # _streaming_active stays True until AssistantMessage arrives
                 # so we know to finalize (not re-create) the answer block.
+                self._header.streaming = False
+                try:
+                    self._header.update(self._header.render())
+                except Exception:
+                    self._header.refresh()
             return
 
         # --- Final assistant message ------------------------------------------
@@ -366,19 +387,51 @@ class FixedTUIRenderer:
             u = event.usage
             self._usage_total["input_tokens"] += u.get("input_tokens", 0)
             self._usage_total["output_tokens"] += u.get("output_tokens", 0)
-            self._header.update_tokens(u)
+
+            # Calculate step cost
+            from agent.core.tokens import TokenUsage, calculate_cost, get_pricing
+
+            usage_obj = TokenUsage.from_dict(u)
+            pricing = get_pricing(event.model)
+            step_cost = calculate_cost(usage_obj, pricing) if pricing else 0.0
+            self._total_cost += step_cost
+
+            # Check warning thresholds from config (if available via session)
+            from agent.transports.tui_utils.formatting import is_over_warning_threshold
+
+            warning = False
+            if self._config:
+                cfg = self._config
+                token_total = self._usage_total["input_tokens"] + self._usage_total["output_tokens"]
+                warning = is_over_warning_threshold(
+                    token_total, cfg.token_budget, cfg.token_warning_threshold
+                ) or is_over_warning_threshold(
+                    self._total_cost, cfg.cost_limit, cfg.cost_warning_threshold
+                )
+
+            # Update header bar and force content refresh
+            self._header.update_tokens(u, step_cost=step_cost, warning=warning)
             self._header.provider_name = event.provider
             self._header.model_name = event.model
-            self._header.refresh()
+            # Static.update() requires a running Textual app context.  In test
+            # mode (no app) we fall back to refresh() which is a no-op outside
+            # an active message pump.
+            try:
+                self._header.update(self._header.render())
+            except Exception:
+                self._header.refresh()
+
             if not self.layout.token_usage.visible:
                 return
+            from agent.transports.tui_utils.formatting import format_token_display
+
             usage_text = (
                 f"  {u.get('input_tokens', 0)}in / {u.get('output_tokens', 0)}out "
-                f"(total: {self._usage_total['input_tokens']}in"
-                f" / {self._usage_total['output_tokens']}out)"
+                f"(total: {format_token_display(self._usage_total['input_tokens'], self._usage_total['output_tokens'], self._total_cost)})"
             )
+            style = t.usage_warning_style if warning else t.usage_style
             self._write(
-                Text(usage_text, style=t.usage_style),
+                Text(usage_text, style=style),
                 raw=usage_text.strip(),
                 kind="usage",
             )
@@ -553,6 +606,7 @@ class AarFixedApp(App):
             verbose=self._verbose,
             theme=self._theme,
             layout=self._layout_config,
+            config=self._config,
         )
 
         self._agent.on_event(self._renderer.render_event)
@@ -712,6 +766,7 @@ class AarFixedApp(App):
         header.input_tokens = 0
         header.output_tokens = 0
         header.state = "idle"
+        header.streaming = False
         header.refresh()
         footer.step_count = 0
         footer.refresh()
@@ -746,6 +801,7 @@ class AarFixedApp(App):
                     )
                 try:
                     header = self.query_one(HeaderBar)
+                    header.streaming = False
                     header.state = "cancelled"
                     header.refresh()
                 except Exception:

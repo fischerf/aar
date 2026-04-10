@@ -39,6 +39,7 @@ class HeaderStyle(BaseModel):
     separator: SeparatorStyle = Field(default_factory=SeparatorStyle)
     provider_style: str = "bold cyan"
     tokens_style: str = "dim green"
+    tokens_warning_style: str = "bold red"
     session_style: str = "dim"
     state_style: str = "bold yellow"
 
@@ -98,6 +99,7 @@ class Theme(BaseModel):
     working_style: str = "dim italic"
     path_highlight: str = "bold blue"
     usage_style: str = "dim"
+    usage_warning_style: str = "bold red"
 
     # Side-effect badges
     badges: BadgeColors = Field(default_factory=BadgeColors)

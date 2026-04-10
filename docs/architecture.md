@@ -35,6 +35,13 @@ while not done and step < max_steps:
     if cancel_event.is_set(): break
     if elapsed > timeout: break
 
+    # streaming path (streaming: true)
+    async for delta in provider.stream(messages, tools, system):
+        emit(StreamChunk)       # text delta or reasoning delta
+        # final delta carries usage counts
+    emit(ProviderMeta)          # timing + token usage (after stream closes)
+
+    # — or non-streaming path (streaming: false, the default) —
     response = await provider.complete(messages, tools, system)
     emit(ProviderMeta)          # timing + token usage
 
@@ -51,6 +58,8 @@ while not done and step < max_steps:
 ```
 
 **Event emission order matters:** `ToolCall` events are emitted *before* the `AssistantMessage` in the same step. This allows `session.to_messages()` to bundle `tool_use` blocks into the assistant message for the next provider call, matching the Anthropic/OpenAI message format.
+
+**Token counts** arrive via the `ProviderMeta` event in both paths. For streaming responses, `_consume_stream()` captures the usage data from the provider's final done-chunk and attaches it to the `ProviderResponse` before the event is emitted. This means the counts are always available on the same `ProviderMeta` event regardless of whether streaming is enabled. See [Tokens, costs, and budgets](tokens.md) for the full pipeline.
 
 ### Session and messages
 
@@ -189,7 +198,7 @@ All events extend `Event` (`agent/core/events.py`) and carry a `type` field from
 | `ToolCall` | `tool_call` | `tool_name`, `arguments`, `call_id` |
 | `ToolResult` | `tool_result` | `tool_name`, `output`, `is_error`, `duration_ms` |
 | `ReasoningBlock` | `reasoning` | `content` |
-| `ProviderMeta` | `provider_meta` | `usage`, `duration_ms`, `model` |
+| `ProviderMeta` | `provider_meta` | `usage`, `duration_ms`, `model`, `provider` |
 | `ErrorEvent` | `error` | `message` |
 | `SessionEvent` | `session` | `action` |
 

@@ -348,7 +348,7 @@ Hard cancellation via `asyncio` task cancellation also works — the loop catche
 
 ## Observability
 
-Aggregate timing and token usage from any session:
+Aggregate timing, token usage, and cost from any session:
 
 ```python
 from agent.extensions.observability import session_metrics
@@ -356,16 +356,70 @@ from agent.extensions.observability import session_metrics
 m = session_metrics(session)
 print(f"steps={m.total_steps}")
 print(f"tokens={m.total_tokens}  (in={m.total_input_tokens} out={m.total_output_tokens})")
+print(f"cost=${m.total_cost:.4f}")
 print(f"provider_ms={m.total_provider_duration_ms:.0f}")
 print(f"tool_ms={m.total_tool_duration_ms:.0f}  calls={m.total_tool_calls}")
 print(f"errors={m.total_errors}")
 
 # Per-step breakdown
 for step in m.steps:
-    print(f"  step {step.step}: provider={step.provider_duration_ms:.0f}ms  tools={step.total_tool_duration_ms:.0f}ms")
+    print(f"  step {step.step}: tokens={step.input_tokens}in/{step.output_tokens}out  cost=${step.cost:.4f}")
 ```
 
 `session_metrics()` reads all events once; it does not require a live provider or executor.
+
+### Metrics reference
+
+| Field | Description |
+|---|---|
+| `total_steps` | Number of agent loop iterations |
+| `total_tokens` | Sum of input + output tokens |
+| `total_input_tokens` | Total input (prompt) tokens |
+| `total_output_tokens` | Total output (completion) tokens |
+| `total_cost` | Estimated USD cost (from built-in pricing table) |
+| `total_provider_duration_ms` | Cumulative provider API wall time |
+| `total_tool_duration_ms` | Cumulative tool execution wall time |
+| `total_tool_calls` | Number of tool invocations |
+| `total_errors` | Number of error events |
+| `steps[i].step` | Step index |
+| `steps[i].input_tokens` | Input tokens for this step |
+| `steps[i].output_tokens` | Output tokens for this step |
+| `steps[i].cost` | Per-step estimated cost |
+| `steps[i].provider_duration_ms` | Provider wall time for this step |
+| `steps[i].total_tool_duration_ms` | Tool wall time for this step |
+
+### Live session tracking
+
+`Session` accumulates token and cost counters during the run, so you can inspect them without calling `session_metrics()`:
+
+```python
+# Live tracking (updated during the run, no need for session_metrics)
+print(f"tokens so far: {session.total_tokens}")
+print(f"cost so far: ${session.total_cost:.4f}")
+```
+
+The live fields on `Session`:
+- `total_input_tokens` — accumulated input tokens
+- `total_output_tokens` — accumulated output tokens
+- `total_tokens` — property returning `total_input_tokens + total_output_tokens`
+- `total_cost` — accumulated estimated USD cost
+
+### Token / cost tracking module
+
+The `agent.core.tokens` module provides low-level helpers for pricing lookups and cost calculation:
+
+```python
+from agent.core.tokens import TokenUsage, get_pricing, calculate_cost, format_cost
+
+# Look up pricing for a model
+pricing = get_pricing("claude-sonnet-4-20250514")  # prefix-matched
+if pricing:
+    usage = TokenUsage(input_tokens=1000, output_tokens=500)
+    cost = calculate_cost(usage, pricing)
+    print(format_cost(cost))  # "$0.0105"
+```
+
+`get_pricing()` uses prefix matching against a built-in pricing table, so `"claude-sonnet-4-20250514"` matches the `claude-sonnet-4` entry. If no match is found it returns `None` and cost fields default to `0.0`.
 
 ## Testing
 

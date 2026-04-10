@@ -97,6 +97,10 @@ class Agent:
         """
         self._on_event.append(callback)
 
+    def off_event(self, callback: Callable[[Event], Any]) -> None:
+        """Remove a previously registered event callback."""
+        self._on_event = [cb for cb in self._on_event if cb != callback]
+
     async def run(
         self,
         prompt: str | list[ContentBlock],
@@ -125,10 +129,13 @@ class Agent:
 
         def _dispatch(event: Event) -> None:
             for cb in self._on_event:
-                if inspect.iscoroutinefunction(cb):
-                    asyncio.ensure_future(cb(event))
-                else:
-                    cb(event)
+                try:
+                    if inspect.iscoroutinefunction(cb):
+                        asyncio.ensure_future(cb(event))
+                    else:
+                        cb(event)
+                except Exception:
+                    logger.exception("Event callback %r failed on %s", cb, event.type)
 
         session = await run_loop(
             session=session,

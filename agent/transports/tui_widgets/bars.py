@@ -41,10 +41,17 @@ class HeaderBar(Static):
         self.session_id: str = ""
         self.state: str = "idle"
         self.thinking_enabled: bool = True
+        self.total_cost: float = 0.0
+        self.warning_active: bool = False
+        self.streaming: bool = False
 
-    def update_tokens(self, usage: dict[str, int]) -> None:
+    def update_tokens(
+        self, usage: dict[str, int], step_cost: float = 0.0, warning: bool = False
+    ) -> None:
         self.input_tokens += usage.get("input_tokens", 0)
         self.output_tokens += usage.get("output_tokens", 0)
+        self.total_cost += step_cost
+        self.warning_active = warning
 
     def render(self) -> Text:  # type: ignore[override]
         h = self.theme.header
@@ -53,16 +60,24 @@ class HeaderBar(Static):
             provider += f" / {self.model_name}"
         session = f"{self.session_id[:8]}..." if self.session_id else ""
         thinking_label = "think:on" if self.thinking_enabled else "think:off"
+        tokens_style = h.tokens_warning_style if self.warning_active else h.tokens_style
+        tokens_text = f"tokens: {self.input_tokens}in / {self.output_tokens}out"
+        if self.total_cost > 0:
+            if self.total_cost < 0.01:
+                tokens_text += f" (${self.total_cost:.4f})"
+            else:
+                tokens_text += f" (${self.total_cost:.2f})"
         parts = [
             (provider, h.provider_style),
             ("  |  ", h.separator_style),
-            (f"tokens: {self.input_tokens}in / {self.output_tokens}out", h.tokens_style),
+            (tokens_text, tokens_style),
             ("  |  ", h.separator_style),
         ]
         if session:
             parts.append((session, h.session_style))
             parts.append(("  |  ", h.separator_style))
-        parts.append((self.state, h.state_style))
+        state_label = "streaming…" if self.streaming else self.state
+        parts.append((state_label, h.state_style))
         parts.append(("  |  ", h.separator_style))
         parts.append((thinking_label, h.tokens_style))
         return Text.assemble(*parts)

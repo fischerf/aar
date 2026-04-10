@@ -29,6 +29,14 @@ class Session(BaseModel):
     events: list[Event] = Field(default_factory=list)
     step_count: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cost: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens consumed across all steps."""
+        return self.total_input_tokens + self.total_output_tokens
 
     def append(self, event: Event | list[Event]) -> None:
         """Append one or more events to the session."""

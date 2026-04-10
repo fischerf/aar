@@ -147,11 +147,16 @@ class AgentConfig(BaseModel):
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
     context_strategy: str = "sliding_window"  # "sliding_window" | "none"
+    token_budget: int = 0  # max total tokens across the run; 0 = unlimited
+    cost_limit: float = 0.0  # max USD cost across the run; 0.0 = unlimited
+    token_warning_threshold: float = 0.8  # fraction of budget to trigger warning style
+    cost_warning_threshold: float = 0.8  # fraction of cost_limit to trigger warning style
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
     shell_path: str = ""
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
     system_prompt: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    log_file: Path | None = None  # opt-in file logging (append mode)
 
     def model_post_init(self, __context: Any) -> None:
         """Build the system prompt from config if not explicitly provided."""

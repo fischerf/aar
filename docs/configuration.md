@@ -36,6 +36,10 @@ config = AgentConfig(
         theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name
         layout={},                                     # section visibility (see docs/themes.md)
     ),
+    token_budget=0,                                # max total tokens per run; 0 = unlimited
+    cost_limit=0.0,                                # max USD cost per run; 0.0 = unlimited
+    token_warning_threshold=0.8,                   # TUI warning at 80% of budget
+    cost_warning_threshold=0.8,                    # TUI warning at 80% of cost limit
     session_dir=".agent/sessions",
     shell_path="",                                 # custom shell binary (see below)
     project_rules_dir=".agent",                    # project rules folder (see below)
@@ -152,6 +156,73 @@ aar chat --log-level DEBUG
 aar run "do something" --log-level INFO
 aar tui --log-level WARNING
 ```
+
+## Token budget & cost limits
+
+You can cap how many tokens or how much estimated cost a single agent run is allowed to consume. Both limits default to zero (unlimited).
+
+### How token tracking works
+
+Token counts are read from the `ProviderMeta` event that fires after every provider call — for both streaming and non-streaming responses. In streaming mode the final chunk from the provider carries the usage data; `_consume_stream()` captures it and attaches it to the response before the event is emitted. See [Tokens, costs, and budgets](tokens.md) for the full pipeline, per-provider details, and how each transport displays the counts.
+
+### How cost estimation works
+
+Run `aar init` to get `~/.aar/pricing.template.json` — a copy of the full built-in pricing table — as a reference. Rename to pricing.json and adjust if needed.
+
+Aar loads a built-in pricing table from `agent/core/pricing.json` (shipped with the package). If `~/.aar/pricing.json` exists it is merged on top, letting you extend or override any entry. After each provider call the framework multiplies token counts by the matching per-token price to produce an estimated USD cost. The estimate is **approximate** — prompt-caching discounts, batching, and future price changes are not reflected.
+
+- Cost is accumulated across all steps in the run, just like tokens.
+- When `cost_limit` (if > 0) is exceeded the agent stops the same way as for `token_budget`.
+- Local or Ollama models that don't match any pricing-table entry will report **$0.00** cost.
+
+To add prices for custom or local models (e.g. Ollama), create or edit `~/.aar/pricing.json`:
+
+```json
+{
+  "_comment": "USD per 1M tokens. Keys are model-name prefixes.",
+  "gemma4": { "input_per_million": 0.05, "output_per_million": 0.10, "cache_read_per_million": 0.0, "cache_write_per_million": 0.0 }
+}
+```
+
+### Warning thresholds (TUI only)
+
+`token_warning_threshold` and `cost_warning_threshold` are fractions (0.0–1.0) of the corresponding limit. When the running total crosses the threshold the TUI switches the counter display to **red**. This is a visual cue only — the agent keeps running until the hard limit is hit.
+
+### Enforcement details
+
+| Behaviour | Detail |
+|-----------|--------|
+| Checked | After each provider call, before the next step |
+| Scope | Per-run (resets when `Agent.run()` is called again) |
+| State on exceed | `AgentState.BUDGET_EXCEEDED` |
+| Event emitted | `ErrorEvent` with a descriptive message |
+| Warning thresholds | Visual only — TUI counter turns red |
+
+### Configuration examples
+
+**Via `AgentConfig` in code:**
+
+```python
+config = AgentConfig(
+    token_budget=100_000,          # stop after 100 k tokens
+    cost_limit=5.0,                # stop after ~$5
+    token_warning_threshold=0.9,   # yellow → red at 90 %
+    cost_warning_threshold=0.9,
+)
+```
+
+**Via config file** (`~/.aar/config.json` or `--config`):
+
+```json
+{
+  "token_budget": 100000,
+  "cost_limit": 5.0,
+  "token_warning_threshold": 0.9,
+  "cost_warning_threshold": 0.9
+}
+```
+
+> For full details on how token counts flow through the system, how each transport displays them, and per-provider caveats, see **[Tokens, costs, and budgets](tokens.md)**.
 
 ## Configurable system prompt
 

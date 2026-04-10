@@ -76,3 +76,34 @@ The endpoint URL can also be set via the `GENERIC_ENDPOINT` environment variable
 Supports: tools, streaming, structured output (`json_object` / `json_schema`).
 
 Install: `pip install aar-agent[generic]` (uses `httpx`, already included in the base install).
+
+## Token reporting
+
+Each provider reports token counts differently. Aar normalises them into a single `usage` dict `{"input_tokens": N, "output_tokens": M}` on the `ProviderMeta` event. See [Tokens, costs, and budgets](tokens.md) for how the counts flow through the system.
+
+| Provider | Non-streaming | Streaming |
+|----------|---------------|-----------|
+| Anthropic | `usage` block in response body — always present | Collected from the `message_stop` SSE event; attached to the final `StreamDelta(done=True)` |
+| OpenAI | `usage` in response body — always present | Requested via `stream_options: {include_usage: true}`; trailing usage chunk attached to final done-delta |
+| Ollama | `prompt_eval_count` / `eval_count` in response body | Same fields on the final `done: true` NDJSON chunk; attached to final done-delta |
+| Generic | `usage` in SSE chunks if the upstream emits it | Same — presence depends on the upstream endpoint |
+
+### Ollama token availability
+
+Ollama includes `prompt_eval_count` and `eval_count` in its final streaming chunk for most models and versions. However, if a prompt hits the KV cache entirely, or if the model runtime omits these fields, the `usage` dict may arrive empty (`{}`). When the dict is empty:
+
+- The `tui --fixed` header still shows `0in / 0out` (the counter starts at zero and simply doesn't increment).
+- The `tui` body token line prints `0in / 0out` (if `token_usage.visible` is `true`).
+- The `chat` transport suppresses the line entirely (it only prints when `usage` is non-empty).
+
+No error is raised; cost is recorded as $0.00 for that step.
+
+### Streaming is required for real-time counts
+
+Token counts are only available once the provider's final chunk arrives. With `streaming: false` (the default), the complete response is returned in one shot and the count is available immediately after. With `streaming: true` the header in `tui --fixed` shows `streaming…` in the state field while the model generates, then snaps to the actual counts when the final chunk arrives. Enable streaming in your config:
+
+```json
+{
+  "streaming": true
+}
+```

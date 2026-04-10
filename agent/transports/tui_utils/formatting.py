@@ -39,3 +39,36 @@ def _format_args(
         else:
             lines.append(f"[bold]{k}:[/] {val}")
     return "\n".join(lines) if lines else "(no arguments)"
+
+
+def format_token_display(
+    input_tokens: int,
+    output_tokens: int,
+    cost: float = 0.0,
+    show_cost: bool = True,
+) -> str:
+    """Format token counts and optional cost for TUI display.
+
+    Returns e.g. "150in / 80out ($0.0032)" or "150in / 80out" if no cost.
+    """
+    parts = f"{input_tokens}in / {output_tokens}out"
+    if show_cost and cost > 0:
+        if cost < 0.01:
+            parts += f" (${cost:.4f})"
+        else:
+            parts += f" (${cost:.2f})"
+    return parts
+
+
+def is_over_warning_threshold(
+    current: float,
+    limit: float,
+    threshold: float = 0.8,
+) -> bool:
+    """Check whether *current* has passed *threshold* fraction of *limit*.
+
+    Returns False when *limit* is zero (disabled).
+    """
+    if limit <= 0:
+        return False
+    return current >= limit * threshold

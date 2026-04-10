@@ -13,6 +13,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable
 - **Observable** — every provider call and tool execution is timed; sessions carry a `trace_id`
+- **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
 
 ## Installation
@@ -131,6 +132,40 @@ agent/
 
 See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
+## Token & cost tracking
+
+Aar tracks token usage and estimated costs in real time during every agent run.
+
+### What you get out of the box
+
+- **Live counters** — input/output tokens and estimated USD cost accumulate on the session after each provider call
+- **Built-in pricing** — pricing tables for Anthropic (Claude), OpenAI (GPT-4o, o3, etc.) models with automatic prefix matching
+- **Budget enforcement** — set `token_budget` or `cost_limit` to stop the agent before it exceeds your limits
+- **Visual warnings** — token counts turn red in the TUI when approaching the configured threshold (default 80%)
+- **Per-step breakdown** — the observability module provides per-step token and cost metrics
+
+### Configuration
+
+```json
+{
+  "token_budget": 100000,
+  "cost_limit": 5.0,
+  "token_warning_threshold": 0.9,
+  "cost_warning_threshold": 0.9
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `token_budget` | `0` | Max total tokens per run (0 = unlimited) |
+| `cost_limit` | `0.0` | Max estimated USD cost per run (0.0 = unlimited) |
+| `token_warning_threshold` | `0.8` | Fraction of budget for TUI warning color |
+| `cost_warning_threshold` | `0.8` | Fraction of cost limit for TUI warning color |
+
+When a limit is exceeded, the agent stops with `BUDGET_EXCEEDED` state and emits a non-recoverable error event.
+
+> **Note:** Cost estimates use approximate pricing from built-in tables. Local models (Ollama) without pricing entries show $0.00.
+
 ## Requirements
 
 - Python 3.11+
@@ -157,7 +192,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 
 | Document | Contents |
 |----------|----------|
-| [Configuration](docs/configuration.md) | `AgentConfig` reference, config precedence, approval modes, logging, system prompt, shell, project rules |
+| [Configuration](docs/configuration.md) | `AgentConfig` reference, **token budgets, cost limits**, config precedence, approval modes, logging, system prompt, shell, project rules |
 | [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Generic setup and options |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
