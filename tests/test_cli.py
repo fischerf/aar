@@ -614,6 +614,44 @@ class TestServeCommand:
         assert result.exit_code == 0
         assert "8080" in result.output
 
+    def test_serve_log_level_flag(self, tmp_session_dir):
+        """serve --log-level should wire through to uvicorn and aar logging."""
+        config = _mock_config(tmp_session_dir)
+        captured: dict[str, Any] = {}
+
+        mock_uvicorn = MagicMock()
+        mock_uvicorn.run.side_effect = lambda app, **kw: captured.update(kw)
+
+        with (
+            patch("agent.transports.cli._build_config", return_value=config) as mock_build,
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
+        ):
+            result = runner.invoke(app, ["serve", "--log-level", "DEBUG"])
+
+        assert result.exit_code == 0
+        # _build_config should have received the log_level kwarg
+        _, kwargs = mock_build.call_args
+        assert kwargs.get("log_level") == "DEBUG"
+
+    def test_serve_log_file_flag(self, tmp_session_dir):
+        """serve --log-file should be forwarded to _build_config."""
+        config = _mock_config(tmp_session_dir)
+
+        mock_uvicorn = MagicMock()
+        mock_uvicorn.run.side_effect = lambda app, **kw: None
+
+        with (
+            patch("agent.transports.cli._build_config", return_value=config) as mock_build,
+            patch("agent.core.agent._create_provider", return_value=MockProvider()),
+            patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
+        ):
+            result = runner.invoke(app, ["serve", "--log-file", "/tmp/aar.log"])
+
+        assert result.exit_code == 0
+        _, kwargs = mock_build.call_args
+        assert kwargs.get("log_file") == "/tmp/aar.log"
+
 
 # ---------------------------------------------------------------------------
 # Live tests — Ollama (skipped unless --live flag is passed)

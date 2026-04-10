@@ -156,6 +156,7 @@ class AgentConfig(BaseModel):
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
     system_prompt: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    log_file: Path | None = None  # opt-in file logging (append mode)
 
     def model_post_init(self, __context: Any) -> None:
         """Build the system prompt from config if not explicitly provided."""

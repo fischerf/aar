@@ -26,6 +26,7 @@ from agent.core.events import (
     ToolCall,
     ToolResult,
 )
+from agent.core.logging import configure_logging as _configure_logging
 from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
@@ -61,6 +62,7 @@ def _build_config(
     denied_paths: str = "",
     allowed_paths: str = "",
     log_level: Optional[str] = None,
+    log_file: Optional[str] = None,
 ) -> AgentConfig:
     """Build an AgentConfig with layered precedence.
 
@@ -109,23 +111,15 @@ def _build_config(
     if log_level is not None:
         cfg.log_level = log_level.upper()
 
+    if log_file is not None:
+        cfg.log_file = Path(log_file)
+
     return cfg
 
 
-def _configure_logging(config: AgentConfig) -> None:
-    """Apply the log level from *config* to the root logger.
-
-    Also silences noisy third-party HTTP internals at anything above DEBUG so
-    they don't clutter normal output.
-    """
-    import logging
-
-    level = getattr(logging, config.log_level.upper(), logging.WARNING)
-    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
-    # Keep low-level HTTP chatter quiet unless the user explicitly wants DEBUG
-    if level > logging.DEBUG:
-        for _noisy in ("httpx", "httpcore", "asyncio"):
-            logging.getLogger(_noisy).setLevel(logging.WARNING)
+def _apply_logging(config: AgentConfig) -> None:
+    """Configure logging from the resolved AgentConfig."""
+    _configure_logging(config.log_level, config.log_file)
 
 
 async def _terminal_approval_callback(spec: Any, tc: Any) -> ApprovalResult:
@@ -427,6 +421,11 @@ def chat(
         "--log-level",
         help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
     ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file (append mode). Default: stderr only.",
+    ),
 ) -> None:
     """Start an interactive chat session."""
     config = _build_config(
@@ -442,8 +441,9 @@ def chat(
         denied_paths=denied_paths,
         allowed_paths=allowed_paths,
         log_level=log_level,
+        log_file=log_file,
     )
-    _configure_logging(config)
+    _apply_logging(config)
     asyncio.run(
         _run_with_mcp(
             lambda agent: _async_chat_loop(agent, config, session_id, verbose),
@@ -508,6 +508,11 @@ def run(
         "--log-level",
         help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
     ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file (append mode). Default: stderr only.",
+    ),
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(
@@ -523,8 +528,9 @@ def run(
         denied_paths=denied_paths,
         allowed_paths=allowed_paths,
         log_level=log_level,
+        log_file=log_file,
     )
-    _configure_logging(config)
+    _apply_logging(config)
 
     async def _do(agent: Agent) -> None:
         agent.on_event(_make_event_handler(verbose))
@@ -683,6 +689,11 @@ def tui(
         "--log-level",
         help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
     ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file (append mode). Default: stderr only.",
+    ),
     theme: Optional[str] = typer.Option(
         None,
         "--theme",
@@ -714,8 +725,9 @@ def tui(
         denied_paths=denied_paths,
         allowed_paths=allowed_paths,
         log_level=log_level,
+        log_file=log_file,
     )
-    _configure_logging(config)
+    _apply_logging(config)
     asyncio.run(
         _run_with_mcp(
             lambda agent: _run_tui(
@@ -753,6 +765,16 @@ def serve(
     read_only: Optional[bool] = typer.Option(
         None, "--read-only/--no-read-only", help="Block all write and execute tools"
     ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
+    ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file (append mode). Default: stderr only.",
+    ),
 ) -> None:
     """Start the web API server (requires uvicorn)."""
     config = _build_config(
@@ -762,7 +784,10 @@ def serve(
         base_url=base_url,
         config_file=config_file,
         read_only=read_only,
+        log_level=log_level,
+        log_file=log_file,
     )
+    _apply_logging(config)
     from agent.transports.web import create_asgi_app
 
     try:
@@ -781,7 +806,7 @@ def serve(
     asgi_app = create_asgi_app(config)
     console.print(f"[bold green]Starting web server on {host}:{port}[/]")
     console.print("[dim]POST /chat, POST /chat/stream, GET /sessions, GET /health[/]")
-    uvicorn.run(asgi_app, host=host, port=port, log_level="info")
+    uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
 
 
 @app.command()
