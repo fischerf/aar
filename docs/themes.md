@@ -263,26 +263,30 @@ Requires the `tui-fixed` extra (provides [Textual](https://textual.textualize.io
 - **Scrollable body** with visual scrollbars and configurable scroll speed
 - **Mouse wheel** scrolling (non-blocking — scroll while the LLM is working)
 - **Page Up / Page Down** keyboard scrolling
-- **Input widget** with full terminal input support (cursor, backspace, selection)
-- **Command history** — press **↑ / ↓** to cycle through previous inputs
-- **Block selection** — left-click a block to highlight it; right-click to copy raw text and deselect
-- **Ctrl+Y** copies the selected (or last) block's raw text (markdown) to clipboard
+- **Multi-line input** — press Enter to add a new line; press **Ctrl+S** to send
+- **Command history** — press **Ctrl+Up / Ctrl+Down** to cycle through previous inputs
 - **Fixed header** showing provider/model, token counts (cumulative; updates after each response), session ID, agent state / streaming indicator, thinking status
-- **Fixed footer** showing step count, theme name, and keyboard shortcut hints
+- **Fixed footer** showing step count, theme name, and keyboard shortcut hints (labels and keys are configurable via `~/.aar/keybinds.json`)
+- **Terminal modal** — press **Ctrl+P** (configurable) to open an interactive shell overlay; `cd` is fully supported with persistent working directory across commands
 - **Configurable layout** — reorder, resize, or hide regions per theme
 
 ### Keyboard shortcuts
 
 | Shortcut | Action |
 |----------|--------|
+| **Ctrl+S** | Send / submit the message |
+| **Ctrl+X** | Cancel the running agent |
 | **Ctrl+T** | Cycle to next theme |
 | **Ctrl+K** | Toggle thinking/reasoning display |
 | **Ctrl+L** | Clear screen and reset counters |
-| **Ctrl+Y** | Copy selected (or last) block's raw text to clipboard |
+| **Ctrl+P** | Open / close the terminal modal |
+| **Ctrl+Q** | Quit |
 | **Page Up / Page Down** | Scroll the conversation body |
-| **↑ / ↓** (in input) | Navigate command history |
-| **Left click** (body) | Select/highlight a block |
-| **Right click** (body) | Copy selected block and deselect |
+| **Ctrl+Up / Ctrl+Down** | Navigate input history (in the input box) |
+| **Enter** | New line in the multi-line input |
+
+> All of these keys (except Ctrl+Q which is a Textual default) are configurable
+> via `~/.aar/keybinds.json`.  See [Customising keyboard shortcuts](#customising-keyboard-shortcuts) below.
 
 ### Slash commands
 
@@ -298,8 +302,76 @@ All commands from the scrollable TUI also work in fixed mode:
 | `/theme <name>` | Switch theme |
 | `/theme next` | Cycle theme |
 | `/think` | Toggle thinking display |
-| `/copy` | Copy selected block to clipboard |
 | `/clear` | Clear screen |
+
+### Customising keyboard shortcuts
+
+All hotkeys used by the fixed TUI are defined in `~/.aar/keybinds.json`, created
+automatically by `aar init`.  Edit this file to rebind any action or relabel it
+in the footer bar.
+
+#### Format
+
+Each entry accepts either a full object or a plain key string:
+
+```json
+{
+  "send":   {"key": "ctrl+s", "label": "send"},
+  "cancel": "ctrl+x"
+}
+```
+
+When only a string is provided the built-in default label is used.
+
+#### Available bindings
+
+| Field | Default key | Default label | Description |
+|-------|-------------|---------------|-------------|
+| `send` | `ctrl+s` | `send` | Send / submit the message |
+| `cancel` | `ctrl+x` | `cancel` | Cancel the running agent |
+| `cycle_theme` | `ctrl+t` | `theme` | Cycle to the next theme |
+| `toggle_thinking` | `ctrl+k` | `think` | Toggle thinking block visibility |
+| `clear_screen` | `ctrl+l` | `clear` | Clear the chat screen |
+| `terminal` | `ctrl+p` | `terminal` | Open / close the terminal modal |
+| `history_prev` | `ctrl+up` | `hist↑` | Navigate to the previous history entry |
+| `history_next` | `ctrl+down` | `hist↓` | Navigate to the next history entry |
+| `scroll_up` | `pageup` | `pg↑` | Scroll the chat body up |
+| `scroll_down` | `pagedown` | `pg↓` | Scroll the chat body down |
+
+#### Example — rebind send to Ctrl+M and rename the terminal button
+
+```json
+{
+  "send":     {"key": "ctrl+m", "label": "submit"},
+  "terminal": {"key": "ctrl+g", "label": "shell"}
+}
+```
+
+#### Validation
+
+On startup, Aar validates all configured keys and logs a `WARNING` for:
+
+- **Empty key strings** — `"send": ""`
+- **Malformed strings** — e.g. `"send": "ctrl+"` or `"send": "ctrl++s"`
+- **Unreliable terminal keys** — e.g. `ctrl+enter`, `shift+enter`, `alt+return`.
+  Most terminal emulators cannot distinguish these from their unmodified equivalents,
+  so binding them will silently have no effect.
+
+Check the log output if a keybind appears not to work:
+
+```bash
+aar tui --fixed --log-level DEBUG
+```
+
+#### Notes
+
+- `Ctrl+Q` (quit) is always available — it is a Textual framework default and is
+  not configurable via `keybinds.json`.
+- `Escape` closes the terminal modal and is not configurable.
+- Keys that conflict with `TextArea`'s built-in editing actions (`ctrl+x`,
+  `ctrl+k`) are registered with **priority**, so they always override the widget's
+  default behaviour.  If you remap them to a non-conflicting key, the widget's
+  default action for the original key is restored.
 
 ### Layout
 
@@ -317,7 +389,7 @@ All commands from the scrollable TUI also work in fixed mode:
 | > type your message... (↑/↓ for history)                                |
 +────────────────────────────────────────────────────────────────────────+
 | Footer bar (fixed)                                                      |
-| step: 5 | theme: default | Ctrl+T theme  Ctrl+K think  Ctrl+Y copy ...  |
+| step: 5 | theme: default | Ctrl+S send  Ctrl+X cancel  Ctrl+T theme … |
 +------------------------------------------------------------------------+
 ```
 
