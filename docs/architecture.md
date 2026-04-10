@@ -228,7 +228,7 @@ Transports are thin I/O adapters. They create an `Agent`, wire up event handlers
 | TUI | `transports/tui.py` | `aar tui` | Rich inline TUI, scrollable terminal UI |
 | TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer |
 | Web | `transports/web.py` | `aar serve` | ASGI app, SSE streaming, per-request safety override |
-| Stream | `transports/stream.py` | (internal) | `EventStream` / `AsyncEventStream` for pub/sub |
+| Stream | `transports/stream.py` | (internal) | `EventStream` for cross-request pub/sub |
 
 Shared TUI sub-packages:
 
