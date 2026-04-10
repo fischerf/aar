@@ -32,6 +32,7 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
+from agent.transports.tui_utils.formatting import _format_approval_args
 
 app = typer.Typer(name="aar", help="Lean Python Agent CLI", no_args_is_help=True)
 console = Console()
@@ -124,7 +125,7 @@ def _apply_logging(config: AgentConfig) -> None:
 
 async def _terminal_approval_callback(spec: Any, tc: Any) -> ApprovalResult:
     """Prompt the user in the terminal when a tool call requires approval."""
-    args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items())
+    args_text = _format_approval_args(tc.arguments)
     console.print()
     console.print(
         Panel(

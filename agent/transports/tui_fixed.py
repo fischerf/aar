@@ -67,7 +67,11 @@ from agent.safety.permissions import ApprovalResult
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
-from agent.transports.tui_utils.formatting import _format_args, _side_effect_badge
+from agent.transports.tui_utils.formatting import (
+    _format_approval_args,
+    _format_args,
+    _side_effect_badge,
+)
 
 # ---------------------------------------------------------------------------
 # Widget imports — classes extracted to agent.transports.tui_widgets.*
@@ -579,7 +583,7 @@ class AarFixedApp(App):
         app = self
 
         async def _approval(spec, tc) -> ApprovalResult:
-            args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items() if k != "content")
+            args_text = _format_approval_args(tc.arguments)
             approval_bar = app.query_one(ApprovalBar)
             done = approval_bar.show_prompt(tc.tool_name, args_text)
             await done.wait()
