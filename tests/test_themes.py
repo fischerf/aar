@@ -924,7 +924,7 @@ class TestAarFixedAppStartup:
         async with app.run_test(size=(120, 40)) as pilot:
             inp = app.query_one("#user-input", HistoryTextArea)
             inp.text = "/theme"
-            await pilot.press("ctrl+enter")
+            await pilot.press("ctrl+s")
             await pilot.pause()
             # /theme writes RichBlock entries into the chat body
             chat_body = app.query_one("#chat-body", ChatBody)
@@ -963,10 +963,10 @@ class TestAarFixedAppStartup:
             inp = app.query_one("#user-input", HistoryTextArea)
             # Type and submit two slash commands (these don't trigger agent.run)
             inp.text = "/theme"
-            await pilot.press("ctrl+enter")
+            await pilot.press("ctrl+s")
             await pilot.pause()
             inp.text = "/tools"
-            await pilot.press("ctrl+enter")
+            await pilot.press("ctrl+s")
             await pilot.pause()
             # History should have two entries
             assert inp._history == ["/theme", "/tools"]

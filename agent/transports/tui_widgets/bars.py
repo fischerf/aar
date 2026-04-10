@@ -107,7 +107,7 @@ class FooterBar(Static):
             ("  |  ", f.separator_style),
             (f"theme: {self.theme_name}", f.theme_style),
             ("  |  ", f.separator_style),
-            ("Ctrl+Enter", f.step_style),
+            ("Ctrl+S", f.step_style),
             (" send  ", f.separator_style),
             ("Ctrl+X", f.step_style),
             (" cancel  ", f.separator_style),

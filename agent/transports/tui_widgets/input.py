@@ -102,7 +102,7 @@ class HistoryTextArea(TextArea):
             self.value = value
 
     BINDINGS = [
-        Binding("ctrl+enter", "submit_message", "Send", show=False, priority=True),
+        Binding("ctrl+s", "submit_message", "Send", show=False, priority=True),
     ]
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
