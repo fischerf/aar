@@ -32,6 +32,7 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
+from agent.transports.tui_utils.formatting import _format_approval_args
 
 app = typer.Typer(name="aar", help="Lean Python Agent CLI", no_args_is_help=True)
 console = Console()
@@ -124,7 +125,7 @@ def _apply_logging(config: AgentConfig) -> None:
 
 async def _terminal_approval_callback(spec: Any, tc: Any) -> ApprovalResult:
     """Prompt the user in the terminal when a tool call requires approval."""
-    args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items())
+    args_text = _format_approval_args(tc.arguments)
     console.print()
     console.print(
         Panel(
@@ -874,8 +875,12 @@ def init(
 
     _USER_THEME_EXAMPLE = _USER_THEMES_DIR / "example.json"
 
+    from agent.transports.keybinds import KeyBinds as _KeyBinds
     from agent.transports.themes.builtin import DECKER_THEME
     from agent.transports.themes.models import Theme
+
+    _USER_KEYBINDS = _USER_DIR / "keybinds.json"
+    default_keybinds = _json.loads(_KeyBinds().model_dump_json())
 
     example_theme = _json.loads(DECKER_THEME.model_dump_json())
     example_theme["name"] = "example"
@@ -894,6 +899,7 @@ def init(
         (_USER_CONFIG, default_config),
         (_USER_MCP_CONFIG, default_mcp),
         (_USER_MCP_EXAMPLE, example_mcp),
+        (_USER_KEYBINDS, default_keybinds),
         (_USER_PRICING_TEMPLATE, _pricing_raw),
         (_USER_THEME_EXAMPLE, example_theme),
         (_USER_THEME_SCHEMA, theme_schema),
@@ -927,7 +933,8 @@ def init(
             f"  5. Create custom themes in [bold]{_USER_THEMES_DIR}[/]"
             f" — see [bold]{_USER_THEME_EXAMPLE}[/] for a template."
         )
-        console.print("  6. Run [bold]aar chat[/] — no flags needed.")
+        console.print(f"  6. Edit [bold]{_USER_KEYBINDS}[/] — override default key bindings.")
+        console.print("  7. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 

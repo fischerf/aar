@@ -4,6 +4,10 @@
 
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
 
+<div style="text-align: center; margin: 30px 0;">
+  <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar TUI Demo" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
+</div>
+
 ## Design goals
 
 - **Thin core loop** — the main execution path is small and readable at a glance
@@ -65,8 +69,8 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 
 ```bash
 # Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
-# Shortcuts: Ctrl+T theme, Ctrl+K think, Ctrl+L clear, Ctrl+Y copy, ↑/↓ history
-# Left-click selects a block, right-click copies it. /quit to exit.
+# Ctrl+S send  Ctrl+X cancel  Ctrl+T theme  Ctrl+K think  Ctrl+L clear  Ctrl+P terminal  Ctrl+Q quit
+# Enter = new line in input  Ctrl+Up/Down = history  Page Up/Down = scroll  /quit to exit
 aar tui --fixed
 aar tui --fixed --theme decker
 
@@ -197,7 +201,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
-| [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode |
+| [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut customisation |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |

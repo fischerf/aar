@@ -25,6 +25,11 @@ def _looks_like_path(s: str) -> bool:
     return len(s) < 120 and ("/" in s or "\\" in s)
 
 
+_APPROVAL_MAX_VALUE_LEN = 120
+
+_LARGE_VALUE_KEYS = {"content", "old_string", "new_string", "file_text", "new_content"}
+
+
 def _format_args(
     arguments: dict[str, Any], verbose: bool = False, theme: Theme | None = None
 ) -> str:
@@ -39,6 +44,27 @@ def _format_args(
         else:
             lines.append(f"[bold]{k}:[/] {val}")
     return "\n".join(lines) if lines else "(no arguments)"
+
+
+def _format_approval_args(arguments: dict[str, Any], max_len: int = _APPROVAL_MAX_VALUE_LEN) -> str:
+    """Format tool arguments for the approval prompt.
+
+    Values are aggressively truncated because the full tool call is already
+    displayed above the approval widget.  For known large-content keys the
+    value is replaced with a byte-length note; other values are truncated to
+    *max_len* characters.
+    """
+    lines: list[str] = []
+    for k, v in arguments.items():
+        val = str(v)
+        if k in _LARGE_VALUE_KEYS and len(val) > max_len:
+            n_lines = val.count("\n") + 1
+            lines.append(f"  {k}: ({len(val)} chars, {n_lines} lines — shown above)")
+        elif len(val) > max_len:
+            lines.append(f"  {k}: {val[:max_len]}…")
+        else:
+            lines.append(f"  {k}: {val}")
+    return "\n".join(lines) if lines else "  (no arguments)"
 
 
 def format_token_display(

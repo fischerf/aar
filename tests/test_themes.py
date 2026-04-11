@@ -19,6 +19,7 @@ from agent.core.events import (
     ToolCall,
     ToolResult,
 )
+from agent.transports.keybinds import KeyBind, KeyBinds
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
     BUILTIN_THEMES,
@@ -38,6 +39,7 @@ from agent.transports.themes.models import (
     ScrollbarConfig,
     SectionConfig,
     Theme,
+    ThinkingPanelConfig,
 )
 from agent.transports.tui import TUIRenderer
 from agent.transports.tui_fixed import (
@@ -48,6 +50,8 @@ from agent.transports.tui_fixed import (
     FooterBar,
     HeaderBar,
     HistoryInput,
+    HistoryTextArea,
+    ThinkingPanel,
     _Block,
 )
 
@@ -821,15 +825,43 @@ class TestHeaderBarThinking:
 
 
 class TestFooterBarKeyHints:
-    def test_footer_shows_keybindings(self) -> None:
+    def test_footer_shows_default_keybindings(self) -> None:
+        """Default keybinds produce the expected Ctrl+? labels."""
+        bar = FooterBar(DEFAULT_THEME)  # keybinds=None → defaults
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "Ctrl+S" in plain  # send
+        assert "Ctrl+X" in plain  # cancel
+        assert "Ctrl+T" in plain  # cycle_theme
+        assert "Ctrl+K" in plain  # toggle_thinking
+        assert "Ctrl+L" in plain  # clear_screen
+        assert "Ctrl+P" in plain  # terminal
+        assert "Ctrl+Q" in plain  # exit (always present)
+
+    def test_footer_shows_terminal_label(self) -> None:
+        """The terminal action label is 'terminal' by default."""
         bar = FooterBar(DEFAULT_THEME)
         rendered = bar.render()
         plain = rendered.plain
-        assert "Ctrl+T" in plain
-        assert "Ctrl+K" in plain
-        assert "Ctrl+L" in plain
-        assert "Ctrl+Y" in plain
-        assert "Ctrl+Q" in plain
+        assert "terminal" in plain
+
+    def test_footer_label_customisable(self) -> None:
+        """A custom label on a KeyBind is shown in the footer."""
+        kb = KeyBinds(terminal=KeyBind(key="ctrl+p", label="palette"))
+        bar = FooterBar(DEFAULT_THEME, keybinds=kb)
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "palette" in plain
+
+    def test_footer_reflects_custom_keybinds(self) -> None:
+        """Overriding a key in KeyBinds is reflected in the footer."""
+        kb = KeyBinds(send="ctrl+m", terminal="ctrl+g")
+        bar = FooterBar(DEFAULT_THEME, keybinds=kb)
+        rendered = bar.render()
+        plain = rendered.plain
+        assert "Ctrl+M" in plain  # custom send key
+        assert "Ctrl+G" in plain  # custom terminal key
+        assert "Ctrl+S" not in plain  # default send should be absent
 
 
 # ------------------------------------------------------------------
@@ -842,9 +874,8 @@ class TestWelcomeShortcuts:
         renderer, log = _fixed_renderer()
         renderer.render_welcome()
         output = log.rendered_text()
-        assert "Ctrl+T" in output
-        assert "Ctrl+K" in output
-        assert "input history" in output
+        assert "Aar Agent TUI (Textual)" in output
+        assert "Ctrl+S" in output  # send key shown in welcome text
 
 
 # ------------------------------------------------------------------
@@ -889,7 +920,7 @@ class TestAarFixedAppStartup:
             assert app.query_one(HeaderBar) is not None
             assert app.query_one(FooterBar) is not None
             assert app.query_one(ChatBody) is not None
-            assert app.query_one(HistoryInput) is not None
+            assert app.query_one(HistoryTextArea) is not None
 
     @pytest.mark.asyncio
     async def test_app_renders_welcome(self) -> None:
@@ -918,9 +949,9 @@ class TestAarFixedAppStartup:
         config = AgentConfig()
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            inp = app.query_one("#user-input", HistoryInput)
-            inp.value = "/theme"
-            await pilot.press("enter")
+            inp = app.query_one("#user-input", HistoryTextArea)
+            inp.text = "/theme"
+            await pilot.press("ctrl+s")
             await pilot.pause()
             # /theme writes RichBlock entries into the chat body
             chat_body = app.query_one("#chat-body", ChatBody)
@@ -956,13 +987,13 @@ class TestAarFixedAppStartup:
         config = AgentConfig()
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as pilot:
-            inp = app.query_one("#user-input", HistoryInput)
+            inp = app.query_one("#user-input", HistoryTextArea)
             # Type and submit two slash commands (these don't trigger agent.run)
-            inp.value = "/theme"
-            await pilot.press("enter")
+            inp.text = "/theme"
+            await pilot.press("ctrl+s")
             await pilot.pause()
-            inp.value = "/tools"
-            await pilot.press("enter")
+            inp.text = "/tools"
+            await pilot.press("ctrl+s")
             await pilot.pause()
             # History should have two entries
             assert inp._history == ["/theme", "/tools"]
@@ -1077,6 +1108,159 @@ class TestNoEscapeQuit:
             await pilot.pause()
             # App should still be running — no escape binding
             assert app.is_running
+
+
+# ------------------------------------------------------------------
+# ThinkingPanel widget
+# ------------------------------------------------------------------
+
+
+class TestThinkingPanel:
+    """Unit tests for the ThinkingPanel widget (no Textual app required)."""
+
+    def _make_panel(self) -> ThinkingPanel:
+        """Create a detached ThinkingPanel for unit testing."""
+        cfg = ThinkingPanelConfig(
+            enabled=True,
+            side="right",
+            width=40,
+            background="#080808",
+            border_style="#2a2a2a",
+            text_style="italic dim",
+            title_style="dim #555555",
+        )
+        return ThinkingPanel(DEFAULT_THEME, cfg)
+
+    def test_initial_state(self) -> None:
+        panel = self._make_panel()
+        assert panel._current_widget is None
+        assert panel._buffer == ""
+        assert panel.auto_scroll is True
+
+    def test_begin_step_sets_current_widget(self) -> None:
+        panel = self._make_panel()
+        panel.begin_step(1)
+        assert panel._current_widget is not None
+        assert panel._buffer == ""
+
+    def test_append_accumulates_buffer(self) -> None:
+        panel = self._make_panel()
+        panel.begin_step(1)
+        panel.append("Hello")
+        panel.append(", world")
+        assert panel._buffer == "Hello, world"
+
+    def test_append_noop_without_begin_step(self) -> None:
+        panel = self._make_panel()
+        panel.append("ignored")  # no current widget yet
+        assert panel._buffer == ""
+
+    def test_finalize_step_clears_current_widget(self) -> None:
+        panel = self._make_panel()
+        panel.begin_step(1)
+        panel.append("some thought")
+        panel.finalize_step()
+        assert panel._current_widget is None
+
+    def test_append_noop_after_finalize(self) -> None:
+        panel = self._make_panel()
+        panel.begin_step(1)
+        panel.append("before finalize")
+        panel.finalize_step()
+        panel.append("after finalize — should be ignored")
+        assert panel._buffer == "before finalize"
+
+    def test_begin_step_resets_buffer(self) -> None:
+        panel = self._make_panel()
+        panel.begin_step(1)
+        panel.append("step one")
+        panel.finalize_step()
+        panel.begin_step(2)
+        assert panel._buffer == ""
+
+    def test_config_stored(self) -> None:
+        panel = self._make_panel()
+        assert panel._config.width == 40
+        assert panel._config.side == "right"
+
+    @pytest.mark.asyncio
+    async def test_app_has_thinking_panel(self) -> None:
+        """AarFixedApp must mount exactly one ThinkingPanel."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            panel = app.query_one(ThinkingPanel)
+            assert panel is not None
+
+    @pytest.mark.asyncio
+    async def test_app_thinking_panel_visible_by_default(self) -> None:
+        """ThinkingPanel starts visible when theme.thinking_panel.enabled is True."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            panel = app.query_one(ThinkingPanel)
+            assert panel.styles.display != "none"
+            assert app._renderer._thinking_visible is True
+
+    @pytest.mark.asyncio
+    async def test_ctrl_k_hides_thinking_panel(self) -> None:
+        """Ctrl+K must hide the ThinkingPanel and set _thinking_visible=False."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            assert app._renderer._thinking_visible is True
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            assert app._renderer._thinking_visible is False
+            panel = app.query_one(ThinkingPanel)
+            assert panel.styles.display == "none"
+
+    @pytest.mark.asyncio
+    async def test_ctrl_k_shows_thinking_panel_again(self) -> None:
+        """Second Ctrl+K must make the ThinkingPanel visible again."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+            assert app._renderer._thinking_visible is True
+            panel = app.query_one(ThinkingPanel)
+            assert panel.styles.display != "none"
+
+    @pytest.mark.asyncio
+    async def test_renderer_has_thinking_panel_reference(self) -> None:
+        """The renderer must hold a reference to the ThinkingPanel after mount."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as _pilot:
+            assert app._renderer._thinking_panel is not None
+            assert isinstance(app._renderer._thinking_panel, ThinkingPanel)
+
+    @pytest.mark.asyncio
+    async def test_clear_screen_clears_panel(self) -> None:
+        """Ctrl+L must also clear the ThinkingPanel log."""
+        agent = _make_mock_agent()
+        config = AgentConfig()
+        app = AarFixedApp(agent=agent, config=config)
+        async with app.run_test(size=(120, 40)) as pilot:
+            panel = app.query_one(ThinkingPanel)
+            # Seed some state
+            panel.begin_step(1)
+            panel.append("some reasoning")
+            assert panel._buffer == "some reasoning"
+            # Clear via Ctrl+L
+            await pilot.press("ctrl+l")
+            await pilot.pause()
+            await pilot.pause()
+            assert panel._buffer == ""
+            assert panel._current_widget is None
 
 
 # ------------------------------------------------------------------

@@ -13,6 +13,7 @@ from agent.transports.themes.models import (
     ScrollbarConfig,
     SeparatorStyle,
     Theme,
+    ThinkingPanelConfig,
 )
 
 _DEFAULT_SCROLL_SPEED = 3
@@ -116,6 +117,22 @@ BERNSTEIN_THEME = Theme(
             size=1,
             scroll_speed=5,
         ),
+        thinking_panel=ThinkingPanelConfig(
+            enabled=True,
+            side="right",
+            width=40,
+            background="#0e0e10",
+            border_style="#2a2a1a",
+            text_style="italic #886600",
+            title_style="dim #554400",
+            scrollbar=ScrollbarConfig(
+                color="#2a2a1f",
+                color_hover="#3a3a2f",
+                color_active="#555540",
+                background="#0e0e10",
+                scroll_speed=5,
+            ),
+        ),
     ),
 )
 
@@ -211,6 +228,21 @@ CLASSIC_THEME = Theme(
             background="#1a1a1a",
             scroll_speed=_DEFAULT_SCROLL_SPEED,
         ),
+        thinking_panel=ThinkingPanelConfig(
+            enabled=True,
+            side="right",
+            width=40,
+            background="#090909",
+            border_style="#1a2a1a",
+            text_style="italic dim green",
+            title_style="dim green",
+            scrollbar=ScrollbarConfig(
+                color="#1a3a1a",
+                color_hover="#2a4a2a",
+                color_active="#3a5a3a",
+                background="#090909",
+            ),
+        ),
     ),
 )
 
@@ -303,6 +335,21 @@ DECKER_THEME = Theme(
             color_active="#00fff7",
             background="#0a0a1a",
             scroll_speed=_DEFAULT_SCROLL_SPEED,
+        ),
+        thinking_panel=ThinkingPanelConfig(
+            enabled=True,
+            side="right",
+            width=42,
+            background="#050510",
+            border_style="#3d0066",
+            text_style="italic #9d00ff",
+            title_style="#6600aa",
+            scrollbar=ScrollbarConfig(
+                color="#3d0066",
+                color_hover="#6600aa",
+                color_active="#9d00ff",
+                background="#050510",
+            ),
         ),
     ),
 )
@@ -403,6 +450,23 @@ SLEEK_THEME = Theme(
             background="#0d1117",
             size=1,
             scroll_speed=4,
+        ),
+        thinking_panel=ThinkingPanelConfig(
+            enabled=True,
+            side="right",
+            width=38,
+            background="#0a0d12",
+            border_style="#2a2a3a",
+            text_style="italic #6c757d",
+            title_style="#3a3a4a",
+            scrollbar=ScrollbarConfig(
+                color="#2a2a3a",
+                color_hover="#3a3a4a",
+                color_active="#6c757d",
+                background="#0a0d12",
+                size=1,
+                scroll_speed=4,
+            ),
         ),
     ),
 )

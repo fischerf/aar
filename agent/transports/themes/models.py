@@ -146,6 +146,19 @@ class InputFieldStyle(BaseModel):
     text_color: str = "#ffffff"
 
 
+class ThinkingPanelConfig(BaseModel):
+    """Configuration for the optional side thinking panel in the fixed TUI."""
+
+    enabled: bool = True  # visible at startup
+    side: str = "right"  # "left" or "right"
+    width: int = 40  # column width of the panel
+    background: str = "#080808"
+    border_style: str = "#2a2a2a"
+    text_style: str = "italic dim"
+    title_style: str = "dim #555555"
+    scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
+
+
 class FixedLayoutConfig(BaseModel):
     """Layout configuration for the full-screen fixed TUI.
 
@@ -165,6 +178,7 @@ class FixedLayoutConfig(BaseModel):
     input_field: InputFieldStyle = Field(default_factory=InputFieldStyle)
     selected_block_style: str = "on #2a2a3a"  # highlight color for selected blocks
     scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
+    thinking_panel: ThinkingPanelConfig = Field(default_factory=ThinkingPanelConfig)
 
 
 class SectionConfig(BaseModel):

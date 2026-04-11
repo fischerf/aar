@@ -25,6 +25,7 @@ MarkdownStream approach: all content lives in one unified scroll container.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -38,6 +39,8 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
+    from textual.containers import Horizontal, Vertical
+    from textual.screen import ModalScreen
     from textual.widgets import Input, RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -64,10 +67,15 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
+from agent.transports.keybinds import KeyBinds
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
-from agent.transports.tui_utils.formatting import _format_args, _side_effect_badge
+from agent.transports.tui_utils.formatting import (
+    _format_approval_args,
+    _format_args,
+    _side_effect_badge,
+)
 
 # ---------------------------------------------------------------------------
 # Widget imports — classes extracted to agent.transports.tui_widgets.*
@@ -87,7 +95,8 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
     _Block,
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
-from agent.transports.tui_widgets.input import HistoryInput  # noqa: F401
+from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
+from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # FixedTUIRenderer — routes agent events to the appropriate widgets
@@ -109,6 +118,7 @@ class FixedTUIRenderer:
         footer: FooterBar,
         log: "RichLog | SelectableRichLog | None" = None,
         chat_body: ChatBody | None = None,
+        thinking_panel: "ThinkingPanel | None" = None,
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
@@ -116,6 +126,7 @@ class FixedTUIRenderer:
     ) -> None:
         self._log = log
         self._chat_body = chat_body
+        self._thinking_panel: ThinkingPanel | None = thinking_panel
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -129,6 +140,7 @@ class FixedTUIRenderer:
         self._config: AgentConfig | None = config
         self._streaming_active = False
         self._stream_in_reasoning = False
+        self._panel_thinking_active: bool = False  # True while a step's reasoning is streaming
         # Live streaming widget references (app mode only)
         self._current_thinking: ThinkingBlock | None = None
         self._current_answer: AnswerBlock | None = None
@@ -167,6 +179,8 @@ class FixedTUIRenderer:
         self._header.theme = theme
         self._footer.theme = theme
         self._footer.theme_name = theme.name
+        if self._thinking_panel is not None:
+            self._thinking_panel.apply_theme(theme, theme.fixed_layout.thinking_panel)
         app.apply_theme(theme)
         self._write(
             Text(f"Switched to theme: {theme.name}", style=theme.dim_text),
@@ -191,14 +205,16 @@ class FixedTUIRenderer:
     # ------------------------------------------------------------------
 
     def toggle_thinking(self) -> bool:
-        """Toggle reasoning block visibility. Returns the new state."""
+        """Toggle the thinking side panel. Returns the new visibility state."""
         self._thinking_visible = not self._thinking_visible
         self._header.thinking_enabled = self._thinking_visible
         self._header.refresh()
-        label = "enabled" if self._thinking_visible else "disabled"
+        if self._thinking_panel is not None:
+            self._thinking_panel.styles.display = "block" if self._thinking_visible else "none"
+        label = "shown" if self._thinking_visible else "hidden"
         self._write(
-            Text(f"Thinking display {label}", style=self.theme.dim_text),
-            raw=f"Thinking display {label}",
+            Text(f"Thinking panel {label}", style=self.theme.dim_text),
+            raw=f"Thinking panel {label}",
             kind="system",
         )
         return self._thinking_visible
@@ -213,7 +229,7 @@ class FixedTUIRenderer:
 
         # --- Streaming tokens -------------------------------------------------
         if isinstance(event, StreamChunk):
-            if event.reasoning_text and self._thinking_visible:
+            if event.reasoning_text:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
@@ -222,10 +238,18 @@ class FixedTUIRenderer:
                         self._header.update(self._header.render())
                     except Exception:
                         self._header.refresh()
-                if self._current_thinking is None:
-                    self._current_thinking = ThinkingBlock(self.theme)
-                    self._mount_streaming(self._current_thinking)
-                self._current_thinking.append(event.reasoning_text)
+                if self._thinking_panel is not None:
+                    # Route reasoning to the side panel
+                    if not self._panel_thinking_active:
+                        self._panel_thinking_active = True
+                        self._thinking_panel.begin_step(self._step_count + 1)
+                    self._thinking_panel.append(event.reasoning_text)
+                elif self._thinking_visible:
+                    # Fallback: no panel — stream inline to chat body (test mode)
+                    if self._current_thinking is None:
+                        self._current_thinking = ThinkingBlock(self.theme)
+                        self._mount_streaming(self._current_thinking)
+                    self._current_thinking.append(event.reasoning_text)
 
             if event.text:
                 if not self._streaming_active:
@@ -237,8 +261,8 @@ class FixedTUIRenderer:
                         self._header.refresh()
                 if self._stream_in_reasoning:
                     self._stream_in_reasoning = False
-                    # Finalize thinking title so it no longer shows "..."
-                    if self._current_thinking is not None:
+                    # Finalize inline thinking block if panel is not in use
+                    if self._thinking_panel is None and self._current_thinking is not None:
                         self._current_thinking.finalize()
                 if self._current_answer is None:
                     self._current_answer = AnswerBlock(self.theme)
@@ -247,8 +271,13 @@ class FixedTUIRenderer:
 
             if event.finished:
                 self._stream_in_reasoning = False
-                if self._current_thinking is not None:
+                if self._thinking_panel is not None:
+                    if self._panel_thinking_active:
+                        self._thinking_panel.finalize_step()
+                        self._panel_thinking_active = False
+                elif self._current_thinking is not None:
                     self._current_thinking.finalize()
+                    self._current_thinking = None
                 # _streaming_active stays True until AssistantMessage arrives
                 # so we know to finalize (not re-create) the answer block.
                 self._header.streaming = False
@@ -267,9 +296,14 @@ class FixedTUIRenderer:
                 if self._current_answer is not None:
                     self._current_answer.finalize(event.content)
                     self._current_answer = None
+                # Fallback: finalize inline thinking block if panel is not in use
                 if self._current_thinking is not None:
                     self._current_thinking.finalize()
                     self._current_thinking = None
+                # Panel: finalize if still active (e.g. reasoning-only response)
+                if self._thinking_panel is not None and self._panel_thinking_active:
+                    self._thinking_panel.finalize_step()
+                    self._panel_thinking_active = False
             else:
                 # No streaming (e.g. non-streaming provider): write static block.
                 if not self.layout.assistant.visible:
@@ -348,21 +382,28 @@ class FixedTUIRenderer:
 
         # --- Reasoning block (non-streaming) ----------------------------------
         elif isinstance(event, ReasoningBlock) and event.content:
-            if not self.layout.reasoning.visible or not self._thinking_visible:
+            if not self.layout.reasoning.visible:
                 return
             text = event.content
-            if len(text) > 500:
-                text = text[:500] + "..."
-            self._write(
-                Panel(
-                    Text(text, style=f"italic {t.reasoning.border_style}"),
-                    title=f"[{t.reasoning.title_style}]Thinking[/]",
-                    border_style=t.reasoning.border_style,
-                    padding=t.reasoning.padding,
-                ),
-                raw=text,
-                kind="reasoning",
-            )
+            if self._thinking_panel is not None:
+                # Route to the side panel — no truncation needed there
+                self._thinking_panel.add_static_block(text, self._step_count + 1)
+            else:
+                # Fallback: write inline to chat body (test mode or panel-less mode)
+                if not self._thinking_visible:
+                    return
+                if len(text) > 500:
+                    text = text[:500] + "..."
+                self._write(
+                    Panel(
+                        Text(text, style=f"italic {t.reasoning.border_style}"),
+                        title=f"[{t.reasoning.title_style}]Thinking[/]",
+                        border_style=t.reasoning.border_style,
+                        padding=t.reasoning.padding,
+                    ),
+                    raw=text,
+                    kind="reasoning",
+                )
 
         # --- Error ------------------------------------------------------------
         elif isinstance(event, ErrorEvent):
@@ -442,25 +483,159 @@ class FixedTUIRenderer:
         t = self.theme
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
-            "Type your message and press Enter.\n"
+            "Type your message and press Ctrl+S to send.\n"
+            "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
             "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
             "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
-            "[bold]Shortcuts:[/]\n"
-            "  [bold]Ctrl+T[/]  cycle theme    "
-            "[bold]Ctrl+K[/]  toggle thinking display\n"
-            "  [bold]Ctrl+L[/]  clear screen   "
-            "[bold]Ctrl+Y[/]  copy block (raw text)\n"
-            "  [bold]↑ / ↓[/]   input history  "
-            "[bold]PgUp/PgDn[/]  scroll\n"
-            "  [bold]Left click[/]  select block  "
-            "[bold]Right click[/]  copy + deselect"
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
             raw="Aar Agent TUI (Textual) — welcome",
             kind="welcome",
         )
+
+
+# ---------------------------------------------------------------------------
+# TerminalModal — command terminal modal (default: Ctrl+P)
+# ---------------------------------------------------------------------------
+
+
+class TerminalModal(ModalScreen):
+    """A modal overlay providing a simple interactive shell / command terminal."""
+
+    BINDINGS = [
+        Binding("escape", "close_terminal", "Close", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    TerminalModal {
+        align: center middle;
+    }
+    TerminalModal > Vertical {
+        width: 80%;
+        height: 70%;
+        border: solid #666666;
+        background: #1a1a1a;
+    }
+    #terminal-title {
+        height: 1;
+        background: #2a2a2a;
+        color: #aaaaaa;
+        text-style: bold;
+        padding: 0 1;
+    }
+    #terminal-output {
+        height: 1fr;
+        background: #1a1a1a;
+        color: #e0e0e0;
+        padding: 0 1;
+        scrollbar-color: #555555;
+        scrollbar-background: #1a1a1a;
+    }
+    #terminal-input {
+        height: 3;
+        background: #222222;
+        color: #e0e0e0;
+        border: tall #444444;
+    }
+    """
+
+    def __init__(self, close_key: str = "ctrl+p") -> None:
+        self._close_key = close_key
+        # Each subprocess is independent, so `cd` must be tracked as state
+        # and forwarded as cwd= to every new subprocess.
+        self._cwd: "Path" = Path.cwd()
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("  Terminal  (Esc to close)", id="terminal-title")
+            yield RichLog(id="terminal-output", markup=True, highlight=False)
+            yield Input(placeholder="$ ...", id="terminal-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#terminal-input", Input).focus()
+        output = self.query_one("#terminal-output", RichLog)
+        output.write(f"[dim]cwd: {self._cwd}[/dim]")
+        output.write("[dim]Type commands and press Enter.  'exit' to close.[/dim]")
+
+    async def _on_key(self, event: object) -> None:
+        """Close the terminal when the configured terminal key is pressed."""
+        if getattr(event, "key", "") == self._close_key:
+            self.dismiss()
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+
+    def _handle_cd(self, cmd: str, output: "RichLog") -> None:
+        """Handle the ``cd`` built-in by updating ``self._cwd``.
+
+        ``cd`` is a shell built-in that only affects the shell process that
+        runs it.  Because every command here spawns a *fresh* subprocess, a
+        bare ``cd`` would evaporate the moment the subprocess exits.  We
+        therefore intercept ``cd`` ourselves, update ``self._cwd``, and pass
+        that directory as ``cwd=`` to every future subprocess.
+        """
+        raw = cmd[2:].strip() if cmd.startswith("cd") and len(cmd) > 2 else ""
+        if not raw or raw == "~":
+            target = Path.home()
+        else:
+            # Strip optional surrounding quotes
+            target = Path(raw.strip("'\"")).expanduser()
+            if not target.is_absolute():
+                target = self._cwd / target
+        resolved = target.resolve()
+        if resolved.is_dir():
+            self._cwd = resolved
+            output.write(f"[dim]{self._cwd}[/dim]")
+        else:
+            output.write(f"[red]cd: {raw}: No such file or directory[/red]")
+
+    async def on_input_submitted(self, event: "Input.Submitted") -> None:
+        """Run the shell command and display output."""
+        inp = self.query_one("#terminal-input", Input)
+        cmd = event.value.strip()
+        inp.value = ""
+        if not cmd:
+            inp.focus()
+            return
+        output = self.query_one("#terminal-output", RichLog)
+        output.write(f"[bold yellow]{self._cwd}$ {cmd}[/bold yellow]")
+
+        if cmd in ("exit", "quit", "close"):
+            self.dismiss()
+            return
+
+        # Handle `cd` as a built-in so the working directory persists across commands.
+        if cmd == "cd" or cmd.startswith("cd ") or cmd.startswith("cd\t"):
+            self._handle_cd(cmd, output)
+            inp.focus()
+            return
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=self._cwd,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            text = stdout.decode("utf-8", errors="replace") if stdout else ""
+            if text:
+                for line in text.splitlines():
+                    output.write(line)
+            if proc.returncode not in (0, None):
+                output.write(f"[dim](exit code {proc.returncode})[/dim]")
+        except asyncio.TimeoutError:
+            output.write("[red]Command timed out (30s)[/red]")
+        except Exception as exc:
+            output.write(f"[red]Error: {exc}[/red]")
+        inp.focus()
+
+    def action_close_terminal(self) -> None:
+        self.dismiss()
 
 
 # ---------------------------------------------------------------------------
@@ -471,28 +646,46 @@ class FixedTUIRenderer:
 class AarFixedApp(App):
     """Full-screen Textual application for the Textual TUI mode."""
 
+    # Class-level BINDINGS with stable IDs so set_keymap() can remap them
+    # from keybinds.json at startup.  Priority is preserved through remapping.
     BINDINGS = [
-        Binding("pageup", "scroll_up", "Page Up", show=False),
-        Binding("pagedown", "scroll_down", "Page Down", show=False),
-        Binding("ctrl+c", "cancel_agent", "Cancel agent", show=False, priority=True),
-        Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False),
-        Binding("ctrl+k", "toggle_thinking", "Toggle thinking", show=False, priority=True),
-        Binding("ctrl+l", "clear_screen", "Clear screen", show=False),
-        Binding("ctrl+y", "copy_block", "Copy selected block", show=False),
+        Binding("pageup", "scroll_up", "Page Up", show=False, id="aar-scroll-up"),
+        Binding("pagedown", "scroll_down", "Page Down", show=False, id="aar-scroll-down"),
+        Binding("ctrl+x", "cancel_agent", "Cancel", show=False, priority=True, id="aar-cancel"),
+        Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False, id="aar-cycle-theme"),
+        Binding(
+            "ctrl+k",
+            "toggle_thinking",
+            "Toggle thinking",
+            show=False,
+            priority=True,
+            id="aar-toggle-thinking",
+        ),
+        Binding("ctrl+l", "clear_screen", "Clear screen", show=False, id="aar-clear-screen"),
+        Binding("ctrl+p", "toggle_terminal", "Terminal", show=False, id="aar-terminal"),
     ]
 
     CSS = """
     Screen {
         layout: vertical;
     }
+    #body-split {
+        height: 1fr;
+        width: 100%;
+    }
     #chat-body {
+        width: 1fr;
+        height: 100%;
         min-height: 4;
+    }
+    ThinkingPanel {
+        height: 100%;
     }
     #input-sep {
         height: 1;
     }
     #user-input {
-        height: 3;
+        height: 5;
         padding: 0 1;
     }
     #footer-sep {
@@ -510,6 +703,7 @@ class AarFixedApp(App):
         registry: ThemeRegistry | None = None,
         verbose: bool = False,
         session_id: str | None = None,
+        keybinds: KeyBinds | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
@@ -523,10 +717,22 @@ class AarFixedApp(App):
         self._store = SessionStore(config.session_dir)
         self._renderer: FixedTUIRenderer | None = renderer
         self._cancel_event: asyncio.Event | None = None
+        self._keybinds: KeyBinds = keybinds if keybinds is not None else KeyBinds()
 
     # ------------------------------------------------------------------
     # Compose the widget tree from theme layout config
     # ------------------------------------------------------------------
+
+    def _make_body_split(self) -> Horizontal:
+        """Build the horizontal body container: ChatBody + ThinkingPanel side by side."""
+        tp_cfg = self._theme.fixed_layout.thinking_panel
+        panel = ThinkingPanel(self._theme, tp_cfg)
+        if tp_cfg.side == "left":
+            panel.add_class("_left_side")
+        body = ChatBody(id="chat-body")
+        if tp_cfg.side == "left":
+            return Horizontal(panel, body, id="body-split")
+        return Horizontal(body, panel, id="body-split")
 
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
@@ -543,23 +749,27 @@ class AarFixedApp(App):
                     self._theme.header.separator.character,
                 ),
             ],
-            "body": lambda: [
-                ChatBody(id="chat-body"),
-            ],
+            "body": lambda: [self._make_body_split()],
             "input": lambda: [
                 ApprovalBar(),
                 SeparatorBar(
                     self._theme.footer.separator.style,
                     self._theme.footer.separator.character,
                 ),
-                HistoryInput(placeholder="> type your message...", id="user-input"),
+                HistoryTextArea(
+                    id="user-input",
+                    show_line_numbers=False,
+                    send_key=self._keybinds.send.key,
+                    history_prev_key=self._keybinds.history_prev.key,
+                    history_next_key=self._keybinds.history_next.key,
+                ),
             ],
             "footer": lambda: [
                 SeparatorBar(
                     self._theme.footer.separator.style,
                     self._theme.footer.separator.character,
                 ),
-                FooterBar(self._theme),
+                FooterBar(self._theme, self._keybinds),
             ],
         }
 
@@ -579,7 +789,7 @@ class AarFixedApp(App):
         app = self
 
         async def _approval(spec, tc) -> ApprovalResult:
-            args_text = "\n".join(f"  {k}: {v}" for k, v in tc.arguments.items() if k != "content")
+            args_text = _format_approval_args(tc.arguments)
             approval_bar = app.query_one(ApprovalBar)
             done = approval_bar.show_prompt(tc.tool_name, args_text)
             await done.wait()
@@ -588,7 +798,34 @@ class AarFixedApp(App):
         return _approval
 
     def on_mount(self) -> None:
+        # ------------------------------------------------------------------
+        # Remap BINDINGS keys from keybinds.json via Textual's keymap API.
+        # This preserves priority=True on the class-level Binding definitions
+        # while still honouring the user's configured key strings.
+        # ------------------------------------------------------------------
+        kb = self._keybinds
+
+        # Warn about any bindings that look invalid or unsupported.
+        import logging as _logging
+
+        _tui_log = _logging.getLogger(__name__)
+        for field_name, warning in kb.validate_all():
+            _tui_log.warning("keybind '%s': %s", field_name, warning)
+
+        self.set_keymap(
+            {
+                "aar-scroll-up": kb.scroll_up.key,
+                "aar-scroll-down": kb.scroll_down.key,
+                "aar-cancel": kb.cancel.key,
+                "aar-cycle-theme": kb.cycle_theme.key,
+                "aar-toggle-thinking": kb.toggle_thinking.key,
+                "aar-clear-screen": kb.clear_screen.key,
+                "aar-terminal": kb.terminal.key,
+            }
+        )
+
         chat_body = self.query_one("#chat-body", ChatBody)
+        thinking_panel = self.query_one(ThinkingPanel)
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
 
@@ -601,6 +838,7 @@ class AarFixedApp(App):
 
         self._renderer = FixedTUIRenderer(
             chat_body=chat_body,
+            thinking_panel=thinking_panel,
             header=header,
             footer=footer,
             verbose=self._verbose,
@@ -610,6 +848,31 @@ class AarFixedApp(App):
         )
 
         self._agent.on_event(self._renderer.render_event)
+
+        # Apply thinking panel styles from theme
+        tp_cfg = fl.thinking_panel
+        thinking_panel.styles.background = tp_cfg.background
+        thinking_panel.styles.width = tp_cfg.width
+        sb = tp_cfg.scrollbar
+        thinking_panel.styles.scrollbar_color = sb.color
+        thinking_panel.styles.scrollbar_color_hover = sb.color_hover
+        thinking_panel.styles.scrollbar_color_active = sb.color_active
+        thinking_panel.styles.scrollbar_background = sb.background
+        thinking_panel.styles.scrollbar_background_hover = sb.background_hover
+        thinking_panel.styles.scrollbar_background_active = sb.background_active
+        thinking_panel.styles.scrollbar_size_vertical = sb.size
+        border_color = tp_cfg.border_style
+        if tp_cfg.side == "left":
+            thinking_panel.styles.border_right = ("solid", border_color)
+            thinking_panel.styles.border_left = None
+        else:
+            thinking_panel.styles.border_left = ("solid", border_color)
+            thinking_panel.styles.border_right = None
+        # Start hidden if not enabled in theme config
+        if not tp_cfg.enabled:
+            thinking_panel.styles.display = "none"
+            self._renderer._thinking_visible = False
+            self._renderer._header.thinking_enabled = False
 
         approval_cb = self._make_approval_callback()
         if hasattr(self._agent, "executor") and hasattr(self._agent.executor, "permissions"):
@@ -652,7 +915,7 @@ class AarFixedApp(App):
 
         self._renderer.render_welcome()
 
-        self.query_one("#user-input", HistoryInput).focus()
+        self.query_one("#user-input", HistoryTextArea).focus()
 
     def apply_theme(self, theme: Theme) -> None:
         """Apply theme colors to Textual widget styles."""
@@ -680,7 +943,7 @@ class AarFixedApp(App):
 
         # Input
         try:
-            inp = self.query_one("#user-input", HistoryInput)
+            inp = self.query_one("#user-input", HistoryTextArea)
             inp.styles.background = fl.input_background
             ifield = fl.input_field
             inp.styles.border = (ifield.border_type, ifield.border_color)
@@ -722,6 +985,16 @@ class AarFixedApp(App):
                     sep._style = theme.footer.separator.style
                     sep._character = theme.footer.separator.character
                 sep.refresh()
+        except Exception:
+            pass
+
+        # Thinking panel
+        try:
+            panel = self.query_one(ThinkingPanel)
+            panel.apply_theme(theme, theme.fixed_layout.thinking_panel)
+            # Preserve current visibility state
+            if self._renderer and not self._renderer._thinking_visible:
+                panel.styles.display = "none"
         except Exception:
             pass
 
@@ -776,10 +1049,17 @@ class AarFixedApp(App):
         self._renderer._stream_in_reasoning = False
         self._renderer._current_thinking = None
         self._renderer._current_answer = None
+        self._renderer._panel_thinking_active = False
+        # Clear the thinking panel
+        try:
+            thinking_panel = self.query_one(ThinkingPanel)
+            await thinking_panel.clear_log()
+        except Exception:
+            pass
         self._renderer.render_welcome()
 
     async def action_cancel_agent(self) -> None:
-        """Ctrl+C — cancel the running agent."""
+        """Ctrl+X — cancel the running agent."""
         if self._cancel_event is not None:
             self._cancel_event.set()
         for worker in self.workers:
@@ -809,41 +1089,23 @@ class AarFixedApp(App):
                 self._restore_input()
                 break
 
-    def action_copy_block(self) -> None:
-        """Ctrl+Y — copy the selected (or last) block's raw text to clipboard."""
-        self._do_copy_selected()
-
-    def _do_copy_selected(self) -> None:
-        """Copy selected block raw text, show feedback, deselect."""
-        try:
-            chat_body = self.query_one("#chat-body", ChatBody)
-        except Exception:
-            return
-        text = chat_body.get_selected_raw()
-        if not text:
-            text = chat_body.get_last_raw()
-        if text:
-            self.copy_to_clipboard(text)
-            # Deselect all selected blocks
-            for block in chat_body.query("RichBlock.selected"):
-                block._selected = False  # type: ignore[attr-defined]
-                block.remove_class("selected")
-            if self._renderer:
-                self._renderer._write(
-                    Text("Copied to clipboard", style=self._renderer.theme.dim_text),
-                    raw="Copied to clipboard",
-                    kind="system",
-                )
+    async def action_toggle_terminal(self) -> None:
+        """Open/close the command terminal modal (default: Ctrl+P)."""
+        for screen in self.screen_stack:
+            if isinstance(screen, TerminalModal):
+                self.pop_screen()
+                return
+        await self.push_screen(TerminalModal(close_key=self._keybinds.terminal.key))
 
     # ------------------------------------------------------------------
     # Input handling
     # ------------------------------------------------------------------
 
-    async def on_input_submitted(self, event: "Input.Submitted") -> None:
-        """Handle user input from the Input widget."""
+    async def on_history_text_area_submitted(self, event: "HistoryTextArea.Submitted") -> None:
+        """Handle user input from the HistoryTextArea widget."""
         user_input = event.value
-        inp = self.query_one("#user-input", HistoryInput)
-        inp.value = ""
+        inp = self.query_one("#user-input", HistoryTextArea)
+        inp.text = ""
         stripped = user_input.strip()
         if not stripped:
             return
@@ -935,10 +1197,6 @@ class AarFixedApp(App):
         elif stripped.lower() == "/think":
             self._renderer.toggle_thinking()
             return
-        elif stripped.lower() == "/copy":
-            self._do_copy_selected()
-            return
-
         # --- Parse multimodal attachments --------------------------------
         content = parse_multimodal_input(stripped)
         if isinstance(content, list):
@@ -961,7 +1219,6 @@ class AarFixedApp(App):
         # --- Run agent (in worker so the UI event loop stays responsive) ---
         header.state = "running"
         header.refresh()
-        inp.placeholder = "working..."
         inp.disabled = True
         chat_body.auto_scroll = True
 
@@ -1029,8 +1286,7 @@ class AarFixedApp(App):
     def _restore_input(self) -> None:
         """Re-enable the input widget after the agent finishes."""
         try:
-            inp = self.query_one("#user-input", HistoryInput)
-            inp.placeholder = "> type your message..."
+            inp = self.query_one("#user-input", HistoryTextArea)
             inp.disabled = False
             inp.focus()
         except Exception:
@@ -1067,6 +1323,8 @@ async def run_tui_fixed(
         LayoutConfig.model_validate(config.tui.layout) if config.tui.layout else LayoutConfig()
     )
 
+    keybinds = KeyBinds.load()
+
     agent = agent or Agent(config=config)
 
     app = AarFixedApp(
@@ -1077,5 +1335,6 @@ async def run_tui_fixed(
         registry=registry,
         verbose=verbose,
         session_id=session_id,
+        keybinds=keybinds,
     )
     await app.run_async()
