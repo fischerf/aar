@@ -4,6 +4,10 @@
 
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
 
+<div style="text-align: center; margin: 30px 0;">
+  <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar TUI Demo" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
+</div>
+
 ## Design goals
 
 - **Thin core loop** — the main execution path is small and readable at a glance
