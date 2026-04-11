@@ -96,6 +96,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
+from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
 from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
 # ---------------------------------------------------------------------------
@@ -497,172 +498,32 @@ class FixedTUIRenderer:
 
 
 # ---------------------------------------------------------------------------
-# TerminalModal — command terminal modal (default: Ctrl+P)
-# ---------------------------------------------------------------------------
-
-
-class TerminalModal(ModalScreen):
-    """A modal overlay providing a simple interactive shell / command terminal."""
-
-    BINDINGS = [
-        Binding("escape", "close_terminal", "Close", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    TerminalModal {
-        align: center middle;
-    }
-    TerminalModal > Vertical {
-        width: 80%;
-        height: 70%;
-        border: solid #666666;
-        background: #1a1a1a;
-    }
-    #terminal-title {
-        height: 1;
-        background: #2a2a2a;
-        color: #aaaaaa;
-        text-style: bold;
-        padding: 0 1;
-    }
-    #terminal-output {
-        height: 1fr;
-        background: #1a1a1a;
-        color: #e0e0e0;
-        padding: 0 1;
-        scrollbar-color: #555555;
-        scrollbar-background: #1a1a1a;
-    }
-    #terminal-input {
-        height: 3;
-        background: #222222;
-        color: #e0e0e0;
-        border: tall #444444;
-    }
-    """
-
-    def __init__(self, close_key: str = "ctrl+p") -> None:
-        self._close_key = close_key
-        # Each subprocess is independent, so `cd` must be tracked as state
-        # and forwarded as cwd= to every new subprocess.
-        self._cwd: "Path" = Path.cwd()
-        super().__init__()
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static("  Terminal  (Esc to close)", id="terminal-title")
-            yield RichLog(id="terminal-output", markup=True, highlight=False)
-            yield Input(placeholder="$ ...", id="terminal-input")
-
-    def on_mount(self) -> None:
-        self.query_one("#terminal-input", Input).focus()
-        output = self.query_one("#terminal-output", RichLog)
-        output.write(f"[dim]cwd: {self._cwd}[/dim]")
-        output.write("[dim]Type commands and press Enter.  'exit' to close.[/dim]")
-
-    async def _on_key(self, event: object) -> None:
-        """Close the terminal when the configured terminal key is pressed."""
-        if getattr(event, "key", "") == self._close_key:
-            self.dismiss()
-            if hasattr(event, "prevent_default"):
-                event.prevent_default()  # type: ignore[union-attr]
-            if hasattr(event, "stop"):
-                event.stop()  # type: ignore[union-attr]
-
-    def _handle_cd(self, cmd: str, output: "RichLog") -> None:
-        """Handle the ``cd`` built-in by updating ``self._cwd``.
-
-        ``cd`` is a shell built-in that only affects the shell process that
-        runs it.  Because every command here spawns a *fresh* subprocess, a
-        bare ``cd`` would evaporate the moment the subprocess exits.  We
-        therefore intercept ``cd`` ourselves, update ``self._cwd``, and pass
-        that directory as ``cwd=`` to every future subprocess.
-        """
-        raw = cmd[2:].strip() if cmd.startswith("cd") and len(cmd) > 2 else ""
-        if not raw or raw == "~":
-            target = Path.home()
-        else:
-            # Strip optional surrounding quotes
-            target = Path(raw.strip("'\"")).expanduser()
-            if not target.is_absolute():
-                target = self._cwd / target
-        resolved = target.resolve()
-        if resolved.is_dir():
-            self._cwd = resolved
-            output.write(f"[dim]{self._cwd}[/dim]")
-        else:
-            output.write(f"[red]cd: {raw}: No such file or directory[/red]")
-
-    async def on_input_submitted(self, event: "Input.Submitted") -> None:
-        """Run the shell command and display output."""
-        inp = self.query_one("#terminal-input", Input)
-        cmd = event.value.strip()
-        inp.value = ""
-        if not cmd:
-            inp.focus()
-            return
-        output = self.query_one("#terminal-output", RichLog)
-        output.write(f"[bold yellow]{self._cwd}$ {cmd}[/bold yellow]")
-
-        if cmd in ("exit", "quit", "close"):
-            self.dismiss()
-            return
-
-        # Handle `cd` as a built-in so the working directory persists across commands.
-        if cmd == "cd" or cmd.startswith("cd ") or cmd.startswith("cd\t"):
-            self._handle_cd(cmd, output)
-            inp.focus()
-            return
-
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=self._cwd,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
-            text = stdout.decode("utf-8", errors="replace") if stdout else ""
-            if text:
-                for line in text.splitlines():
-                    output.write(line)
-            if proc.returncode not in (0, None):
-                output.write(f"[dim](exit code {proc.returncode})[/dim]")
-        except asyncio.TimeoutError:
-            output.write("[red]Command timed out (30s)[/red]")
-        except Exception as exc:
-            output.write(f"[red]Error: {exc}[/red]")
-        inp.focus()
-
-    def action_close_terminal(self) -> None:
-        self.dismiss()
-
-
-# ---------------------------------------------------------------------------
 # Textual App
 # ---------------------------------------------------------------------------
+
+# Single source of truth for key strings.  KeyBinds is defined in
+# agent/transports/keybinds.py — change keys/labels there only.
+_KB = KeyBinds()
 
 
 class AarFixedApp(App):
     """Full-screen Textual application for the Textual TUI mode."""
 
-    # Class-level BINDINGS with stable IDs so set_keymap() can remap them
-    # from keybinds.json at startup.  Priority is preserved through remapping.
+    # Keys come from _KB so that keybinds.py remains the single source of
+    # truth.  Only Textual-specific attrs (action name, priority, show) live
+    # here, because those are framework wiring, not user-facing config.
+    # NOTE: toggle_cp is listed here for future use; action_toggle_cp is not
+    # yet implemented, so Ctrl+P is currently a no-op.
     BINDINGS = [
-        Binding("pageup", "scroll_up", "Page Up", show=False, id="aar-scroll-up"),
-        Binding("pagedown", "scroll_down", "Page Down", show=False, id="aar-scroll-down"),
-        Binding("ctrl+x", "cancel_agent", "Cancel", show=False, priority=True, id="aar-cancel"),
-        Binding("ctrl+t", "cycle_theme", "Cycle theme", show=False, id="aar-cycle-theme"),
+        Binding(_KB.scroll_up.key, "scroll_up", "Page Up", show=False),
+        Binding(_KB.scroll_down.key, "scroll_down", "Page Down", show=False),
+        Binding(_KB.cancel.key, "cancel_agent", "Cancel", show=False, priority=True),
+        Binding(_KB.cycle_theme.key, "cycle_theme", "Cycle theme", show=False),
         Binding(
-            "ctrl+k",
-            "toggle_thinking",
-            "Toggle thinking",
-            show=False,
-            priority=True,
-            id="aar-toggle-thinking",
+            _KB.toggle_thinking.key, "toggle_thinking", "Toggle thinking", show=False, priority=True
         ),
-        Binding("ctrl+l", "clear_screen", "Clear screen", show=False, id="aar-clear-screen"),
-        Binding("ctrl+p", "toggle_terminal", "Terminal", show=False, id="aar-terminal"),
+        Binding(_KB.clear_screen.key, "clear_screen", "Clear screen", show=False),
+        Binding(_KB.toggle_log_viewer.key, "toggle_log_viewer", "Logs", show=False),
     ]
 
     CSS = """
@@ -703,7 +564,6 @@ class AarFixedApp(App):
         registry: ThemeRegistry | None = None,
         verbose: bool = False,
         session_id: str | None = None,
-        keybinds: KeyBinds | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
@@ -717,7 +577,7 @@ class AarFixedApp(App):
         self._store = SessionStore(config.session_dir)
         self._renderer: FixedTUIRenderer | None = renderer
         self._cancel_event: asyncio.Event | None = None
-        self._keybinds: KeyBinds = keybinds if keybinds is not None else KeyBinds()
+        self._keybinds: KeyBinds = KeyBinds()
 
     # ------------------------------------------------------------------
     # Compose the widget tree from theme layout config
@@ -798,32 +658,6 @@ class AarFixedApp(App):
         return _approval
 
     def on_mount(self) -> None:
-        # ------------------------------------------------------------------
-        # Remap BINDINGS keys from keybinds.json via Textual's keymap API.
-        # This preserves priority=True on the class-level Binding definitions
-        # while still honouring the user's configured key strings.
-        # ------------------------------------------------------------------
-        kb = self._keybinds
-
-        # Warn about any bindings that look invalid or unsupported.
-        import logging as _logging
-
-        _tui_log = _logging.getLogger(__name__)
-        for field_name, warning in kb.validate_all():
-            _tui_log.warning("keybind '%s': %s", field_name, warning)
-
-        self.set_keymap(
-            {
-                "aar-scroll-up": kb.scroll_up.key,
-                "aar-scroll-down": kb.scroll_down.key,
-                "aar-cancel": kb.cancel.key,
-                "aar-cycle-theme": kb.cycle_theme.key,
-                "aar-toggle-thinking": kb.toggle_thinking.key,
-                "aar-clear-screen": kb.clear_screen.key,
-                "aar-terminal": kb.terminal.key,
-            }
-        )
-
         chat_body = self.query_one("#chat-body", ChatBody)
         thinking_panel = self.query_one(ThinkingPanel)
         header = self.query_one(HeaderBar)
@@ -1089,13 +923,13 @@ class AarFixedApp(App):
                 self._restore_input()
                 break
 
-    async def action_toggle_terminal(self) -> None:
-        """Open/close the command terminal modal (default: Ctrl+P)."""
+    async def action_toggle_log_viewer(self) -> None:
+        """Open/close the in-app log viewer modal (default: Ctrl+G)."""
         for screen in self.screen_stack:
-            if isinstance(screen, TerminalModal):
+            if isinstance(screen, LogViewerModal):
                 self.pop_screen()
                 return
-        await self.push_screen(TerminalModal(close_key=self._keybinds.terminal.key))
+        await self.push_screen(LogViewerModal())
 
     # ------------------------------------------------------------------
     # Input handling
@@ -1310,6 +1144,40 @@ async def run_tui_fixed(
     theme_name: str | None = None,
 ) -> None:
     """Launch the full-screen TUI with fixed header/footer bars."""
+    import logging as _logging
+    import sys as _sys
+
+    # ------------------------------------------------------------------
+    # Redirect logging away from stderr while Textual owns the terminal.
+    # Writing raw bytes to stderr mid-frame corrupts the layout.
+    #
+    # Strategy:
+    #   1. Remove every StreamHandler that targets sys.stderr (added by
+    #      configure_logging before we get here).
+    #   2. Install TextualHandler — when the app is running, records go to
+    #      the Textual devtools console (``textual console``).  When no
+    #      devtools session is connected, records are silently discarded,
+    #      which is acceptable: users who want persistent output should
+    #      pass --log-file (the FileHandler survives untouched).
+    #   3. Install TUI_LOG_HANDLER — buffers records and streams them into
+    #      the in-app LogViewerModal (Ctrl+G).
+    # ------------------------------------------------------------------
+    try:
+        from textual.logging import TextualHandler as _TextualHandler
+
+        _root = _logging.getLogger()
+        _root.handlers = [
+            h
+            for h in _root.handlers
+            if not (isinstance(h, _logging.StreamHandler) and h.stream is _sys.stderr)
+        ]
+        if not any(isinstance(h, _TextualHandler) for h in _root.handlers):
+            _root.addHandler(_TextualHandler())
+        if not any(h is TUI_LOG_HANDLER for h in _root.handlers):
+            _root.addHandler(TUI_LOG_HANDLER)
+    except Exception:
+        pass  # Never block startup over a logging reconfiguration error
+
     config = config or AgentConfig()
 
     registry = ThemeRegistry()
@@ -1323,8 +1191,6 @@ async def run_tui_fixed(
         LayoutConfig.model_validate(config.tui.layout) if config.tui.layout else LayoutConfig()
     )
 
-    keybinds = KeyBinds.load()
-
     agent = agent or Agent(config=config)
 
     app = AarFixedApp(
@@ -1335,6 +1201,5 @@ async def run_tui_fixed(
         registry=registry,
         verbose=verbose,
         session_id=session_id,
-        keybinds=keybinds,
     )
     await app.run_async()
