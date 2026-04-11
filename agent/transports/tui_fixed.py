@@ -618,7 +618,7 @@ class AarFixedApp(App):
                 ),
                 HistoryTextArea(
                     id="user-input",
-                    show_line_numbers=False,
+                    show_line_numbers=True,
                     send_key=self._keybinds.send.key,
                     history_prev_key=self._keybinds.history_prev.key,
                     history_next_key=self._keybinds.history_next.key,

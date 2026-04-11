@@ -69,7 +69,7 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 
 ```bash
 # Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
-# Ctrl+S send  Ctrl+X cancel  Ctrl+T theme  Ctrl+K think  Ctrl+L clear  Ctrl+P terminal  Ctrl+Q quit
+# Ctrl+S send  Ctrl+X cancel  Ctrl+T theme  Ctrl+K think  Ctrl+L clear  Ctrl+G logs  Ctrl+Q quit
 # Enter = new line in input  Ctrl+Up/Down = history  Page Up/Down = scroll  /quit to exit
 aar tui --fixed
 aar tui --fixed --theme decker
@@ -201,7 +201,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
-| [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut customisation |
+| [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut reference |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
