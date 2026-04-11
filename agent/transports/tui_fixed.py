@@ -488,7 +488,7 @@ class FixedTUIRenderer:
             "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
             "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-            "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]\n\n"
+            "[bold]/policy[/] [bold]/theme[/] [bold]/think[/] [bold]/clear[/]\n\n"
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
