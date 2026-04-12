@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agent.core.guardrails import GuardrailsConfig
+
 
 def _default_system_prompt(shell_path: str = "") -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
@@ -140,6 +142,7 @@ class AgentConfig(BaseModel):
     tools: ToolConfig = Field(default_factory=ToolConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
+    guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     max_steps: int = 50
     max_tokens_per_turn: int = 4096
     timeout: float = 300.0

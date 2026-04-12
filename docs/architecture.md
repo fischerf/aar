@@ -53,6 +53,10 @@ while not done and step < max_steps:
     if response.text:
         emit(AssistantMessage)  # after all tool calls in this step
 
+    if response.stop_reason == "max_tokens" and recovery_budget_remaining:
+        append_internal_continue_prompt()
+        continue
+
     if response.stop_reason in {"end_turn", "max_tokens"}:
         done = True
 ```
@@ -60,6 +64,16 @@ while not done and step < max_steps:
 **Event emission order matters:** `ToolCall` events are emitted *before* the `AssistantMessage` in the same step. This allows `session.to_messages()` to bundle `tool_use` blocks into the assistant message for the next provider call, matching the Anthropic/OpenAI message format.
 
 **Token counts** arrive via the `ProviderMeta` event in both paths. For streaming responses, `_consume_stream()` captures the usage data from the provider's final done-chunk and attaches it to the `ProviderResponse` before the event is emitted. This means the counts are always available on the same `ProviderMeta` event regardless of whether streaming is enabled. See [Tokens, costs, and budgets](tokens.md) for the full pipeline.
+
+### Runtime guardrails
+
+A small `LoopGuardrails` helper in `agent/core/guardrails.py` provides mechanical safety nets that cannot be expressed as prompt instructions:
+
+- **Max-tokens recovery** — when the provider truncates output (`max_tokens`), the loop injects a continuation prompt instead of treating it as completion (up to a configurable limit)
+- **Repetition circuit-breaker** — detects identical tool-call patterns repeating and stops the loop before burning budget in a spin
+- **Budget proximity** — reports when remaining tokens or cost is within a reserve margin (used by transports for visual warnings)
+
+These are purely mechanical — no behavioral scaffolding, no keyword heuristics, no dynamic system-prompt mutation. Agent behavior is guided entirely by the system prompt.
 
 ### Session and messages
 

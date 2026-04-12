@@ -5,7 +5,7 @@ Aar is configured via `AgentConfig` — either in code or through a JSON config 
 ## AgentConfig reference
 
 ```python
-from agent import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
+from agent import AgentConfig, GuardrailsConfig, ProviderConfig, SafetyConfig, ToolConfig
 from agent.core.config import TUIConfig
 
 config = AgentConfig(
@@ -28,6 +28,12 @@ config = AgentConfig(
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         allowed_paths=[],                          # whitelist (empty = allow all non-denied)
         sandbox="local",                           # "local" | "subprocess"
+    ),
+    guardrails=GuardrailsConfig(
+        max_tokens_recoveries=2,                   # retry after output truncation (0 = disabled)
+        max_repeated_tool_steps=3,                  # stop after N identical tool-call patterns
+        reserve_tokens=512,                         # budget proximity threshold
+        reserve_cost_fraction=0.1,                  # cost proximity fraction
     ),
     max_steps=50,
     timeout=300.0,                                 # seconds
@@ -245,6 +251,19 @@ config = AgentConfig(
 ```
 
 > For full details on how token counts flow through the system, how each transport displays them, and per-provider caveats, see **[Tokens, costs, and budgets](tokens.md)**.
+
+## Runtime guardrails
+
+`GuardrailsConfig` provides mechanical safety nets for the agent loop — things that cannot be expressed as system prompt instructions.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `max_tokens_recoveries` | `2` | How many times the loop retries after output truncation (`max_tokens`). Set to `0` to disable. |
+| `max_repeated_tool_steps` | `3` | Stop the loop when the same tool-call pattern repeats this many times in a row. |
+| `reserve_tokens` | `512` | Token budget proximity threshold — the loop reports "near budget" below this margin. |
+| `reserve_cost_fraction` | `0.1` | Cost proximity — fraction of `cost_limit` that triggers "near budget". |
+
+The guardrails are deliberately minimal. Agent behavior (planning, persistence, completion quality) is guided entirely by the system prompt — see the `rules.md` file loaded via the configurable system prompt layers.
 
 ## Configurable system prompt
 
