@@ -31,7 +31,7 @@ from agent.core.state import AgentState
 
 # ... this could be added to break local models!
 #
-#7. Introduce a deliberate bug:
+# 7. Introduce a deliberate bug:
 #   - Change one test to expect the wrong value.
 #   - Detect the inconsistency and fix the test.
 
@@ -203,6 +203,7 @@ class TestPlanExecution:
                 allowed_paths=[str(work_dir)],
             ),
             safety=SafetyConfig(
+                read_only=False,
                 require_approval_for_writes=False,
                 require_approval_for_execute=False,
                 allowed_paths=[str(work_dir)],

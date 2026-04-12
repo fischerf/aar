@@ -33,14 +33,22 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         p = Path(path).resolve()
         if not p.is_file():
             raise FileNotFoundError(f"File not found: {p}")
-        text = p.read_text(encoding="utf-8")
-        count = text.count(old_string)
+        raw = p.read_bytes()
+        crlf = b"\r\n" in raw
+        text = raw.decode("utf-8")
+        # Normalize to LF for matching so the model's \n-based strings always work
+        norm_text = text.replace("\r\n", "\n")
+        norm_old = old_string.replace("\r\n", "\n")
+        norm_new = new_string.replace("\r\n", "\n")
+        count = norm_text.count(norm_old)
         if count == 0:
             raise ValueError(f"old_string not found in {p}")
         if count > 1:
             raise ValueError(f"old_string found {count} times in {p} — must be unique")
-        new_text = text.replace(old_string, new_string, 1)
-        p.write_text(new_text, encoding="utf-8")
+        norm_result = norm_text.replace(norm_old, norm_new, 1)
+        # Restore original line endings
+        result = norm_result.replace("\n", "\r\n") if crlf else norm_result
+        p.write_bytes(result.encode("utf-8"))
         return f"Edited {p}: replaced 1 occurrence"
 
     async def list_directory(path: str = ".") -> str:
