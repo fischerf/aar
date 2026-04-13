@@ -144,7 +144,6 @@ class AgentConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     max_steps: int = 50
-    max_tokens_per_turn: int = 4096
     timeout: float = 300.0
     max_retries: int = 3
     streaming: bool = False  # use token-level streaming when the provider supports it

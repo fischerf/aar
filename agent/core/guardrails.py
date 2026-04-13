@@ -33,6 +33,7 @@ def _get_state(session: Session) -> dict[str, Any]:
             "max_tokens_recovery_count": 0,
             "last_tool_signature": None,
             "repeated_tool_steps": 0,
+            "near_budget_warned": False,
         }
     return session.metadata[_STATE_KEY]
 
@@ -89,6 +90,24 @@ class LoopGuardrails:
     # ------------------------------------------------------------------
     # Budget proximity
     # ------------------------------------------------------------------
+
+    def check_near_budget(
+        self,
+        session: Session,
+        token_budget: int,
+        cost_limit: float,
+    ) -> bool:
+        """Return *True* exactly once — the first step that enters budget proximity.
+
+        Subsequent calls return *False* so only one warning is emitted per session.
+        """
+        state = _get_state(session)
+        if state["near_budget_warned"]:
+            return False
+        if self.near_budget(session, token_budget, cost_limit):
+            state["near_budget_warned"] = True
+            return True
+        return False
 
     def near_budget(
         self,

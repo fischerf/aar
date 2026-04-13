@@ -104,6 +104,26 @@ async def run_loop(
             if _apply_usage_and_budget(session, on_event, response, config):
                 return session
 
+            # Budget proximity warning — emitted once when entering the reserve margin
+            if guardrails.check_near_budget(session, config.token_budget, config.cost_limit):
+                _log.warning(
+                    "Near budget at step %d (tokens=%d budget=%d cost=%.4f limit=%.4f)",
+                    session.step_count,
+                    session.total_tokens,
+                    config.token_budget,
+                    session.total_cost,
+                    config.cost_limit,
+                    extra=_extra,
+                )
+                _emit(
+                    session,
+                    on_event,
+                    ErrorEvent(
+                        message="Approaching budget limit — stopping soon",
+                        recoverable=True,
+                    ),
+                )
+
             _log.info(
                 "step=%d provider_ms=%.0f tool_calls=%d",
                 session.step_count,
