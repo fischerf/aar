@@ -352,7 +352,7 @@ aar tui --fixed                 # full-screen mode with fixed bars, scrollable b
 aar tui --fixed --theme decker  # fixed mode with a specific theme
 ```
 
-Fixed mode includes keyboard shortcuts: **Ctrl+S** (send), **Ctrl+X** (cancel agent), **Ctrl+T** (cycle theme), **Ctrl+K** (toggle thinking), **Ctrl+L** (clear), **Ctrl+P** (terminal modal), **Ctrl+Q** (quit), **Ctrl+Up/Down** (input history), **Page Up/Down** (scroll). Enter adds a new line; Ctrl+S submits. All shortcuts except Ctrl+Q are configurable via `~/.aar/keybinds.json` — run `aar init` to generate the file. See [Themes & Layout](themes.md) for the full reference.
+Fixed mode includes keyboard shortcuts: **Ctrl+S** (send), **Ctrl+X** (cancel agent), **Ctrl+T** (cycle theme), **Ctrl+K** (toggle thinking), **Ctrl+L** (clear), **Ctrl+G** (log viewer), **Ctrl+Q** (quit), **Ctrl+Up/Down** (input history), **Page Up/Down** (scroll). Enter adds a new line; Ctrl+S submits. See [Themes & Layout](themes.md) for the full reference.
 
 **At runtime** (inside the TUI):
 
@@ -364,19 +364,4 @@ Fixed mode includes keyboard shortcuts: **Ctrl+S** (send), **Ctrl+X** (cancel ag
 
 Built-in themes: `default`, `contrast`, `decker`, `sleek`. Custom themes go in `~/.aar/themes/<name>.json` — run `aar init` to get a template and JSON schema.
 
-### Keybinds file
 
-`aar init` also creates `~/.aar/keybinds.json` with the default key bindings for
-the full-screen TUI.  Edit it to rebind any action or change its footer label:
-
-```json
-{
-  "send":     {"key": "ctrl+s", "label": "send"},
-  "cancel":   {"key": "ctrl+x", "label": "cancel"},
-  "terminal": {"key": "ctrl+p", "label": "terminal"}
-}
-```
-
-A bare string `"ctrl+x"` is accepted as shorthand for `{"key": "ctrl+x"}`.
-The file is never overwritten by `aar init` once it exists (use `--force` to reset it).
-See [Themes & Layout — Customising keyboard shortcuts](themes.md#customising-keyboard-shortcuts) for the full field reference and validation details.
