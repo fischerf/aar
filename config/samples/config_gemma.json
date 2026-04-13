@@ -76,6 +76,12 @@
       }
     }
   },
+  "guardrails": {
+    "max_tokens_recoveries": 2,
+    "max_repeated_tool_steps": 3,
+    "reserve_tokens": 512,
+    "reserve_cost_fraction": 0.1
+  },
   "max_steps": 150,
   "max_tokens_per_turn": 8192,
   "timeout": 500.0,
