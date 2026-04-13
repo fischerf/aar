@@ -43,9 +43,8 @@ cmd = "./launch.sh"
 
 [agent_servers.aar.targets.linux-aarch64]
 archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-linux-aarch64.tar.gz"
-sha256 = "3d4777b2024ff87838639d61aaac69fb63cfc2ec212521a0698754a9c70b30b0"
 cmd = "./launch.sh"
 
 [agent_servers.aar.targets.windows-x86_64]
-archive = "http://localhost:8080/aar-zed-windows-x86_64.zip"
-cmd = "launch.cmd"
+archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-windows-x86_64.zip"
+cmd = "./launch.cmd"

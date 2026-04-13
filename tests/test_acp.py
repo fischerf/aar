@@ -1,16 +1,23 @@
-"""Tests for the ACP transport (Agent Communication Protocol v0.2)."""
+"""Tests for the ACP transport (Agent Communication Protocol).
+
+Covers:
+- AarAcpAgent (SDK-based stdio agent for Zed) — requires agent-client-protocol
+- AcpTransport + create_acp_asgi_app (HTTP REST transport)
+- Shared data models and helpers
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
 from agent.transports.acp import (
+    AarAcpAgent,
     AcpMessage,
     AcpRun,
     AcpTransport,
@@ -24,9 +31,12 @@ from agent.transports.acp import (
     RunMode,
     RunStatus,
     _collect_output,
+    _extract_text,
+    _map_stop_reason,
     _sse_line,
     create_acp_asgi_app,
 )
+from agent.core.state import AgentState
 from tests.conftest import MockProvider
 
 # ---------------------------------------------------------------------------
@@ -68,6 +78,192 @@ def _make_transport(provider: MockProvider) -> AcpTransport:
 
 def _user_msg(text: str) -> AcpMessage:
     return AcpMessage.from_text("user", text)
+
+
+def _make_sdk_agent(provider: MockProvider) -> AarAcpAgent:
+    """Return an AarAcpAgent with the mock provider injected."""
+    config = _make_config()
+    agent = AarAcpAgent(config=config, agent_name="test-agent")
+
+    def patched_make():
+        from agent.core.agent import Agent
+
+        return Agent(
+            config=agent._config,
+            provider=provider,
+            approval_callback=agent._approval_callback,
+            registry=agent._registry,
+        )
+
+    agent._make_aar_agent = patched_make  # type: ignore[method-assign]
+    return agent
+
+
+# ---------------------------------------------------------------------------
+# SDK-based stdio agent tests
+# ---------------------------------------------------------------------------
+
+
+acp_sdk = pytest.importorskip("acp", reason="agent-client-protocol not installed")
+
+
+class TestExtractText:
+    def test_dict_blocks(self):
+        assert _extract_text([{"text": "hello"}, {"text": "world"}]) == "hello\nworld"
+
+    def test_object_blocks(self):
+        block = MagicMock()
+        block.text = "hi"
+        assert _extract_text([block]) == "hi"
+
+    def test_empty(self):
+        assert _extract_text([]) == ""
+
+    def test_skips_non_text(self):
+        block = MagicMock(spec=[])  # no .text attribute
+        assert _extract_text([block]) == ""
+
+
+class TestMapStopReason:
+    def test_completed(self):
+        assert _map_stop_reason(AgentState.COMPLETED) == "end_turn"
+
+    def test_max_steps(self):
+        assert _map_stop_reason(AgentState.MAX_STEPS) == "max_turns"
+
+    def test_other_states_are_end_turn(self):
+        for state in (AgentState.ERROR, AgentState.TIMED_OUT, AgentState.CANCELLED):
+            assert _map_stop_reason(state) == "end_turn"
+
+
+class TestAarAcpAgentInitialize:
+    @pytest.mark.asyncio
+    async def test_returns_protocol_version(self):
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=1)
+        assert resp.protocol_version == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_sdk_protocol_version(self):
+        from acp import PROTOCOL_VERSION
+
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=42)
+        assert resp.protocol_version == PROTOCOL_VERSION
+
+
+class TestAarAcpAgentNewSession:
+    @pytest.mark.asyncio
+    async def test_returns_session_id(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        resp = await agent.new_session()
+        assert resp.session_id
+        assert resp.session_id in agent._sessions
+
+    @pytest.mark.asyncio
+    async def test_each_call_new_id(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r1 = await agent.new_session()
+        r2 = await agent.new_session()
+        assert r1.session_id != r2.session_id
+
+
+class TestAarAcpAgentPrompt:
+    @pytest.mark.asyncio
+    async def test_prompt_returns_end_turn(self, tmp_path):
+        provider = MockProvider()
+        provider.enqueue_text("Hello from Aar!", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        sdk_agent._store = __import__("agent.memory.session_store", fromlist=["SessionStore"]).SessionStore(tmp_path)
+
+        # Create a session first
+        new_sess_resp = await sdk_agent.new_session()
+        session_id = new_sess_resp.session_id
+
+        # Wire up a mock conn to capture session_update calls
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        resp = await sdk_agent.prompt(
+            prompt=[{"text": "Hello"}],
+            session_id=session_id,
+        )
+
+        assert resp.stop_reason == "end_turn"
+        # session_update should have been called with the assistant reply
+        mock_conn.session_update.assert_called()
+        call_kwargs = mock_conn.session_update.call_args_list[0].kwargs
+        assert call_kwargs["session_id"] == session_id
+
+    @pytest.mark.asyncio
+    async def test_prompt_persists_session(self, tmp_path):
+        provider = MockProvider()
+        provider.enqueue_text("first", stop="end_turn")
+        provider.enqueue_text("second", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+        sdk_agent._store = SessionStore(tmp_path)
+
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r1 = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "turn 1"}], session_id=r1.session_id)
+        await sdk_agent.prompt(prompt=[{"text": "turn 2"}], session_id=r1.session_id)
+
+        # Session should have accumulated events for both turns
+        session = sdk_agent._sessions[r1.session_id]
+        assert session.step_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_prompt_no_conn_no_crash(self, tmp_path):
+        """When _conn is None (no client connected), prompt should still complete."""
+        provider = MockProvider()
+        provider.enqueue_text("silent", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+        sdk_agent._store = SessionStore(tmp_path)
+        sdk_agent._conn = None  # No client
+
+        r = await sdk_agent.new_session()
+        resp = await sdk_agent.prompt(prompt=[{"text": "hi"}], session_id=r.session_id)
+        assert resp.stop_reason == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_prompt_unknown_session_creates_fresh(self, tmp_path):
+        """Prompting with an unrecognised session_id should not crash."""
+        provider = MockProvider()
+        provider.enqueue_text("ok", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+        sdk_agent._store = SessionStore(tmp_path)
+        sdk_agent._conn = AsyncMock()
+
+        resp = await sdk_agent.prompt(
+            prompt=[{"text": "anything"}],
+            session_id="nonexistent-session-id",
+        )
+        assert resp.stop_reason == "end_turn"
 
 
 # ---------------------------------------------------------------------------

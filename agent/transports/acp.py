@@ -1,22 +1,23 @@
-"""ACP transport — Agent Communication Protocol (v0.2) server for Aar.
+"""ACP transport — Agent Communication Protocol server for Aar.
 
-Exposes Aar as a standards-compliant ACP agent.  Implements all required
-REST endpoints plus SSE streaming so any ACP-compatible orchestrator or
-client can discover and drive the agent.
+Two transports in one module:
+
+1. **Stdio (SDK-based)** — ``AarAcpAgent`` + ``run_acp_stdio()``
+   Uses the official ``agent-client-protocol`` Python SDK.  This is what
+   ``aar acp`` starts by default and what editors like Zed connect to via
+   the ``"type": "custom"`` agent server setting.
+
+2. **HTTP REST** — ``AcpTransport`` + ``create_acp_asgi_app()``
+   A raw ASGI app that speaks ACP v0.2 over HTTP/SSE.  Useful for
+   programmatic or remote use-cases where stdio is not available.
+
+Quick reference
+---------------
+   aar acp                        # stdio (Zed, CLI orchestrators)
+   aar acp --http                 # HTTP REST on 127.0.0.1:8000
+   aar acp --http --port 9000     # custom port
 
 Spec: https://agentcommunicationprotocol.dev
-
-Endpoints
----------
-GET  /agents                       — list registered agents
-GET  /agents/{name}                — agent manifest
-POST /runs                         — create a run (sync / async / stream)
-GET  /runs/{run_id}                — run status + output
-POST /runs/{run_id}                — resume an awaiting run
-POST /runs/{run_id}/cancel         — cancel an in-progress run
-GET  /runs/{run_id}/events         — list all ACP events for a run
-GET  /sessions/{session_id}        — session metadata
-GET  /ping                         — health check
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from agent.core.agent import Agent
+from agent.core.agent import Agent as AarAgent
 from agent.core.config import AgentConfig, load_config
 from agent.core.events import (
     AssistantMessage,
@@ -51,11 +52,207 @@ from agent.tools.schema import ToolSpec
 
 logger = logging.getLogger(__name__)
 
-_USER_CONFIG = __import__("pathlib").Path.home() / ".aar" / "config.json"
+
+def _load_default_config() -> AgentConfig:
+    from pathlib import Path
+
+    p = Path.home() / ".aar" / "config.json"
+    return load_config(p) if p.is_file() else AgentConfig()
+
+
+async def _auto_approve(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
+    logger.info("ACP transport: auto-approving %s", tc.tool_name)
+    return ApprovalResult.APPROVED
+
+
+# ===========================================================================
+# Part 1 — SDK-based stdio agent  (for Zed and any ACP-compatible editor)
+# ===========================================================================
+
+
+def _extract_text(prompt_blocks: list) -> str:
+    """Pull plain text out of ACP SDK prompt content blocks."""
+    parts: list[str] = []
+    for block in prompt_blocks:
+        if isinstance(block, dict):
+            text = block.get("text", "")
+        else:
+            text = getattr(block, "text", None) or ""
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _map_stop_reason(state: AgentState) -> str:
+    if state == AgentState.MAX_STEPS:
+        return "max_turns"
+    return "end_turn"
+
+
+class AarAcpAgent:
+    """Aar agent wrapped as an ACP stdio agent via the official SDK.
+
+    Subclasses ``acp.Agent`` (from the ``agent-client-protocol`` package).
+    Zed and other ACP-compatible editors communicate with this class over
+    stdin/stdout using the SDK's framing — no HTTP server needed.
+
+    Import lazily so the package is optional at import time.
+    """
+
+    # Real base class is set in __init_subclass__ trick below; we set it
+    # dynamically in ``_build_class()`` to keep the import optional.
+
+    def __init__(
+        self,
+        config: AgentConfig | None = None,
+        approval_callback: ApprovalCallback | None = None,
+        registry: ToolRegistry | None = None,
+        agent_name: str = "aar",
+    ) -> None:
+        self._config = config or _load_default_config()
+        self._approval_callback: ApprovalCallback = approval_callback or _auto_approve
+        self._registry = registry
+        self._agent_name = agent_name
+        self._store = SessionStore(self._config.session_dir)
+        self._sessions: dict[str, Session] = {}
+        self._conn: Any = None  # acp.interfaces.Client, set in on_connect
+
+    # ------------------------------------------------------------------
+    # ACP SDK lifecycle hooks
+    # ------------------------------------------------------------------
+
+    def on_connect(self, conn: Any) -> None:
+        self._conn = conn
+
+    async def initialize(
+        self,
+        protocol_version: int,
+        client_capabilities: Any = None,
+        client_info: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        from acp import PROTOCOL_VERSION, InitializeResponse
+        from acp.schema import AgentCapabilities, Implementation
+
+        return InitializeResponse(
+            protocol_version=PROTOCOL_VERSION,
+            agent_capabilities=AgentCapabilities(),
+            agent_info=Implementation(name="aar", title="Aar Agent", version="0.3.2"),
+        )
+
+    async def new_session(
+        self,
+        cwd: str = "",
+        mcp_servers: list | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        from acp import NewSessionResponse
+
+        session = Session()
+        self._sessions[session.session_id] = session
+        self._store.save(session)
+        return NewSessionResponse(session_id=session.session_id)
+
+    async def prompt(
+        self,
+        prompt: list,
+        session_id: str,
+        **kwargs: Any,
+    ) -> Any:
+        from acp import PromptResponse, text_block, update_agent_message
+
+        text = _extract_text(prompt)
+
+        # Restore session from in-memory cache or disk
+        session = self._sessions.get(session_id)
+        if session is None:
+            try:
+                session = self._store.load(session_id)
+            except FileNotFoundError:
+                session = None
+
+        aar_agent = self._make_aar_agent()
+        update_tasks: list[asyncio.Task] = []
+
+        def on_event(event: Event) -> None:
+            if isinstance(event, AssistantMessage) and event.content and self._conn:
+                task = asyncio.create_task(
+                    self._conn.session_update(
+                        session_id=session_id,
+                        update=update_agent_message(text_block(event.content)),
+                        source=self._agent_name,
+                    )
+                )
+                update_tasks.append(task)
+
+        aar_agent.on_event(on_event)
+        finished = await aar_agent.run(text, session)
+
+        # Flush all pending session_update tasks before returning
+        if update_tasks:
+            await asyncio.gather(*update_tasks, return_exceptions=True)
+
+        self._sessions[session_id] = finished
+        self._store.save(finished)
+
+        return PromptResponse(stop_reason=_map_stop_reason(finished.state))
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _make_aar_agent(self) -> AarAgent:
+        return AarAgent(
+            config=self._config,
+            approval_callback=self._approval_callback,
+            registry=self._registry,
+        )
+
+
+async def run_acp_stdio(
+    config: AgentConfig | None = None,
+    approval_callback: ApprovalCallback | None = None,
+    registry: ToolRegistry | None = None,
+    agent_name: str = "aar",
+) -> None:
+    """Run the Aar ACP agent over stdio (SDK transport).
+
+    Reads from stdin, writes to stdout.  All other output (logging, errors)
+    goes to stderr so it does not corrupt the JSON-RPC stream.
+    """
+    try:
+        from acp import Agent as SdkAgent
+        from acp import run_agent
+    except ImportError as exc:
+        raise ImportError(
+            "agent-client-protocol is required for the ACP stdio transport. "
+            "Install with: pip install agent-client-protocol"
+        ) from exc
+
+    # Dynamically create a proper subclass of the SDK's Agent base class.
+    # AarAcpAgent must come first so our method implementations shadow the
+    # Protocol stubs defined on SdkAgent (Agent Protocol).
+    agent_cls = type(
+        "AarSdkAgent",
+        (AarAcpAgent, SdkAgent),
+        {},
+    )
+    agent = agent_cls(
+        config=config,
+        approval_callback=approval_callback,
+        registry=registry,
+        agent_name=agent_name,
+    )
+    await run_agent(agent)
+
+
+# ===========================================================================
+# Part 2 — HTTP REST transport  (ACP v0.2 over HTTP/SSE)
+# ===========================================================================
 
 
 # ---------------------------------------------------------------------------
-# ACP data models
+# ACP HTTP data models
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +290,6 @@ class AcpMessage(BaseModel):
 
     @property
     def text(self) -> str:
-        """Concatenated plain-text content across all parts."""
         return "".join(p.content for p in self.parts if p.content_type == "text/plain")
 
     @classmethod
@@ -121,7 +317,7 @@ class AcpRun(BaseModel):
 
 
 class AgentManifest(BaseModel):
-    """ACP agent manifest — describes the agent's identity and capabilities."""
+    """ACP agent manifest."""
 
     name: str
     description: str
@@ -176,23 +372,20 @@ AcpSseEvent = (
 
 
 # ---------------------------------------------------------------------------
-# Internal run record (not serialised over the wire)
+# Internal run record
 # ---------------------------------------------------------------------------
 
 
 class _RunRecord:
-    """Mutable in-process state for a single run."""
-
     def __init__(self, run: AcpRun) -> None:
         self.run = run
         self.cancel_event: asyncio.Event = asyncio.Event()
         self.task: asyncio.Task | None = None
-        # ACP event log (append-only; used by GET /runs/{id}/events)
         self.acp_events: list[AcpSseEvent] = []
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -200,23 +393,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _auto_approve(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
-    logger.info("ACP transport: auto-approving %s", tc.tool_name)
-    return ApprovalResult.APPROVED
-
-
 def _sse_line(obj: BaseModel) -> bytes:
-    """Encode a Pydantic model as a single SSE data line."""
     return f"data: {obj.model_dump_json()}\n\n".encode()
 
 
 # ---------------------------------------------------------------------------
-# AcpTransport
+# AcpTransport — HTTP backend
 # ---------------------------------------------------------------------------
 
 
 class AcpTransport:
-    """Bridges Aar's agent runtime to the ACP REST/SSE protocol."""
+    """Bridges Aar's agent runtime to the ACP v0.2 HTTP/SSE protocol."""
 
     def __init__(
         self,
@@ -226,22 +413,13 @@ class AcpTransport:
         agent_name: str = "aar",
         agent_description: str = "Aar adaptive action & reasoning agent",
     ) -> None:
-        if config is None:
-            from pathlib import Path
-
-            p = Path.home() / ".aar" / "config.json"
-            config = load_config(p) if p.is_file() else AgentConfig()
-        self.config = config
+        self.config = config or _load_default_config()
         self.approval_callback: ApprovalCallback = approval_callback or _auto_approve
         self.registry = registry
         self.agent_name = agent_name
         self.agent_description = agent_description
-        self.store = SessionStore(config.session_dir)
+        self.store = SessionStore(self.config.session_dir)
         self._runs: dict[str, _RunRecord] = {}
-
-    # ------------------------------------------------------------------
-    # Agent manifest
-    # ------------------------------------------------------------------
 
     def get_manifest(self) -> AgentManifest:
         return AgentManifest(
@@ -256,10 +434,6 @@ class AcpTransport:
             },
         )
 
-    # ------------------------------------------------------------------
-    # Run creation
-    # ------------------------------------------------------------------
-
     async def create_run(
         self,
         agent_name: str,
@@ -267,22 +441,11 @@ class AcpTransport:
         mode: RunMode,
         session_id: str | None = None,
     ) -> tuple[AcpRun, asyncio.Queue[AcpSseEvent | None] | None]:
-        """Create and start a new run.
-
-        Returns (run, queue).  For stream mode *queue* carries SSE events;
-        for sync/async it is ``None``.  Sync mode blocks until completion.
-        """
         if agent_name != self.agent_name:
             raise ValueError(f"Unknown agent: {agent_name!r}")
 
-        # Extract plain-text prompt from ACP messages
         prompt = "\n".join(m.text for m in input_messages if m.role == "user") or ""
-
-        run = AcpRun(
-            agent_name=agent_name,
-            status=RunStatus.CREATED,
-            session_id=session_id,
-        )
+        run = AcpRun(agent_name=agent_name, status=RunStatus.CREATED, session_id=session_id)
         record = _RunRecord(run)
         self._runs[run.run_id] = record
         record.acp_events.append(RunCreatedEvent(run=run))
@@ -298,17 +461,12 @@ class AcpTransport:
             )
             return run, None
 
-        # STREAM — caller consumes the queue as SSE
         queue: asyncio.Queue[AcpSseEvent | None] = asyncio.Queue()
         run.status = RunStatus.IN_PROGRESS
         record.task = asyncio.create_task(
             self._execute_run(record, prompt, session_id, queue=queue)
         )
         return run, queue
-
-    # ------------------------------------------------------------------
-    # Run execution (shared by all modes)
-    # ------------------------------------------------------------------
 
     async def _execute_run(
         self,
@@ -319,19 +477,16 @@ class AcpTransport:
     ) -> None:
         run = record.run
         run.status = RunStatus.IN_PROGRESS
-
         in_progress_evt = RunInProgressEvent(run=run.model_copy())
         record.acp_events.append(in_progress_evt)
         if queue:
             await queue.put(in_progress_evt)
 
         try:
-            agent = self._make_agent()
-
-            # Buffer for streaming: accumulate chunks into assistant messages
+            aar_agent = self._make_agent()
             _stream_buf: list[str] = []
 
-            def _flush_stream_buf_sync() -> None:
+            def _flush_buf() -> None:
                 nonlocal _stream_buf
                 if _stream_buf and queue:
                     text = "".join(_stream_buf)
@@ -346,19 +501,16 @@ class AcpTransport:
                     _stream_buf.append(event.text)
                 elif isinstance(event, AssistantMessage) and event.content:
                     if queue:
-                        # Flush any accumulated stream chunks first, then emit the full message
-                        _flush_stream_buf_sync()
+                        _flush_buf()
                         msg = AcpMessage.from_text("assistant", event.content)
                         evt = MessageCreatedEvent(message=msg)
                         record.acp_events.append(evt)
                         queue.put_nowait(evt)
                     else:
-                        # Sync / async: collect output
                         run.output.append(AcpMessage.from_text("assistant", event.content))
 
-            agent.on_event(on_event)
+            aar_agent.on_event(on_event)
 
-            # Load or create session
             session: Session | None = None
             if session_id:
                 try:
@@ -366,21 +518,17 @@ class AcpTransport:
                 except FileNotFoundError:
                     pass
 
-            finished_session = await agent.run(
-                prompt, session, cancel_event=record.cancel_event
-            )
-            self.store.save(finished_session)
-            run.session_id = finished_session.session_id
+            finished = await aar_agent.run(prompt, session, cancel_event=record.cancel_event)
+            self.store.save(finished)
+            run.session_id = finished.session_id
 
-            # Flush any remaining stream buffer
             if queue and _stream_buf:
-                _flush_stream_buf_sync()
+                _flush_buf()
 
-            # For sync/async collect final output if not already streamed
             if not queue:
-                run.output = _collect_output(finished_session)
+                run.output = _collect_output(finished)
 
-            if finished_session.state == AgentState.CANCELLED:
+            if finished.state == AgentState.CANCELLED:
                 run.finish(RunStatus.CANCELLED)
                 evt: AcpSseEvent = RunCancelledEvent(run=run.model_copy())
             else:
@@ -400,7 +548,7 @@ class AcpTransport:
             raise
 
         except Exception as exc:
-            logger.exception("ACP run %s failed", run.run_id)
+            logger.exception("ACP HTTP run %s failed", run.run_id)
             run.finish(RunStatus.FAILED, error=str(exc))
             evt = RunFailedEvent(run=run.model_copy())
             record.acp_events.append(evt)
@@ -409,11 +557,7 @@ class AcpTransport:
 
         finally:
             if queue:
-                await queue.put(None)  # sentinel — end of stream
-
-    # ------------------------------------------------------------------
-    # Run queries & actions
-    # ------------------------------------------------------------------
+                await queue.put(None)
 
     def get_run(self, run_id: str) -> AcpRun | None:
         record = self._runs.get(run_id)
@@ -450,34 +594,24 @@ class AcpTransport:
         except FileNotFoundError:
             return None
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _make_agent(self) -> Agent:
-        return Agent(
+    def _make_agent(self) -> AarAgent:
+        return AarAgent(
             config=self.config,
             approval_callback=self.approval_callback,
             registry=self.registry,
         )
 
 
-# ---------------------------------------------------------------------------
-# Output collector (sync / async modes)
-# ---------------------------------------------------------------------------
-
-
 def _collect_output(session: Session) -> list[AcpMessage]:
-    """Extract final assistant messages from a completed session."""
-    messages: list[AcpMessage] = []
-    for event in session.events:
-        if isinstance(event, AssistantMessage) and event.content:
-            messages.append(AcpMessage.from_text("assistant", event.content))
-    return messages
+    return [
+        AcpMessage.from_text("assistant", e.content)
+        for e in session.events
+        if isinstance(e, AssistantMessage) and e.content
+    ]
 
 
 # ---------------------------------------------------------------------------
-# Minimal ASGI application
+# Minimal ASGI application (HTTP REST)
 # ---------------------------------------------------------------------------
 
 
@@ -488,28 +622,22 @@ def create_acp_asgi_app(
     agent_name: str = "aar",
     agent_description: str = "Aar adaptive action & reasoning agent",
 ) -> Any:
-    """Create a minimal ASGI app that speaks the ACP protocol.
+    """Create a minimal ASGI app that speaks the ACP v0.2 HTTP/SSE protocol.
 
-    Endpoints (ACP v0.2)
-    --------------------
+    Use this for programmatic or remote access.  For Zed and other editors
+    that launch the agent as a child process, use ``run_acp_stdio()`` instead.
+
+    Endpoints
+    ---------
     GET  /agents                  — list agents
     GET  /agents/{name}           — agent manifest
     POST /runs                    — create run (sync|async|stream)
     GET  /runs/{run_id}           — run status
-    POST /runs/{run_id}           — resume run (reserved for awaiting)
+    POST /runs/{run_id}           — resume run (reserved)
     POST /runs/{run_id}/cancel    — cancel run
     GET  /runs/{run_id}/events    — ACP event log
     GET  /sessions/{session_id}   — session metadata
     GET  /ping                    — health check
-
-    Args:
-        config: Agent configuration. Defaults to ``~/.aar/config.json`` or
-            built-in defaults when ``None``.
-        approval_callback: Tool approval gate. Defaults to auto-approve.
-        registry: Shared :class:`ToolRegistry`. If ``None``, each agent
-            request builds a fresh registry from built-ins.
-        agent_name: Name exposed in the ACP agent manifest.
-        agent_description: Human-readable description in the manifest.
     """
     transport = AcpTransport(
         config=config,
@@ -522,7 +650,6 @@ def create_acp_asgi_app(
     async def app(scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             return
-
         path: str = scope["path"]
         method: str = scope["method"]
 
@@ -530,16 +657,12 @@ def create_acp_asgi_app(
             await _cors_preflight(send)
             return
 
-        # --- GET /ping ---
         if method == "GET" and path == "/ping":
             await _json(send, {"status": "ok"})
 
-        # --- GET /agents ---
         elif method == "GET" and path == "/agents":
-            manifest = transport.get_manifest()
-            await _json(send, {"agents": [manifest.model_dump()]})
+            await _json(send, {"agents": [transport.get_manifest().model_dump()]})
 
-        # --- GET /agents/{name} ---
         elif method == "GET" and path.startswith("/agents/"):
             name = path[len("/agents/"):]
             if name == transport.agent_name:
@@ -547,7 +670,6 @@ def create_acp_asgi_app(
             else:
                 await _json(send, {"detail": f"Agent '{name}' not found"}, status=404)
 
-        # --- POST /runs ---
         elif method == "POST" and path == "/runs":
             body = await _read_body(receive)
             try:
@@ -555,44 +677,33 @@ def create_acp_asgi_app(
             except json.JSONDecodeError:
                 await _json(send, {"detail": "Invalid JSON"}, status=400)
                 return
-
-            agent_name_req: str = data.get("agent_name", transport.agent_name)
-            raw_input: list[dict] = data.get("input", [])
-            mode_str: str = data.get("mode", "sync")
-            session_id: str | None = data.get("session_id")
-
             try:
-                mode = RunMode(mode_str)
+                mode = RunMode(data.get("mode", "sync"))
             except ValueError:
-                await _json(send, {"detail": f"Invalid mode: {mode_str!r}"}, status=400)
+                await _json(send, {"detail": f"Invalid mode: {data.get('mode')!r}"}, status=400)
                 return
-
             try:
-                input_messages = [AcpMessage.model_validate(m) for m in raw_input]
+                msgs = [AcpMessage.model_validate(m) for m in data.get("input", [])]
             except Exception as exc:
-                await _json(send, {"detail": f"Invalid input messages: {exc}"}, status=400)
+                await _json(send, {"detail": f"Invalid input: {exc}"}, status=400)
                 return
-
             try:
                 run, queue = await transport.create_run(
-                    agent_name=agent_name_req,
-                    input_messages=input_messages,
+                    agent_name=data.get("agent_name", transport.agent_name),
+                    input_messages=msgs,
                     mode=mode,
-                    session_id=session_id,
+                    session_id=data.get("session_id"),
                 )
             except ValueError as exc:
                 await _json(send, {"detail": str(exc)}, status=404)
                 return
-
             if mode == RunMode.STREAM and queue is not None:
                 await _sse_run_stream(send, queue)
             elif mode == RunMode.ASYNC:
                 await _json(send, run.model_dump(), status=202)
             else:
-                # SYNC — run is already complete
                 await _json(send, run.model_dump())
 
-        # --- GET /runs/{run_id} ---
         elif method == "GET" and _matches(path, "/runs/", 1):
             run_id = _path_tail(path, "/runs/")
             if "/" in run_id:
@@ -604,7 +715,6 @@ def create_acp_asgi_app(
             else:
                 await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
 
-        # --- POST /runs/{run_id}/cancel ---
         elif method == "POST" and path.endswith("/cancel") and "/runs/" in path:
             run_id = path[len("/runs/"):].removesuffix("/cancel")
             run = await transport.cancel_run(run_id)
@@ -613,7 +723,6 @@ def create_acp_asgi_app(
             else:
                 await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
 
-        # --- GET /runs/{run_id}/events ---
         elif method == "GET" and path.endswith("/events") and "/runs/" in path:
             run_id = path[len("/runs/"):].removesuffix("/events")
             events = transport.get_run_events(run_id)
@@ -622,21 +731,14 @@ def create_acp_asgi_app(
             else:
                 await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
 
-        # --- POST /runs/{run_id} (resume) ---
         elif method == "POST" and _matches(path, "/runs/", 1):
             run_id = _path_tail(path, "/runs/")
             run = transport.get_run(run_id)
             if run:
-                # Resuming awaiting runs is a future extension; ack for now.
-                await _json(
-                    send,
-                    {"detail": "Resume not yet supported; run is not in awaiting state"},
-                    status=422,
-                )
+                await _json(send, {"detail": "Resume not supported; run is not awaiting"}, status=422)
             else:
                 await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
 
-        # --- GET /sessions/{session_id} ---
         elif method == "GET" and path.startswith("/sessions/"):
             sid = path[len("/sessions/"):]
             info = transport.get_session(sid)
@@ -652,16 +754,14 @@ def create_acp_asgi_app(
 
 
 # ---------------------------------------------------------------------------
-# ASGI helpers (mirrors web.py style)
+# ASGI helpers
 # ---------------------------------------------------------------------------
 
 
 def _matches(path: str, prefix: str, min_segments: int) -> bool:
-    """Return True when *path* starts with *prefix* and has enough segments."""
     if not path.startswith(prefix):
         return False
-    tail = path[len(prefix):]
-    return len(tail.split("/")) >= min_segments
+    return len(path[len(prefix):].split("/")) >= min_segments
 
 
 def _path_tail(path: str, prefix: str) -> str:
@@ -710,7 +810,6 @@ async def _sse_run_stream(
     send: Any,
     queue: asyncio.Queue[AcpSseEvent | None],
 ) -> None:
-    """Stream ACP SSE events from *queue* until sentinel (None) is received."""
     await send(
         {
             "type": "http.response.start",
@@ -728,12 +827,6 @@ async def _sse_run_stream(
             event = await queue.get()
             if event is None:
                 break
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": _sse_line(event),
-                    "more_body": True,
-                }
-            )
+            await send({"type": "http.response.body", "body": _sse_line(event), "more_body": True})
     finally:
         await send({"type": "http.response.body", "body": b"", "more_body": False})

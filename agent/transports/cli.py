@@ -812,8 +812,13 @@ def serve(
 
 @app.command()
 def acp(
-    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind address"),
-    port: int = typer.Option(8000, "--port", help="Port to listen on"),
+    http: bool = typer.Option(
+        False,
+        "--http",
+        help="Use HTTP/SSE transport instead of stdio (for REST clients, not Zed).",
+    ),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="HTTP bind address (--http only)"),
+    port: int = typer.Option(8000, "--port", help="HTTP port (--http only)"),
     agent_name: str = typer.Option("aar", "--name", "-n", help="ACP agent name"),
     agent_description: str = typer.Option(
         "Aar adaptive action & reasoning agent",
@@ -848,21 +853,18 @@ def acp(
         help="Path to log file (append mode). Default: stderr only.",
     ),
 ) -> None:
-    """Start an ACP-compliant agent server (Agent Communication Protocol v0.2).
+    """Start an ACP agent (Agent Communication Protocol).
 
-    Exposes the Aar agent as a standards-compliant ACP endpoint so any
-    ACP orchestrator or client can discover and drive it.
+    Default (stdio): communicate over stdin/stdout using the official
+    agent-client-protocol SDK.  This is the mode Zed and other editors
+    use — add Aar via settings.json:
 
-    Endpoints
-    ---------
-    GET  /agents                  — list agents
-    GET  /agents/{name}           — agent manifest
-    POST /runs                    — create run (sync|async|stream)
-    GET  /runs/{run_id}           — run status & output
-    POST /runs/{run_id}/cancel    — cancel a run
-    GET  /runs/{run_id}/events    — ACP event log
-    GET  /sessions/{session_id}   — session metadata
-    GET  /ping                    — health check
+      "agent_servers": {
+        "Aar": { "type": "custom", "command": "aar", "args": ["acp"] }
+      }
+
+    HTTP mode (--http): start a REST/SSE server for remote or programmatic
+    access.  Requires uvicorn (pip install uvicorn).
     """
     config = _build_config(
         model=model,
@@ -875,27 +877,36 @@ def acp(
         log_file=log_file,
     )
     _apply_logging(config)
-    from agent.transports.acp import create_acp_asgi_app
 
-    try:
-        import uvicorn
-    except ImportError:
-        console.print(
-            "[red]uvicorn is required for the ACP server. Install with: pip install uvicorn[/]"
+    if http:
+        from agent.transports.acp import create_acp_asgi_app
+
+        try:
+            import uvicorn
+        except ImportError:
+            console.print(
+                "[red]uvicorn is required for --http mode. "
+                "Install with: pip install uvicorn[/]",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        asgi_app = create_acp_asgi_app(
+            config=config,
+            agent_name=agent_name,
+            agent_description=agent_description,
         )
-        raise typer.Exit(1)
+        console.print(f"[bold green]ACP HTTP server on {host}:{port}[/]", err=True)
+        uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
+    else:
+        from agent.transports.acp import run_acp_stdio
 
-    asgi_app = create_acp_asgi_app(
-        config=config,
-        agent_name=agent_name,
-        agent_description=agent_description,
-    )
-    console.print(f"[bold green]Starting ACP server on {host}:{port}[/]")
-    console.print(
-        f"[dim]Agent: {agent_name} | "
-        "GET /agents, POST /runs, GET /runs/{{id}}, POST /runs/{{id}}/cancel, GET /ping[/]"
-    )
-    uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
+        asyncio.run(
+            run_acp_stdio(
+                config=config,
+                agent_name=agent_name,
+            )
+        )
 
 
 @app.command()
