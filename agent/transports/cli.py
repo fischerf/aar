@@ -811,6 +811,94 @@ def serve(
 
 
 @app.command()
+def acp(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind address"),
+    port: int = typer.Option(8000, "--port", help="Port to listen on"),
+    agent_name: str = typer.Option("aar", "--name", "-n", help="ACP agent name"),
+    agent_description: str = typer.Option(
+        "Aar adaptive action & reasoning agent",
+        "--description",
+        "-d",
+        help="ACP agent description",
+    ),
+    model: Optional[str] = typer.Option(None, "--model", "-m"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+    ),
+    base_url: str = typer.Option(
+        "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"
+    ),
+    api_key: str = typer.Option(
+        "", "--api-key", help="API key (overrides env var for the chosen provider)"
+    ),
+    config_file: Optional[str] = typer.Option(
+        None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"
+    ),
+    read_only: Optional[bool] = typer.Option(
+        None, "--read-only/--no-read-only", help="Block all write and execute tools"
+    ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
+    ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file (append mode). Default: stderr only.",
+    ),
+) -> None:
+    """Start an ACP-compliant agent server (Agent Communication Protocol v0.2).
+
+    Exposes the Aar agent as a standards-compliant ACP endpoint so any
+    ACP orchestrator or client can discover and drive it.
+
+    Endpoints
+    ---------
+    GET  /agents                  — list agents
+    GET  /agents/{name}           — agent manifest
+    POST /runs                    — create run (sync|async|stream)
+    GET  /runs/{run_id}           — run status & output
+    POST /runs/{run_id}/cancel    — cancel a run
+    GET  /runs/{run_id}/events    — ACP event log
+    GET  /sessions/{session_id}   — session metadata
+    GET  /ping                    — health check
+    """
+    config = _build_config(
+        model=model,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        config_file=config_file,
+        read_only=read_only,
+        log_level=log_level,
+        log_file=log_file,
+    )
+    _apply_logging(config)
+    from agent.transports.acp import create_acp_asgi_app
+
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[red]uvicorn is required for the ACP server. Install with: pip install uvicorn[/]"
+        )
+        raise typer.Exit(1)
+
+    asgi_app = create_acp_asgi_app(
+        config=config,
+        agent_name=agent_name,
+        agent_description=agent_description,
+    )
+    console.print(f"[bold green]Starting ACP server on {host}:{port}[/]")
+    console.print(
+        f"[dim]Agent: {agent_name} | "
+        "GET /agents, POST /runs, GET /runs/{{id}}, POST /runs/{{id}}/cancel, GET /ping[/]"
+    )
+    uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
+
+
+@app.command()
 def init(
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config files"),
 ) -> None:
