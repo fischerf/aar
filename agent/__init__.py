@@ -2,6 +2,7 @@
 
 from agent.core.agent import Agent
 from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
+from agent.core.guardrails import GuardrailsConfig
 from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
@@ -28,6 +29,7 @@ __all__ = [
     "ErrorEvent",
     "Event",
     "EventType",
+    "GuardrailsConfig",
     "ProviderConfig",
     "SafetyConfig",
     "ProviderMeta",

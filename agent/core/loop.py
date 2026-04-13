@@ -16,6 +16,7 @@ from agent.core.events import (
     StreamChunk,
     ToolCall,
 )
+from agent.core.guardrails import LoopGuardrails
 from agent.core.session import Session, trim_to_token_budget
 from agent.core.state import AgentState
 from agent.providers.base import Provider, ProviderResponse
@@ -48,6 +49,7 @@ async def run_loop(
     session.state = AgentState.RUNNING
     start_time = time.monotonic()
     done = False
+    guardrails = LoopGuardrails(config.guardrails)
 
     _log = logger.getChild("loop")
     _extra = {"session_id": session.session_id, "trace_id": session.trace_id}
@@ -82,119 +84,45 @@ async def run_loop(
                 messages = trim_to_token_budget(messages, config.context_window)
 
             tool_schemas = tool_executor.registry.to_provider_schemas() or None
+            try:
+                response, provider_ms = await _provider_request(
+                    provider=provider,
+                    messages=messages,
+                    tool_schemas=tool_schemas,
+                    system_prompt=config.system_prompt,
+                    session=session,
+                    on_event=on_event,
+                    config=config,
+                    use_streaming=config.streaming and provider.supports_streaming,
+                    log=_log,
+                    log_extra=_extra,
+                )
+            except _ProviderRequestFailed:
+                return session
 
-            use_streaming = config.streaming and provider.supports_streaming
+            _emit_provider_observation(session, on_event, response, provider_ms)
+            if _apply_usage_and_budget(session, on_event, response, config):
+                return session
 
-            # Provider call — timed, with retry for recoverable errors
-            t_provider = time.monotonic()
-            response: ProviderResponse | None = None
-            for attempt in range(1, config.max_retries + 1):
-                try:
-                    if use_streaming:
-                        response = await _consume_stream(
-                            provider,
-                            messages,
-                            tool_schemas,
-                            config.system_prompt,
-                            session,
-                            on_event,
-                        )
-                    else:
-                        response = await provider.complete(
-                            messages=messages,
-                            tools=tool_schemas,
-                            system=config.system_prompt,
-                        )
-                    break
-                except Exception as e:
-                    _friendly, _recoverable = _provider_error_message(e)
-                    if _recoverable and attempt < config.max_retries:
-                        delay = 2 ** (attempt - 1)
-                        _log.info(
-                            "Recoverable error at step %d (attempt %d/%d), retrying in %ds: %s",
-                            session.step_count,
-                            attempt,
-                            config.max_retries,
-                            delay,
-                            _friendly,
-                            extra=_extra,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    _log.warning(
-                        "Provider error at step %d: %s",
-                        session.step_count,
-                        _friendly,
-                        extra=_extra,
-                    )
-                    _log.debug("Provider error detail", exc_info=True, extra=_extra)
-                    session.state = AgentState.ERROR
-                    _emit(
-                        session,
-                        on_event,
-                        ErrorEvent(message=_friendly, recoverable=_recoverable),
-                    )
-                    return session
-            assert response is not None
-
-            provider_ms = (time.monotonic() - t_provider) * 1000
-
-            # Stamp provider timing and record metadata
-            if response.meta:
-                response.meta.duration_ms = provider_ms
-                _emit(session, on_event, response.meta)
-
-            # Record reasoning blocks
-            for rb in response.reasoning:
-                _emit(session, on_event, rb)
-
-            # ── Token / cost budget enforcement ─────────────────────────
-            if response.meta and response.meta.usage:
-                from agent.core.tokens import TokenUsage, calculate_cost, get_pricing
-
-                usage = TokenUsage.from_dict(response.meta.usage)
-                session.total_input_tokens += usage.input_tokens
-                session.total_output_tokens += usage.output_tokens
-
-                # Cost tracking
-                pricing = get_pricing(config.provider.model)
-                if pricing:
-                    step_cost = calculate_cost(usage, pricing)
-                    session.total_cost += step_cost
-
-                # Token budget check
-                if config.token_budget > 0:
-                    if session.total_tokens >= config.token_budget:
-                        session.state = AgentState.BUDGET_EXCEEDED
-                        _emit(
-                            session,
-                            on_event,
-                            ErrorEvent(
-                                message=(
-                                    f"Token budget exceeded"
-                                    f" ({session.total_tokens}/{config.token_budget})"
-                                ),
-                                recoverable=False,
-                            ),
-                        )
-                        return session
-
-                # Cost limit check
-                if config.cost_limit > 0:
-                    if session.total_cost >= config.cost_limit:
-                        session.state = AgentState.BUDGET_EXCEEDED
-                        _emit(
-                            session,
-                            on_event,
-                            ErrorEvent(
-                                message=(
-                                    f"Cost limit exceeded"
-                                    f" (${session.total_cost:.4f}/${config.cost_limit:.4f})"
-                                ),
-                                recoverable=False,
-                            ),
-                        )
-                        return session
+            # Budget proximity warning — emitted once when entering the reserve margin
+            if guardrails.check_near_budget(session, config.token_budget, config.cost_limit):
+                _log.warning(
+                    "Near budget at step %d (tokens=%d budget=%d cost=%.4f limit=%.4f)",
+                    session.step_count,
+                    session.total_tokens,
+                    config.token_budget,
+                    session.total_cost,
+                    config.cost_limit,
+                    extra=_extra,
+                )
+                _emit(
+                    session,
+                    on_event,
+                    ErrorEvent(
+                        message="Approaching budget limit — stopping soon",
+                        recoverable=True,
+                    ),
+                )
 
             _log.info(
                 "step=%d provider_ms=%.0f tool_calls=%d",
@@ -206,6 +134,25 @@ async def run_loop(
 
             # Handle tool calls
             if response.tool_calls:
+                # Repetition guard — detect identical tool-call patterns
+                guardrails.observe_tool_calls(session, response.tool_calls)
+                if guardrails.is_stuck(session):
+                    _log.warning(
+                        "Repetition guard triggered at step %d",
+                        session.step_count,
+                        extra=_extra,
+                    )
+                    _emit(
+                        session,
+                        on_event,
+                        ErrorEvent(
+                            message="Agent stuck in a loop — same tool calls repeated too many times",
+                            recoverable=False,
+                        ),
+                    )
+                    session.state = AgentState.ERROR
+                    return session
+
                 # Emit ToolCall events BEFORE AssistantMessage so that
                 # session.to_messages() sees the correct order:
                 #   ToolCall… → AssistantMessage → ToolResult…
@@ -231,6 +178,19 @@ async def run_loop(
             # Final assistant message
             stop = _parse_stop(response.stop_reason)
             _emit(session, on_event, AssistantMessage(content=response.content, stop_reason=stop))
+
+            # Max-tokens recovery — inject a continuation prompt instead of stopping
+            if stop == StopReason.MAX_TOKENS and guardrails.should_continue_after_max_tokens(
+                session
+            ):
+                _append_internal_user_message(
+                    session,
+                    on_event,
+                    guardrails.max_tokens_followup(),
+                    reason="max_tokens_recovery",
+                )
+                continue
+
             if stop in {StopReason.END_TURN, StopReason.MAX_TOKENS}:
                 done = True
 
@@ -251,6 +211,78 @@ async def run_loop(
         raise
 
     return session
+
+
+# ---------------------------------------------------------------------------
+# Provider helpers
+# ---------------------------------------------------------------------------
+
+
+async def _provider_request(
+    *,
+    provider: Provider,
+    messages: list[dict],
+    tool_schemas: list[dict] | None,
+    system_prompt: str,
+    session: Session,
+    on_event,
+    config: AgentConfig,
+    use_streaming: bool,
+    log,
+    log_extra: dict[str, str],
+) -> tuple[ProviderResponse, float]:
+    """Run a provider request with retry logic and return response plus duration."""
+    t_provider = time.monotonic()
+    response: ProviderResponse | None = None
+    for attempt in range(1, config.max_retries + 1):
+        try:
+            if use_streaming:
+                response = await _consume_stream(
+                    provider,
+                    messages,
+                    tool_schemas,
+                    system_prompt,
+                    session,
+                    on_event,
+                )
+            else:
+                response = await provider.complete(
+                    messages=messages,
+                    tools=tool_schemas,
+                    system=system_prompt,
+                )
+            break
+        except Exception as e:
+            _friendly, _recoverable = _provider_error_message(e)
+            if _recoverable and attempt < config.max_retries:
+                delay = 2 ** (attempt - 1)
+                log.info(
+                    "Recoverable error at step %d (attempt %d/%d), retrying in %ds: %s",
+                    session.step_count,
+                    attempt,
+                    config.max_retries,
+                    delay,
+                    _friendly,
+                    extra=log_extra,
+                )
+                await asyncio.sleep(delay)
+                continue
+            log.warning(
+                "Provider error at step %d: %s",
+                session.step_count,
+                _friendly,
+                extra=log_extra,
+            )
+            log.debug("Provider error detail", exc_info=True, extra=log_extra)
+            session.state = AgentState.ERROR
+            _emit(
+                session,
+                on_event,
+                ErrorEvent(message=_friendly, recoverable=_recoverable),
+            )
+            raise _ProviderRequestFailed from e
+    assert response is not None
+    return response, (time.monotonic() - t_provider) * 1000
 
 
 async def _consume_stream(
@@ -318,11 +350,107 @@ async def _consume_stream(
     )
 
 
+# ---------------------------------------------------------------------------
+# Event helpers
+# ---------------------------------------------------------------------------
+
+
+def _emit_provider_observation(
+    session: Session,
+    on_event,
+    response: ProviderResponse,
+    provider_ms: float,
+) -> None:
+    """Emit metadata and reasoning blocks for a provider response."""
+    if response.meta:
+        response.meta.duration_ms = provider_ms
+        _emit(session, on_event, response.meta)
+
+    for rb in response.reasoning:
+        _emit(session, on_event, rb)
+
+
+def _apply_usage_and_budget(
+    session: Session,
+    on_event,
+    response: ProviderResponse,
+    config: AgentConfig,
+) -> bool:
+    """Update usage totals and stop when a hard budget is exceeded.
+
+    Returns *True* if the loop should exit (budget blown).
+    """
+    if not response.meta or not response.meta.usage:
+        return False
+
+    from agent.core.tokens import TokenUsage, calculate_cost, get_pricing
+
+    usage = TokenUsage.from_dict(response.meta.usage)
+    session.total_input_tokens += usage.input_tokens
+    session.total_output_tokens += usage.output_tokens
+
+    pricing = get_pricing(config.provider.model)
+    if pricing:
+        session.total_cost += calculate_cost(usage, pricing)
+
+    if config.token_budget > 0 and session.total_tokens >= config.token_budget:
+        session.state = AgentState.BUDGET_EXCEEDED
+        _emit(
+            session,
+            on_event,
+            ErrorEvent(
+                message=f"Token budget exceeded ({session.total_tokens}/{config.token_budget})",
+                recoverable=False,
+            ),
+        )
+        return True
+
+    if config.cost_limit > 0 and session.total_cost >= config.cost_limit:
+        session.state = AgentState.BUDGET_EXCEEDED
+        _emit(
+            session,
+            on_event,
+            ErrorEvent(
+                message=(
+                    f"Cost limit exceeded (${session.total_cost:.4f}/${config.cost_limit:.4f})"
+                ),
+                recoverable=False,
+            ),
+        )
+        return True
+
+    return False
+
+
 def _emit(session: Session, on_event, event) -> None:
     """Append an event to the session and fire the callback."""
     session.append(event)
     if on_event:
         on_event(event)
+
+
+def _append_internal_user_message(
+    session: Session,
+    on_event,
+    content: str,
+    *,
+    reason: str,
+) -> None:
+    """Add a synthetic user message for loop-internal recovery flows."""
+    message = session.add_user_message(content)
+    message.data["internal"] = True
+    message.data["reason"] = reason
+    if on_event:
+        on_event(message)
+
+
+class _ProviderRequestFailed(RuntimeError):
+    """Sentinel exception so run_loop can return the updated session."""
+
+
+# ---------------------------------------------------------------------------
+# Error classification
+# ---------------------------------------------------------------------------
 
 
 def _provider_error_message(exc: BaseException) -> tuple[str, bool]:

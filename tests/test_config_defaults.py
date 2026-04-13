@@ -72,10 +72,6 @@ class TestBuildConfigDefaults:
         cfg = _build_config()
         assert cfg.max_steps == _CANONICAL.max_steps
 
-    def test_max_tokens_per_turn(self, fake_home):
-        cfg = _build_config()
-        assert cfg.max_tokens_per_turn == _CANONICAL.max_tokens_per_turn
-
     def test_timeout(self, fake_home):
         cfg = _build_config()
         assert cfg.timeout == _CANONICAL.timeout
@@ -246,7 +242,6 @@ class TestInitConfigMatchesDefaults:
         assert loaded.safety.sandbox_max_memory_mb == canonical.safety.sandbox_max_memory_mb
         assert loaded.safety.log_all_commands == canonical.safety.log_all_commands
         assert loaded.max_steps == canonical.max_steps
-        assert loaded.max_tokens_per_turn == canonical.max_tokens_per_turn
         assert loaded.timeout == canonical.timeout
 
     def test_init_creates_mcp_example(self, fake_home):

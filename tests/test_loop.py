@@ -17,6 +17,7 @@ from agent.core.events import (
     StreamChunk,
     ToolCall,
     ToolResult,
+    UserMessage,
 )
 from agent.core.loop import run_loop
 from agent.core.session import Session
@@ -48,9 +49,10 @@ async def test_loop_terminates_on_end_turn(mock_provider, tool_registry, default
 
 
 @pytest.mark.asyncio
-async def test_loop_terminates_on_max_tokens(mock_provider, tool_registry, default_config):
-    """Loop should stop when provider returns max_tokens."""
+async def test_loop_continues_after_max_tokens(mock_provider, tool_registry, default_config):
+    """Loop should inject a continuation prompt after max_tokens instead of stopping."""
     mock_provider.enqueue_text("Truncated response", stop="max_tokens")
+    mock_provider.enqueue_text("continued and complete", stop="end_turn")
     session = Session()
     session.add_user_message("Tell me a long story")
 
@@ -58,17 +60,27 @@ async def test_loop_terminates_on_max_tokens(mock_provider, tool_registry, defau
     result = await run_loop(session, mock_provider, executor, default_config)
 
     assert result.state == AgentState.COMPLETED
+    assert result.step_count == 2
     assistant_msgs = [e for e in result.events if isinstance(e, AssistantMessage)]
     assert assistant_msgs[0].stop_reason == StopReason.MAX_TOKENS
+    assert assistant_msgs[-1].content == "continued and complete"
+    internal_messages = [
+        e for e in result.events if isinstance(e, UserMessage) and e.data.get("internal")
+    ]
+    assert len(internal_messages) == 1
+    assert internal_messages[0].data["reason"] == "max_tokens_recovery"
 
 
 @pytest.mark.asyncio
 async def test_loop_enforces_max_steps(mock_provider, tool_registry):
     """Loop should stop after max_steps even if provider keeps going."""
+    from agent.core.guardrails import GuardrailsConfig
+
     config = AgentConfig(
         provider=ProviderConfig(name="mock"),
         max_steps=3,
         timeout=30.0,
+        guardrails=GuardrailsConfig(max_repeated_tool_steps=10),
     )
     # Enqueue tool calls that never resolve to a final answer
     for i in range(5):
@@ -173,6 +185,96 @@ async def test_loop_handles_unknown_tool(mock_provider, tool_registry, default_c
     assert len(tool_results) == 1
     assert tool_results[0].is_error
     assert "unknown tool" in tool_results[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_detects_repetition_and_stops(mock_provider, tool_registry):
+    """Loop should stop when the same tool-call pattern repeats too many times."""
+    from agent.core.guardrails import GuardrailsConfig
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1"),
+        max_steps=20,
+        timeout=30.0,
+        guardrails=GuardrailsConfig(max_repeated_tool_steps=3),
+    )
+    # Enqueue 4 identical tool calls: 1st is the initial, 2nd-4th are repeats.
+    # The guard fires when repeated_tool_steps reaches 3 (on the 4th identical call).
+    for _ in range(4):
+        mock_provider.enqueue_tool_call("echo", {"message": "same"}, "tc_repeat")
+    mock_provider.enqueue_text("Should not reach this")
+
+    session = Session()
+    session.add_user_message("Keep echoing")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, config)
+
+    assert result.state == AgentState.ERROR
+    errors = [e for e in result.events if isinstance(e, ErrorEvent)]
+    assert any("stuck" in e.message.lower() or "loop" in e.message.lower() for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_loop_allows_same_tool_with_different_args(mock_provider, tool_registry):
+    """Calling the same tool with different arguments should NOT trigger the repetition guard."""
+    from agent.core.guardrails import GuardrailsConfig
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1"),
+        max_steps=20,
+        timeout=30.0,
+        guardrails=GuardrailsConfig(max_repeated_tool_steps=3),
+    )
+    # Same tool, different argument values each time — should NOT be considered repetition
+    mock_provider.enqueue_tool_call("echo", {"message": "alpha"}, "tc_1")
+    mock_provider.enqueue_tool_call("echo", {"message": "beta"}, "tc_2")
+    mock_provider.enqueue_tool_call("echo", {"message": "gamma"}, "tc_3")
+    mock_provider.enqueue_tool_call("echo", {"message": "delta"}, "tc_4")
+    mock_provider.enqueue_text("All done")
+
+    session = Session()
+    session.add_user_message("Echo different things")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    assert result.step_count == 5
+
+
+@pytest.mark.asyncio
+async def test_loop_stops_after_max_tokens_recovery_exhausted(mock_provider, tool_registry):
+    """Loop should stop when max_tokens recoveries are exhausted."""
+    from agent.core.guardrails import GuardrailsConfig
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1"),
+        max_steps=20,
+        timeout=30.0,
+        guardrails=GuardrailsConfig(max_tokens_recoveries=1),
+    )
+    # First max_tokens → recovery → second max_tokens → no more recoveries → stop
+    mock_provider.enqueue_text("Part 1", stop="max_tokens")
+    mock_provider.enqueue_text("Part 2", stop="max_tokens")
+
+    session = Session()
+    session.add_user_message("Write something long")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    assert result.step_count == 2
+    assistant_msgs = [e for e in result.events if isinstance(e, AssistantMessage)]
+    assert len(assistant_msgs) == 2
+    assert assistant_msgs[0].stop_reason == StopReason.MAX_TOKENS
+    assert assistant_msgs[1].stop_reason == StopReason.MAX_TOKENS
+    # Only one internal recovery message (the second max_tokens is not recovered)
+    internal_messages = [
+        e for e in result.events if isinstance(e, UserMessage) and e.data.get("internal")
+    ]
+    assert len(internal_messages) == 1
 
 
 @pytest.mark.asyncio
