@@ -1,0 +1,25 @@
+# Normalise line endings in the repository.
+# Shell scripts must have LF on all platforms (CRLF breaks the shebang on Linux/macOS).
+
+# Default: normalise to LF in the repository, convert to platform native on checkout.
+* text=auto
+
+# Shell scripts — always LF in repo and in working tree.
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# Windows batch files — always CRLF in repo and working tree.
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Python, TOML, Markdown, JSON — normalise to LF.
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+
+# Binaries — never touch line endings.
+*.gz    binary
+*.zip   binary
+*.png   binary
+*.svg   text eol=lf

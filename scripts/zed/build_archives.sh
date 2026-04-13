@@ -37,7 +37,9 @@ UNIX_TARGETS=(
 for target in "${UNIX_TARGETS[@]}"; do
     archive="${DIST}/aar-zed-${target}.tar.gz"
     tmp=$(mktemp -d)
-    cp "${SCRIPT_DIR}/launch.sh" "${tmp}/launch.sh"
+    # Strip any Windows CR bytes so the shebang works on Linux/macOS even if
+    # this script is run from a Windows host (core.autocrlf=true).
+    tr -d '\r' < "${SCRIPT_DIR}/launch.sh" > "${tmp}/launch.sh"
     chmod +x "${tmp}/launch.sh"
     tar -czf "${archive}" -C "${tmp}" launch.sh
     rm -rf "${tmp}"

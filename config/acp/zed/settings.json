@@ -1,0 +1,8 @@
+  "agent_servers": {
+    "Aar (local)": {
+      "type": "custom",
+      "command": "aar",
+      "args": ["acp", "--log-level", "DEBUG", "--log-file", "aar-zed.log"],
+      "env": {},
+    },
+  },
