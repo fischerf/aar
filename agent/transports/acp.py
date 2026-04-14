@@ -38,6 +38,7 @@ from agent.core.events import (
     AssistantMessage,
     ErrorEvent,
     Event,
+    ReasoningBlock,
     SessionEvent,
     StreamChunk,
     ToolCall,
@@ -71,15 +72,43 @@ async def _auto_approve(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
 
 
 def _extract_text(prompt_blocks: list) -> str:
-    """Pull plain text out of ACP SDK prompt content blocks."""
+    """Pull plain text out of ACP SDK prompt content blocks.
+
+    Handles TextContentBlock, ResourceContentBlock (URI links), and
+    EmbeddedResourceContentBlock (@ file context with embedded content).
+    """
     parts: list[str] = []
     for block in prompt_blocks:
         if isinstance(block, dict):
+            btype = block.get("type", "")
             text = block.get("text", "")
+            if text:
+                parts.append(text)
+            elif btype == "resource":
+                uri = block.get("uri", "")
+                if uri:
+                    parts.append(f"[resource: {uri}]")
         else:
-            text = getattr(block, "text", None) or ""
-        if text:
-            parts.append(text)
+            # TextContentBlock
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+                continue
+            # ResourceContentBlock — a URI link (e.g. a file path from @)
+            uri = getattr(block, "uri", None)
+            if uri:
+                parts.append(f"[resource: {uri}]")
+                continue
+            # EmbeddedResourceContentBlock — actual file contents from @
+            resource = getattr(block, "resource", None)
+            if resource is not None:
+                res_text = getattr(resource, "text", None)
+                res_uri = getattr(resource, "uri", None)
+                if res_text:
+                    header = f"[{res_uri}]" if res_uri else "[file]"
+                    parts.append(f"{header}\n{res_text}")
+                elif res_uri:
+                    parts.append(f"[resource: {res_uri}]")
     return "\n".join(parts)
 
 
@@ -151,7 +180,50 @@ class AarAcpAgent:
         session = Session()
         self._sessions[session.session_id] = session
         self._store.save(session)
+        logger.info("ACP: new session %s", session.session_id)
         return NewSessionResponse(session_id=session.session_id)
+
+    async def load_session(
+        self,
+        cwd: str = "",
+        session_id: str = "",
+        mcp_servers: list | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Resume a previously saved session.  Returns None when not found."""
+        from acp import LoadSessionResponse
+
+        try:
+            session = self._store.load(session_id)
+            self._sessions[session_id] = session
+            logger.info("ACP: loaded session %s (%d events)", session_id, len(session.events))
+            return LoadSessionResponse()
+        except (FileNotFoundError, ValueError) as exc:
+            logger.info("ACP: session %s not found (%s)", session_id, exc)
+            return None
+
+    async def list_sessions(
+        self,
+        cursor: str | None = None,
+        cwd: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Return all persisted sessions so Zed can show session history."""
+        from acp.schema import ListSessionsResponse, SessionInfo
+
+        session_infos: list[SessionInfo] = []
+        for sid in self._store.list_sessions():
+            try:
+                s = self._store.load(sid)
+                # Use first assistant message as title, fall back to ID prefix
+                title = next(
+                    (e.content[:60] for e in s.events if isinstance(e, AssistantMessage) and e.content),
+                    sid[:12],
+                )
+                session_infos.append(SessionInfo(session_id=sid, cwd="", title=title))
+            except Exception:
+                session_infos.append(SessionInfo(session_id=sid, cwd="", title=sid[:12]))
+        return ListSessionsResponse(sessions=session_infos)
 
     async def prompt(
         self,
@@ -160,30 +232,68 @@ class AarAcpAgent:
         **kwargs: Any,
     ) -> Any:
         from acp import PromptResponse, text_block, update_agent_message
+        from acp.schema import AgentThoughtChunk, TextContentBlock, ToolCallProgress, ToolCallStart
 
         text = _extract_text(prompt)
 
-        # Restore session from in-memory cache or disk
+        # Restore session — in-memory cache → disk → fresh session with given ID
         session = self._sessions.get(session_id)
         if session is None:
             try:
                 session = self._store.load(session_id)
-            except FileNotFoundError:
-                session = None
+                self._sessions[session_id] = session
+            except (FileNotFoundError, ValueError):
+                logger.info("ACP: creating fresh session for id %s", session_id)
+                session = Session(session_id=session_id)
+                self._sessions[session_id] = session
 
         aar_agent = self._make_aar_agent()
         update_tasks: list[asyncio.Task] = []
 
-        def on_event(event: Event) -> None:
-            if isinstance(event, AssistantMessage) and event.content and self._conn:
+        def _push(update: Any) -> None:
+            if self._conn:
                 task = asyncio.create_task(
                     self._conn.session_update(
                         session_id=session_id,
-                        update=update_agent_message(text_block(event.content)),
+                        update=update,
                         source=self._agent_name,
                     )
                 )
                 update_tasks.append(task)
+
+        def on_event(event: Event) -> None:
+            if isinstance(event, AssistantMessage) and event.content:
+                _push(update_agent_message(text_block(event.content)))
+
+            elif isinstance(event, ReasoningBlock) and event.content:
+                _push(
+                    AgentThoughtChunk(
+                        content=TextContentBlock(type="text", text=event.content),
+                        session_update="agent_thought_chunk",
+                    )
+                )
+
+            elif isinstance(event, ToolCall):
+                _push(
+                    ToolCallStart(
+                        title=event.tool_name,
+                        tool_call_id=event.tool_call_id or str(uuid.uuid4()),
+                        status="in_progress",
+                        raw_input=json.dumps(event.arguments, ensure_ascii=False),
+                        session_update="tool_call",
+                    )
+                )
+
+            elif isinstance(event, ToolResult):
+                _push(
+                    ToolCallProgress(
+                        title=event.tool_name,
+                        tool_call_id=event.tool_call_id,
+                        status="failed" if event.is_error else "completed",
+                        raw_output=event.output[:2000],
+                        session_update="tool_call_update",
+                    )
+                )
 
         aar_agent.on_event(on_event)
         finished = await aar_agent.run(text, session)
