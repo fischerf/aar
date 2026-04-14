@@ -34,26 +34,6 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 ## Installation
 
-```bash
-# Everything at once
-pip install "aar-agent[all,dev]"
-
-# Provider-specific
-pip install "aar-agent[anthropic]"
-pip install "aar-agent[openai]"
-pip install "aar-agent[ollama]"
-pip install "aar-agent[generic]"
-
-# With MCP support
-pip install "aar-agent[ollama,mcp]"
-
-# Full-screen TUI with fixed bars (requires textual)
-pip install "aar-agent[tui-fixed]"
-
-# Core only (no LLM provider)
-pip install aar-agent
-```
-
 > **Note:** `aar-agent` is not published to PyPI.
 > Use the **from-source install** below.
 
@@ -63,7 +43,10 @@ pip install aar-agent
 git clone https://github.com/fischerf/aar.git
 cd aar
 
-# Full dev setup
+# Everything at once (CLI,TUI,MCP,ACP,Providers)
+pip install "aar-agent[all,dev]"
+
+# or Full dev setup
 pip install -e ".[all,dev]"
 
 # Verify
@@ -77,76 +60,40 @@ The `-e` flag creates a live link — editing files under `agent/` is reflected 
 
 Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama instance.
 
-## CLI
+## Usage
 
 ```bash
-# Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
-# Ctrl+S send  Ctrl+X cancel  Ctrl+T theme  Ctrl+K think  Ctrl+L clear  Ctrl+G logs  Ctrl+Q quit
-# Enter = new line in input  Ctrl+Up/Down = history  Page Up/Down = scroll  /quit to exit
-aar tui --fixed
-aar tui --fixed --theme decker
+# Type to show help screen
+> aar
 
-# Launch the rich TUI
-aar tui
+# Show tui specific help
+> aar tui --help
+
+# Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
+> aar tui --fixed
+> aar tui --fixed --theme decker
+
+# Continous scrolling TUI
+> aar tui
+
+# Resume a previous session in TUI
+> aar tui --session <session-id>
 
 # Interactive chat (asks before write/execute, file tools restricted to cwd)
-aar chat
+> aar chat --provider ollama --model llama3
 
-# Chat with a specific provider/model
-aar chat --provider openai --model gpt-4o
-aar chat --provider ollama --model llama3
-
-# Disable the workspace sandbox for full access
-aar chat --no-require-approval --no-restrict-to-cwd
+# Disable the workspace sandbox for full access and load config from a JSON file
+> aar chat --no-require-approval --no-restrict-to-cwd --config aar.json
 
 # One-shot task
-aar run "Refactor main.py to use async/await"
+> aar run "Refactor main.py to use async/await"
 
 # Skip approval prompts for scripted / CI use
-aar run --no-require-approval "Refactor main.py to use async/await"
-
-# Load full config from a JSON file
-aar chat --config aar.json
-
-# Resume a previous session
-aar chat --session <session-id>
-
-# List saved sessions
-aar sessions
-
-# List available tools
-aar tools
+> aar run --no-require-approval "Refactor main.py to use async/await"
 
 # Start the HTTP/SSE web server
-aar serve --host 0.0.0.0 --port 8080
+> aar serve --host 0.0.0.0 --port 8080
 ```
-
-### Verbose mode
-
-Pass `--verbose` (or `-v`) to enable richer feedback: side-effect badges (`[read]`, `[write]`, `[exec]`), path highlighting, and execution timing.
-
-```bash
-aar chat --verbose
-aar tui --verbose --mcp-config tools/mcp_web.json --provider ollama --model qwen3.5:9b
-```
-
-## Architecture
-
-```
-agent/
-├── core/           # Loop, agent, events, session, config
-├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
-├── tools/          # Tool registry, schema, execution engine
-├── safety/         # Policy engine, permission manager, sandboxes
-├── memory/         # Session persistence (JSONL)
-├── extensions/     # MCP bridge, observability
-└── transports/     # CLI, TUI, web, event stream
-    ├── themes/     # Theme models, built-in themes, registry
-    ├── tui_utils/  # Shared formatting helpers for TUI transports
-    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
-```
-
-See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ## ACP — IDE integration
 
@@ -173,6 +120,24 @@ aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
 ```
 
 See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint reference, and programmatic embedding.
+
+## Architecture
+
+```
+agent/
+├── core/           # Loop, agent, events, session, config
+├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
+├── tools/          # Tool registry, schema, execution engine
+├── safety/         # Policy engine, permission manager, sandboxes
+├── memory/         # Session persistence (JSONL)
+├── extensions/     # MCP bridge, observability
+└── transports/     # CLI, TUI, web, event stream
+    ├── themes/     # Theme models, built-in themes, registry
+    ├── tui_utils/  # Shared formatting helpers for TUI transports
+    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
+```
+
+See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ## Requirements
 
