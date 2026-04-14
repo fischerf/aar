@@ -48,20 +48,32 @@ def build_system_prompt(
     """Assemble the system prompt from base + global rules + project rules.
 
     Layers (all optional except base):
-      1. Base     — runtime facts (OS, cwd, shell)
-      2. Global   — ~/.aar/rules.md (user-wide preferences)
-      3. Project  — <project_rules_dir>/rules.md (project-specific instructions)
+      1. Base             — runtime facts (OS, cwd, shell)
+      2. Global           — ~/.aar/rules.md (user-wide preferences)
+      3. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
+      4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
+      5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
     sections = [_default_system_prompt(shell_path=shell_path)]
 
-    global_rules = Path.home() / ".aar" / "rules.md"
+    global_dir = Path.home() / ".aar"
+
+    global_rules = global_dir / "rules.md"
     if global_rules.is_file():
         sections.append(global_rules.read_text(encoding="utf-8").strip())
 
+    for extra in sorted((global_dir / "rules.d").glob("*.md")):
+        sections.append(extra.read_text(encoding="utf-8").strip())
+
     rules_dir = project_rules_dir if project_rules_dir is not None else Path(".agent")
-    project_rules = Path.cwd() / rules_dir / "rules.md"
+    base = Path.cwd() / rules_dir
+
+    project_rules = base / "rules.md"
     if project_rules.is_file():
         sections.append(project_rules.read_text(encoding="utf-8").strip())
+
+    for extra in sorted((base / "rules.d").glob("*.md")):
+        sections.append(extra.read_text(encoding="utf-8").strip())
 
     return "\n---\n".join(sections)
 

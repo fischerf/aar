@@ -36,11 +36,9 @@ from agent.core.agent import Agent as AarAgent
 from agent.core.config import AgentConfig, load_config
 from agent.core.events import (
     AssistantMessage,
-    ErrorEvent,
     Event,
     ProviderMeta,
     ReasoningBlock,
-    SessionEvent,
     StreamChunk,
     ToolCall,
     ToolResult,
@@ -130,8 +128,23 @@ def _extract_text(prompt_blocks: list) -> str:
 
 
 def _map_stop_reason(state: AgentState) -> str:
+    """Map Aar ``AgentState`` to an ACP ``StopReason`` string.
+
+    Valid ACP stop reasons: end_turn, max_tokens, max_turn_requests,
+    refusal, cancelled.
+
+    ``refusal`` triggers a prominent "refused to respond" banner in Zed,
+    so we only use it for genuine content-policy refusals — NOT for
+    operational failures like timeouts or budget limits.
+    """
     if state == AgentState.MAX_STEPS:
-        return "max_turns"
+        return "max_turn_requests"
+    if state == AgentState.CANCELLED:
+        return "cancelled"
+    # Operational failures (timeout, budget, generic error) are best
+    # reported as end_turn — the error details are already in the
+    # tool-call / message stream.  Using "refusal" would mislead the
+    # client into thinking the agent refused on policy grounds.
     return "end_turn"
 
 
@@ -159,6 +172,8 @@ class AarAcpAgent:
         self._store = SessionStore(self._config.session_dir)
         self._sessions: dict[str, Session] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
+        # Running prompt tasks — stored so cancel() can call task.cancel()
+        self._run_tasks: dict[str, asyncio.Task] = {}
         # Per-session MCP state (started MCPBridge + its ToolRegistry)
         self._mcp_bridges: dict[str, Any] = {}
         self._session_registries: dict[str, ToolRegistry] = {}
@@ -305,10 +320,24 @@ class AarAcpAgent:
         return CloseSessionResponse()
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
-        """Cooperative cancellation: signal the running prompt to stop."""
+        """Cancel an ongoing prompt turn.
+
+        Sets the cooperative cancel event AND cancels the running asyncio task
+        so the agent stops as soon as possible — even if it's mid-LLM call or
+        mid-tool execution.  Per the ACP spec the ``session/prompt`` response
+        MUST use ``stop_reason="cancelled"``.
+        """
+        # 1. Cooperative flag — checked at the top of each loop iteration
         event = self._cancel_events.get(session_id)
         if event:
             event.set()
+
+        # 2. Hard cancel — interrupts awaited provider / tool calls immediately
+        task = self._run_tasks.get(session_id)
+        if task and not task.done():
+            task.cancel()
+
+        if event or task:
             logger.info("ACP: cancel requested for session %s", session_id)
         else:
             logger.debug("ACP: cancel for session %s — no active prompt", session_id)
@@ -337,19 +366,12 @@ class AarAcpAgent:
     ) -> Any:
         from acp import PromptResponse, text_block, update_agent_message
         from acp.schema import (
-            AgentPlanUpdate,
             AgentThoughtChunk,
-            AllowedOutcome,
-            AvailableCommand,
-            AvailableCommandsUpdate,
             Cost,
-            PermissionOption,
-            PlanEntry,
             SessionInfoUpdate,
             TextContentBlock,
             ToolCallProgress,
             ToolCallStart,
-            ToolCallUpdate,
             UsageUpdate,
         )
 
@@ -382,10 +404,6 @@ class AarAcpAgent:
             self._commands_pushed.add(session_id)
             _push_now = asyncio.create_task(self._push_available_commands(session_id))
             update_tasks.append(_push_now)
-
-        # Live plan — accumulates a step per tool call
-        plan_entries: list[PlanEntry] = []
-        tool_step_idx: dict[str, int] = {}  # tool_call_id → index in plan_entries
 
         def _push(update: Any) -> None:
             if self._conn:
@@ -431,31 +449,28 @@ class AarAcpAgent:
 
             # --- Tool call started ---
             elif isinstance(event, ToolCall):
-                tc_id = event.tool_call_id or str(uuid.uuid4())
+                # Ensure a stable toolCallId — assign once so the same id is
+                # visible to both on_event and _request_permission (they share
+                # the same ToolCall object).
+                if not event.tool_call_id:
+                    event.tool_call_id = str(uuid.uuid4())
+                tc_id = event.tool_call_id
                 registry = self._session_registries.get(session_id, self._registry)
                 _spec = registry.get(event.tool_name) if registry else None
                 _kind = _side_effects_to_tool_kind(_spec.side_effects) if _spec else "other"
+                # Status MUST be "pending" — the tool hasn't started yet and
+                # may be awaiting approval.  Zed only shows permission buttons
+                # for tool calls that are still in "pending" status.
                 _push(
                     ToolCallStart(
                         title=event.tool_name,
                         tool_call_id=tc_id,
                         kind=_kind,
-                        status="in_progress",
-                        raw_input=json.dumps(event.arguments, ensure_ascii=False)[:2000],
+                        status="pending",
+                        raw_input=event.arguments,
                         session_update="tool_call",
                     )
                 )
-                # Add a pending plan step for this tool call
-                idx = len(plan_entries)
-                tool_step_idx[tc_id] = idx
-                plan_entries.append(
-                    PlanEntry(
-                        content=event.tool_name,
-                        status="in_progress",
-                        priority="medium",
-                    )
-                )
-                _push(AgentPlanUpdate(entries=list(plan_entries), session_update="plan"))
 
             # --- Tool call finished ---
             elif isinstance(event, ToolResult):
@@ -465,19 +480,10 @@ class AarAcpAgent:
                         title=event.tool_name,
                         tool_call_id=tc_id,
                         status="failed" if event.is_error else "completed",
-                        raw_output=event.output[:2000],
+                        raw_output={"text": event.output[:4000]},
                         session_update="tool_call_update",
                     )
                 )
-                # Mark the plan step completed / failed
-                idx = tool_step_idx.get(tc_id)
-                if idx is not None:
-                    plan_entries[idx] = PlanEntry(
-                        content=event.tool_name,
-                        status="completed" if not event.is_error else "in_progress",
-                        priority="medium",
-                    )
-                    _push(AgentPlanUpdate(entries=list(plan_entries), session_update="plan"))
 
             # --- Token / cost usage ---
             elif isinstance(event, ProviderMeta) and event.usage:
@@ -494,54 +500,6 @@ class AarAcpAgent:
                     )
                 )
 
-        # Build approval callback — ask Zed when conn is available
-        async def _request_permission(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
-            if not self._conn:
-                return await self._default_approval(spec, tc)
-            try:
-                kind = _side_effects_to_tool_kind(spec.side_effects)
-                tool_update = ToolCallUpdate(
-                    title=tc.tool_name,
-                    tool_call_id=tc.tool_call_id or str(uuid.uuid4()),
-                    kind=kind,
-                    status="pending",
-                    raw_input=json.dumps(tc.arguments, ensure_ascii=False)[:1000],
-                )
-                resp = await self._conn.request_permission(
-                    options=[
-                        PermissionOption(
-                            kind="allow_once",
-                            option_id="allow_once",
-                            name="Allow once",
-                        ),
-                        PermissionOption(
-                            kind="allow_always",
-                            option_id="allow_always",
-                            name="Allow always",
-                        ),
-                        PermissionOption(
-                            kind="reject_once",
-                            option_id="reject_once",
-                            name="Reject",
-                        ),
-                        PermissionOption(
-                            kind="reject_always",
-                            option_id="reject_always",
-                            name="Reject always",
-                        ),
-                    ],
-                    session_id=session_id,
-                    tool_call=tool_update,
-                )
-                if resp and isinstance(resp.outcome, AllowedOutcome):
-                    if resp.outcome.option_id == "allow_always":
-                        return ApprovalResult.APPROVED_ALWAYS
-                    return ApprovalResult.APPROVED
-                return ApprovalResult.DENIED
-            except Exception as exc:
-                logger.warning("ACP: permission request failed (%s), auto-approving", exc)
-                return ApprovalResult.APPROVED
-
         # Handle slash commands locally — no agent loop needed
         cmd = text.strip().split()[0].lower() if text.strip().startswith("/") else ""
         if cmd in ("/status", "/tools", "/policy"):
@@ -552,12 +510,25 @@ class AarAcpAgent:
             self._cancel_events.pop(session_id, None)
             return PromptResponse(stop_reason="end_turn")
 
-        aar_agent = self._make_aar_agent(
-            session_id=session_id,
-            approval_callback=_request_permission,
-        )
+        aar_agent = self._make_aar_agent(session_id=session_id)
         aar_agent.on_event(on_event)
-        finished = await aar_agent.run(text, session, cancel_event=cancel_event)
+
+        # Wrap run() in a task so cancel() can interrupt it immediately
+        # via task.cancel(), even if the agent is mid-LLM call.
+        run_task = asyncio.create_task(aar_agent.run(text, session, cancel_event=cancel_event))
+        self._run_tasks[session_id] = run_task
+
+        try:
+            finished = await run_task
+        except asyncio.CancelledError:
+            # The ACP spec requires: catch cancellation errors and return
+            # the semantically meaningful "cancelled" stop reason so Clients
+            # can reliably confirm the cancellation.
+            logger.info("ACP: prompt task cancelled for session %s", session_id)
+            finished = session
+            finished.state = AgentState.CANCELLED
+        finally:
+            self._run_tasks.pop(session_id, None)
 
         if update_tasks:
             await asyncio.gather(*update_tasks, return_exceptions=True)
@@ -572,16 +543,12 @@ class AarAcpAgent:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _make_aar_agent(
-        self,
-        session_id: str = "",
-        approval_callback: ApprovalCallback | None = None,
-    ) -> AarAgent:
+    def _make_aar_agent(self, session_id: str = "") -> AarAgent:
         config = self._session_configs.get(session_id, self._config)
         registry = self._session_registries.get(session_id, self._registry)
         return AarAgent(
             config=config,
-            approval_callback=approval_callback or self._default_approval,
+            approval_callback=self._default_approval,
             registry=registry,
         )
 

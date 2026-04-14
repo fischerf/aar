@@ -159,7 +159,15 @@ The `bash` built-in tool requires a Unix-compatible shell. **Either** is suffici
 
 > **If both are installed**, WSL's `bash.exe` is found first by Windows `CreateProcess`, so WSL's bash will run. Keep this in mind for file path references.
 
+```
 Neither is required if you do not enable the `bash` built-in tool.
+```
+
+```
+"NOTE: On Windows with WSL, 'python' in bash may resolve to WSL's Python (a separate env). "
+"To install packages that will be visible to bash-executed scripts, use the pip_install tool "
+"or run: bash('python -m pip install <package>'). "
+```
 
 ## Documentation
 

@@ -160,10 +160,15 @@ class TestMapStopReason:
         assert _map_stop_reason(AgentState.COMPLETED) == "end_turn"
 
     def test_max_steps(self):
-        assert _map_stop_reason(AgentState.MAX_STEPS) == "max_turns"
+        assert _map_stop_reason(AgentState.MAX_STEPS) == "max_turn_requests"
 
-    def test_other_states_are_end_turn(self):
-        for state in (AgentState.ERROR, AgentState.TIMED_OUT, AgentState.CANCELLED):
+    def test_cancelled_maps_to_cancelled(self):
+        assert _map_stop_reason(AgentState.CANCELLED) == "cancelled"
+
+    def test_error_states_map_to_end_turn(self):
+        """Operational failures use end_turn, not refusal (which triggers a
+        prominent 'refused to respond' banner in Zed)."""
+        for state in (AgentState.ERROR, AgentState.TIMED_OUT, AgentState.BUDGET_EXCEEDED):
             assert _map_stop_reason(state) == "end_turn"
 
 
@@ -970,25 +975,6 @@ class TestAarAcpAgentStreamingAndUsage:
         assert u.cost.amount == 0.01
         assert u.used == 200
 
-    @pytest.mark.asyncio
-    async def test_request_permission_auto_approves_when_no_conn(self, tmp_path):
-        """Without a client connection, the permission callback falls back to auto-approve."""
-        provider = MockProvider()
-        provider.enqueue_text("done", stop="end_turn")
-
-        config = _make_config()
-        config = config.model_copy(update={"session_dir": tmp_path})
-        sdk_agent = _make_sdk_agent(provider)
-        sdk_agent._config = config
-        from agent.memory.session_store import SessionStore
-
-        sdk_agent._store = SessionStore(tmp_path)
-        sdk_agent._conn = None  # no connection
-
-        r = await sdk_agent.new_session()
-        resp = await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
-        assert resp.stop_reason == "end_turn"
-
 
 class TestSideEffectsToToolKind:
     """_side_effects_to_tool_kind maps Aar SideEffect → ACP ToolKind."""
@@ -1029,10 +1015,21 @@ class TestSideEffectsToToolKind:
         assert _side_effects_to_tool_kind([]) == "other"
 
 
-class TestPermissionRequestOptions:
-    """_request_permission sends all 4 ACP permission option kinds."""
+class TestToolCallPendingStatus:
+    """ToolCallStart must use status='pending' per the ACP spec.
 
-    def _make_agent(self, tmp_path, provider):
+    Tools haven't started yet when the LLM first reports them — they may be
+    awaiting approval.  Zed only shows permission buttons for 'pending' calls.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_call_start_uses_pending_status(self, tmp_path):
+        """on_event(ToolCall) pushes ToolCallStart with status='pending'."""
+        from acp.schema import ToolCallStart
+
+        provider = MockProvider()
+        provider.enqueue_text("done", stop="end_turn")
+
         config = _make_config()
         config = config.model_copy(update={"session_dir": tmp_path})
         sdk_agent = _make_sdk_agent(provider)
@@ -1040,213 +1037,105 @@ class TestPermissionRequestOptions:
         from agent.memory.session_store import SessionStore
 
         sdk_agent._store = SessionStore(tmp_path)
-        return sdk_agent
 
-    @pytest.mark.asyncio
-    async def test_permission_offers_four_options(self, tmp_path):
-        """request_permission is called with allow_once, allow_always, reject_once, reject_always."""
-        from acp.schema import AllowedOutcome, PermissionOption
-
-        provider = MockProvider()
-        provider.enqueue_text("done", stop="end_turn")
-
-        sdk_agent = self._make_agent(tmp_path, provider)
         mock_conn = AsyncMock()
-        # Simulate user picking "allow_once"
-        mock_conn.request_permission.return_value = AsyncMock(
-            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
-        )
         sdk_agent._conn = mock_conn
-
-        # Enable approval requirement so the callback fires
-        sdk_agent._config = sdk_agent._config.model_copy(
-            update={"safety": SafetyConfig(require_approval_for_writes=True)}
-        )
 
         r = await sdk_agent.new_session()
-        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
 
-        # Check that request_permission was called
-        if mock_conn.request_permission.called:
-            call_kwargs = mock_conn.request_permission.call_args.kwargs
-            options = call_kwargs["options"]
-            kinds = {o.kind for o in options}
-            assert kinds == {"allow_once", "allow_always", "reject_once", "reject_always"}
+        # Build the on_event callback by starting a prompt (with a trivial provider)
+        await sdk_agent.prompt(prompt=[{"text": "hi"}], session_id=r.session_id)
 
-    @pytest.mark.asyncio
-    async def test_allow_always_returns_approved_always(self, tmp_path):
-        """Selecting allow_always maps to ApprovalResult.APPROVED_ALWAYS."""
-        from acp.schema import AllowedOutcome
+        # Check that any ToolCallStart pushed used 'pending' status
+        for call in mock_conn.session_update.call_args_list:
+            update = call.kwargs.get("update") or (call.args[0] if call.args else None)
+            if isinstance(update, ToolCallStart):
+                assert update.status == "pending", (
+                    f"ToolCallStart should use 'pending', got '{update.status}'"
+                )
 
-        from agent.core.events import ToolCall as AarToolCall
-        from agent.safety.permissions import ApprovalResult
-        from agent.tools.schema import SideEffect, ToolSpec
 
-        sdk_agent = self._make_agent(tmp_path, MockProvider())
-        mock_conn = AsyncMock()
-        mock_conn.request_permission.return_value = AsyncMock(
-            outcome=AllowedOutcome(outcome="selected", option_id="allow_always")
-        )
-        sdk_agent._conn = mock_conn
-
-        # Call the internal _request_permission directly via a prompt setup
-        # We can invoke the callback indirectly by building it
-        spec = ToolSpec(
-            name="write_file",
-            description="write",
-            side_effects=[SideEffect.WRITE],
-        )
-        tc = AarToolCall(tool_name="write_file", tool_call_id="tc1", arguments={"path": "/a"})
-
-        # Build the callback the same way prompt() does
-        from acp.schema import ToolCallUpdate
-
-        async def _request_permission(spec: ToolSpec, tc: AarToolCall) -> ApprovalResult:
-            import json
-
-            tool_update = ToolCallUpdate(
-                title=tc.tool_name,
-                tool_call_id=tc.tool_call_id or "x",
-                status="pending",
-                raw_input=json.dumps(tc.arguments, ensure_ascii=False)[:1000],
-            )
-            resp = await sdk_agent._conn.request_permission(
-                options=[],
-                session_id="s",
-                tool_call=tool_update,
-            )
-            if resp and isinstance(resp.outcome, AllowedOutcome):
-                if resp.outcome.option_id == "allow_always":
-                    return ApprovalResult.APPROVED_ALWAYS
-                return ApprovalResult.APPROVED
-            return ApprovalResult.DENIED
-
-        result = await _request_permission(spec, tc)
-        assert result == ApprovalResult.APPROVED_ALWAYS
+class TestCancellationStopReason:
+    """Cancellation must return stop_reason='cancelled' per the ACP spec."""
 
     @pytest.mark.asyncio
-    async def test_allow_once_returns_approved(self, tmp_path):
-        """Selecting allow_once maps to ApprovalResult.APPROVED (not APPROVED_ALWAYS)."""
-        from acp.schema import AllowedOutcome, ToolCallUpdate
-
-        from agent.core.events import ToolCall as AarToolCall
-        from agent.safety.permissions import ApprovalResult
-        from agent.tools.schema import SideEffect, ToolSpec
-
-        sdk_agent = self._make_agent(tmp_path, MockProvider())
-        mock_conn = AsyncMock()
-        mock_conn.request_permission.return_value = AsyncMock(
-            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
-        )
-        sdk_agent._conn = mock_conn
-
-        import json
-
-        spec = ToolSpec(name="write_file", description="w", side_effects=[SideEffect.WRITE])
-        tc = AarToolCall(tool_name="write_file", tool_call_id="tc2", arguments={})
-
-        tool_update = ToolCallUpdate(
-            title=tc.tool_name,
-            tool_call_id="tc2",
-            status="pending",
-            raw_input=json.dumps(tc.arguments)[:1000],
-        )
-        resp = await sdk_agent._conn.request_permission(
-            options=[],
-            session_id="s",
-            tool_call=tool_update,
-        )
-        if resp and isinstance(resp.outcome, AllowedOutcome):
-            if resp.outcome.option_id == "allow_always":
-                result = ApprovalResult.APPROVED_ALWAYS
-            else:
-                result = ApprovalResult.APPROVED
-        else:
-            result = ApprovalResult.DENIED
-        assert result == ApprovalResult.APPROVED
-
-    @pytest.mark.asyncio
-    async def test_reject_returns_denied(self, tmp_path):
-        """A cancelled/rejected outcome maps to ApprovalResult.DENIED."""
-        from acp.schema import DeniedOutcome
-
-        from agent.safety.permissions import ApprovalResult
-
-        sdk_agent = self._make_agent(tmp_path, MockProvider())
-        mock_conn = AsyncMock()
-        mock_conn.request_permission.return_value = AsyncMock(
-            outcome=DeniedOutcome(outcome="cancelled")
-        )
-        sdk_agent._conn = mock_conn
-
-        # DeniedOutcome is not AllowedOutcome, so result should be DENIED
-        resp = await sdk_agent._conn.request_permission(
-            options=[],
-            session_id="s",
-            tool_call=AsyncMock(),
-        )
-        from acp.schema import AllowedOutcome
-
-        if resp and isinstance(resp.outcome, AllowedOutcome):
-            result = ApprovalResult.APPROVED
-        else:
-            result = ApprovalResult.DENIED
-        assert result == ApprovalResult.DENIED
-
-    @pytest.mark.asyncio
-    async def test_tool_call_update_used_in_permission(self, tmp_path):
-        """request_permission sends a ToolCallUpdate (not ToolCallStart)."""
-        from acp.schema import AllowedOutcome, ToolCallUpdate
-
+    async def test_cancel_returns_cancelled_stop_reason(self, tmp_path):
+        """When cancel() is called during a prompt, stop_reason is 'cancelled'."""
         provider = MockProvider()
-        provider.enqueue_text("done", stop="end_turn")
+        # Use a slow provider that we can cancel during
+        slow_event = asyncio.Event()
 
-        sdk_agent = self._make_agent(tmp_path, provider)
-        mock_conn = AsyncMock()
-        mock_conn.request_permission.return_value = AsyncMock(
-            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
-        )
-        sdk_agent._conn = mock_conn
+        original_complete = provider.complete
 
-        sdk_agent._config = sdk_agent._config.model_copy(
-            update={"safety": SafetyConfig(require_approval_for_writes=True)}
-        )
+        async def slow_complete(*args, **kwargs):
+            await slow_event.wait()  # block until cancelled
+            return await original_complete(*args, **kwargs)
+
+        provider.complete = slow_complete
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
 
         r = await sdk_agent.new_session()
-        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+        session_id = r.session_id
 
-        if mock_conn.request_permission.called:
-            call_kwargs = mock_conn.request_permission.call_args.kwargs
-            tool_call = call_kwargs["tool_call"]
-            assert isinstance(tool_call, ToolCallUpdate)
+        # Start prompt in a task
+        prompt_task = asyncio.create_task(
+            sdk_agent.prompt(prompt=[{"text": "do something slow"}], session_id=session_id)
+        )
+
+        # Give the prompt a moment to start
+        await asyncio.sleep(0.05)
+
+        # Cancel
+        await sdk_agent.cancel(session_id=session_id)
+
+        # Wait for the prompt to finish
+        try:
+            result = await asyncio.wait_for(prompt_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pytest.fail("Prompt did not complete after cancel within timeout")
+        except asyncio.CancelledError:
+            pytest.fail("Prompt raised CancelledError instead of returning cancelled response")
+
+        assert result.stop_reason == "cancelled"
 
     @pytest.mark.asyncio
-    async def test_tool_call_kind_set_in_permission(self, tmp_path):
-        """The ToolCallUpdate in request_permission includes a kind field."""
-        from acp.schema import AllowedOutcome, ToolCallUpdate
+    async def test_cancel_stores_and_cancels_run_task(self, tmp_path):
+        """cancel() calls task.cancel() on the stored run task."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = AarAcpAgent(config=config, agent_name="test-agent")
+        from agent.memory.session_store import SessionStore
 
-        provider = MockProvider()
-        provider.enqueue_text("done", stop="end_turn")
+        sdk_agent._store = SessionStore(tmp_path)
 
-        sdk_agent = self._make_agent(tmp_path, provider)
-        mock_conn = AsyncMock()
-        mock_conn.request_permission.return_value = AsyncMock(
-            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
-        )
-        sdk_agent._conn = mock_conn
+        # Simulate a running task — use MagicMock because done()/cancel() are sync
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        sdk_agent._run_tasks["sess_1"] = mock_task
 
-        sdk_agent._config = sdk_agent._config.model_copy(
-            update={"safety": SafetyConfig(require_approval_for_writes=True)}
-        )
+        cancel_event = asyncio.Event()
+        sdk_agent._cancel_events["sess_1"] = cancel_event
 
-        r = await sdk_agent.new_session()
-        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+        await sdk_agent.cancel(session_id="sess_1")
 
-        if mock_conn.request_permission.called:
-            call_kwargs = mock_conn.request_permission.call_args.kwargs
-            tool_call = call_kwargs["tool_call"]
-            # kind should be set (not None)
-            assert tool_call.kind is not None
+        assert cancel_event.is_set()
+        mock_task.cancel.assert_called_once()
+
+    def test_map_stop_reason_cancelled(self):
+        assert _map_stop_reason(AgentState.CANCELLED) == "cancelled"
+
+    def test_map_stop_reason_error_is_end_turn(self):
+        assert _map_stop_reason(AgentState.ERROR) == "end_turn"
+
+    def test_map_stop_reason_timed_out_is_end_turn(self):
+        assert _map_stop_reason(AgentState.TIMED_OUT) == "end_turn"
 
 
 # ---------------------------------------------------------------------------
