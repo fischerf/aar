@@ -175,6 +175,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 | [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut reference |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
+| [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
 
 ---
