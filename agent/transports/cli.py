@@ -811,6 +811,105 @@ def serve(
 
 
 @app.command()
+def acp(
+    http: bool = typer.Option(
+        False,
+        "--http",
+        help="Use HTTP/SSE transport instead of stdio (for REST clients, not Zed).",
+    ),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="HTTP bind address (--http only)"),
+    port: int = typer.Option(8000, "--port", help="HTTP port (--http only)"),
+    agent_name: str = typer.Option("aar", "--name", "-n", help="ACP agent name"),
+    agent_description: str = typer.Option(
+        "Aar adaptive action & reasoning agent",
+        "--description",
+        "-d",
+        help="ACP agent description",
+    ),
+    model: Optional[str] = typer.Option(None, "--model", "-m"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+    ),
+    base_url: str = typer.Option(
+        "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"
+    ),
+    api_key: str = typer.Option(
+        "", "--api-key", help="API key (overrides env var for the chosen provider)"
+    ),
+    config_file: Optional[str] = typer.Option(
+        None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"
+    ),
+    read_only: Optional[bool] = typer.Option(
+        None, "--read-only/--no-read-only", help="Block all write and execute tools"
+    ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        help="Log verbosity: DEBUG | INFO | WARNING | ERROR (overrides config file)",
+    ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file (append mode). Default: stderr only.",
+    ),
+) -> None:
+    """Start an ACP agent (Agent Communication Protocol).
+
+    Default (stdio): communicate over stdin/stdout using the official
+    agent-client-protocol SDK.  This is the mode Zed and other editors
+    use — add Aar via settings.json:
+
+      "agent_servers": {
+        "Aar": { "type": "custom", "command": "aar", "args": ["acp"] }
+      }
+
+    HTTP mode (--http): start a REST/SSE server for remote or programmatic
+    access.  Requires uvicorn (pip install uvicorn).
+    """
+    config = _build_config(
+        model=model,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        config_file=config_file,
+        read_only=read_only,
+        log_level=log_level,
+        log_file=log_file,
+    )
+    _apply_logging(config)
+
+    if http:
+        from agent.transports.acp import create_acp_asgi_app
+
+        try:
+            import uvicorn
+        except ImportError:
+            console.print(
+                "[red]uvicorn is required for --http mode. "
+                "Install with: pip install uvicorn[/]",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        asgi_app = create_acp_asgi_app(
+            config=config,
+            agent_name=agent_name,
+            agent_description=agent_description,
+        )
+        console.print(f"[bold green]ACP HTTP server on {host}:{port}[/]", err=True)
+        uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
+    else:
+        from agent.transports.acp import run_acp_stdio
+
+        asyncio.run(
+            run_acp_stdio(
+                config=config,
+                agent_name=agent_name,
+            )
+        )
+
+
+@app.command()
 def init(
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config files"),
 ) -> None:

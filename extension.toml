@@ -1,0 +1,50 @@
+id = "aar-agent"
+name = "Aar Agent"
+version = "0.3.2"
+schema_version = 1
+authors = ["fischerf"]
+description = "Aar adaptive action & reasoning agent — provider-agnostic AI agent with ACP support"
+repository = "https://github.com/fischerf/aar"
+
+# ---------------------------------------------------------------------------
+# Agent server — speaks Agent Communication Protocol (ACP v0.2)
+# ---------------------------------------------------------------------------
+#
+# Each platform archive is a small tarball / zip that contains only a launcher
+# script (launch.sh or launch.cmd).  The script installs aar-agent from PyPI
+# if needed, then starts `aar acp` on the port Zed passes via ZED_AGENT_PORT
+# (default 8000).
+#
+# Build the archives with:
+#   scripts/zed/build_archives.sh
+#
+# Then attach them to the GitHub Release for the matching version tag.
+# ---------------------------------------------------------------------------
+
+[agent_servers.aar]
+name = "Aar"
+icon = "icon/aar.svg"
+
+[agent_servers.aar.env]
+# Signals to the agent that it was launched by Zed — useful for log filtering.
+AAR_LAUNCHED_BY = "zed"
+
+[agent_servers.aar.targets.darwin-aarch64]
+archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-darwin-aarch64.tar.gz"
+cmd = "./launch.sh"
+
+[agent_servers.aar.targets.darwin-x86_64]
+archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-darwin-x86_64.tar.gz"
+cmd = "./launch.sh"
+
+[agent_servers.aar.targets.linux-x86_64]
+archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-linux-x86_64.tar.gz"
+cmd = "./launch.sh"
+
+[agent_servers.aar.targets.linux-aarch64]
+archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-linux-aarch64.tar.gz"
+cmd = "./launch.sh"
+
+[agent_servers.aar.targets.windows-x86_64]
+archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-windows-x86_64.zip"
+cmd = "./launch.cmd"

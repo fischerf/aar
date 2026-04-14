@@ -15,6 +15,8 @@ config = AgentConfig(
         api_key="...",                             # or set via env var
         max_tokens=4096,
         temperature=0.0,
+        response_format="",                        # "" | "json" | "json_schema"
+        json_schema={},                            # schema when response_format="json_schema"
     ),
     tools=ToolConfig(
         enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
@@ -36,7 +38,11 @@ config = AgentConfig(
         reserve_cost_fraction=0.1,                  # cost proximity fraction
     ),
     max_steps=50,
+    max_retries=3,                                 # provider request retry attempts
     timeout=300.0,                                 # seconds
+    streaming=False,                               # use token-level streaming when supported
+    context_window=0,                              # model context limit in tokens; 0 = no management
+    context_strategy="sliding_window",             # "sliding_window" | "none"
     system_prompt="You are a helpful assistant.",
     tui=TUIConfig(
         theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name

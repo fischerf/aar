@@ -1,0 +1,29 @@
+<svg
+	width="64"
+	height="64"
+	viewBox="0 0 64 64"
+	fill="none"
+	xmlns="http://www.w3.org/2000/svg"
+>
+	<!-- Eagle silhouette -->
+	<path
+		d="M32 6 C28 6, 22 10, 20 16 C18 12, 12 8, 6 10 C10 14, 14 20, 16 24 C12 22, 6 22, 2 24 C6 28, 14 30, 18 30 C14 34, 10 42, 10 48 C14 44, 20 40, 24 38 L28 56 C29 58, 31 58, 32 58 C33 58, 35 58, 36 56 L40 38 C44 40, 50 44, 54 48 C54 42, 50 34, 46 30 C50 30, 58 28, 62 24 C58 22, 52 22, 48 24 C50 20, 54 14, 58 10 C52 8, 46 12, 44 16 C42 10, 36 6, 32 6Z"
+		fill="url(#eagle-grad)"
+	/>
+	<!-- Eye -->
+	<circle cx="28" cy="18" r="2" fill="#09090b" />
+	<circle cx="28.5" cy="17.5" r="0.7" fill="#fbbf24" />
+	<defs>
+		<linearGradient
+			id="eagle-grad"
+			x1="0"
+			y1="0"
+			x2="64"
+			y2="64"
+		>
+			<stop offset="0%" stop-color="#fbbf24" />
+			<stop offset="50%" stop-color="#f59e0b" />
+			<stop offset="100%" stop-color="#d97706" />
+		</linearGradient>
+	</defs>
+</svg>

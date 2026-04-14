@@ -20,27 +20,19 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
 
+### Transport modes
+
+| Command | Use case | Description |
+|---------|----------|-------------|
+| `aar run "…"` | Automation / CI | One-shot task — runs to completion and exits; no interaction |
+| `aar chat` | Interactive CLI | Conversational loop in the terminal with approval prompts |
+| `aar tui` | Interactive TUI | Scrollable Rich interface with live token counters |
+| `aar tui --fixed` | Interactive TUI | Full-screen Textual UI with fixed header/footer bars, mouse support |
+| `aar serve` | Remote / web | HTTP/SSE web API — use from a browser, curl, or remote agents |
+| `aar acp` | IDE integration | [ACP](https://agentcommunicationprotocol.dev) stdio agent for Zed and other ACP-compatible editors |
+| `aar acp --http` | Remote ACP | ACP over HTTP/SSE for programmatic or remote ACP clients |
+
 ## Installation
-
-```bash
-# Everything at once
-pip install "aar-agent[all,dev]"
-
-# Provider-specific
-pip install "aar-agent[anthropic]"
-pip install "aar-agent[openai]"
-pip install "aar-agent[ollama]"
-pip install "aar-agent[generic]"
-
-# With MCP support
-pip install "aar-agent[ollama,mcp]"
-
-# Full-screen TUI with fixed bars (requires textual)
-pip install "aar-agent[tui-fixed]"
-
-# Core only (no LLM provider)
-pip install aar-agent
-```
 
 > **Note:** `aar-agent` is not published to PyPI.
 > Use the **from-source install** below.
@@ -51,7 +43,10 @@ pip install aar-agent
 git clone https://github.com/fischerf/aar.git
 cd aar
 
-# Full dev setup
+# Everything at once (CLI,TUI,MCP,ACP,Providers)
+pip install "aar-agent[all,dev]"
+
+# or Full dev setup
 pip install -e ".[all,dev]"
 
 # Verify
@@ -65,58 +60,66 @@ The `-e` flag creates a live link — editing files under `agent/` is reflected 
 
 Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama instance.
 
-## CLI
+## Usage
 
 ```bash
-# Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
-# Ctrl+S send  Ctrl+X cancel  Ctrl+T theme  Ctrl+K think  Ctrl+L clear  Ctrl+G logs  Ctrl+Q quit
-# Enter = new line in input  Ctrl+Up/Down = history  Page Up/Down = scroll  /quit to exit
-aar tui --fixed
-aar tui --fixed --theme decker
+# Type to show help screen
+> aar
 
-# Launch the rich TUI
-aar tui
+# Show tui specific help
+> aar tui --help
+
+# Full-screen TUI with fixed bars, scrollable body, mouse support (like Claude Code/Codex but using Python)
+> aar tui --fixed
+> aar tui --fixed --theme decker
+
+# Continous scrolling TUI
+> aar tui
+
+# Resume a previous session in TUI
+> aar tui --session <session-id>
 
 # Interactive chat (asks before write/execute, file tools restricted to cwd)
-aar chat
+> aar chat --provider ollama --model llama3
 
-# Chat with a specific provider/model
-aar chat --provider openai --model gpt-4o
-aar chat --provider ollama --model llama3
-
-# Disable the workspace sandbox for full access
-aar chat --no-require-approval --no-restrict-to-cwd
+# Disable the workspace sandbox for full access and load config from a JSON file
+> aar chat --no-require-approval --no-restrict-to-cwd --config aar.json
 
 # One-shot task
-aar run "Refactor main.py to use async/await"
+> aar run "Refactor main.py to use async/await"
 
 # Skip approval prompts for scripted / CI use
-aar run --no-require-approval "Refactor main.py to use async/await"
-
-# Load full config from a JSON file
-aar chat --config aar.json
-
-# Resume a previous session
-aar chat --session <session-id>
-
-# List saved sessions
-aar sessions
-
-# List available tools
-aar tools
+> aar run --no-require-approval "Refactor main.py to use async/await"
 
 # Start the HTTP/SSE web server
-aar serve --host 0.0.0.0 --port 8080
+> aar serve --host 0.0.0.0 --port 8080
 ```
 
-### Verbose mode
+## ACP — IDE integration
 
-Pass `--verbose` (or `-v`) to enable richer feedback: side-effect badges (`[read]`, `[write]`, `[exec]`), path highlighting, and execution timing.
+`aar acp` starts an [Agent Communication Protocol](https://agentcommunicationprotocol.dev) agent that editors like [Zed](https://zed.dev) connect to over stdio.
 
 ```bash
-aar chat --verbose
-aar tui --verbose --mcp-config tools/mcp_web.json --provider ollama --model qwen3.5:9b
+aar acp              # stdio — for Zed and other ACP-compatible editors
+aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
 ```
+
+**Zed local dev** — add to `~/.config/zed/settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "Aar": {
+      "type": "custom",
+      "command": "aar",
+      "args": ["acp"],
+      "env": {}
+    }
+  }
+}
+```
+
+See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint reference, and programmatic embedding.
 
 ## Architecture
 
@@ -135,40 +138,6 @@ agent/
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
-
-## Token & cost tracking
-
-Aar tracks token usage and estimated costs in real time during every agent run.
-
-### What you get out of the box
-
-- **Live counters** — input/output tokens and estimated USD cost accumulate on the session after each provider call
-- **Built-in pricing** — pricing tables for Anthropic (Claude), OpenAI (GPT-4o, o3, etc.) models with automatic prefix matching
-- **Budget enforcement** — set `token_budget` or `cost_limit` to stop the agent before it exceeds your limits
-- **Visual warnings** — token counts turn red in the TUI when approaching the configured threshold (default 80%)
-- **Per-step breakdown** — the observability module provides per-step token and cost metrics
-
-### Configuration
-
-```json
-{
-  "token_budget": 100000,
-  "cost_limit": 5.0,
-  "token_warning_threshold": 0.9,
-  "cost_warning_threshold": 0.9
-}
-```
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `token_budget` | `0` | Max total tokens per run (0 = unlimited) |
-| `cost_limit` | `0.0` | Max estimated USD cost per run (0.0 = unlimited) |
-| `token_warning_threshold` | `0.8` | Fraction of budget for TUI warning color |
-| `cost_warning_threshold` | `0.8` | Fraction of cost limit for TUI warning color |
-
-When a limit is exceeded, the agent stops with `BUDGET_EXCEEDED` state and emits a non-recoverable error event.
-
-> **Note:** Cost estimates use approximate pricing from built-in tables. Local models (Ollama) without pricing entries show $0.00.
 
 ## Requirements
 
@@ -196,7 +165,9 @@ Neither is required if you do not enable the `bash` built-in tool.
 
 | Document | Contents |
 |----------|----------|
-| [Configuration](docs/configuration.md) | `AgentConfig` reference, **token budgets, cost limits**, config precedence, approval modes, logging, system prompt, shell, project rules |
+| [Configuration](docs/configuration.md) | `AgentConfig` reference, config precedence, approval modes, logging, system prompt, shell, project rules |
+| [Tokens & Cost](docs/tokens.md) | Token tracking pipeline, budget enforcement, cost estimation, pricing tables, TUI display |
+| [ACP](docs/acp.md) | ACP stdio setup for Zed and other editors, HTTP/SSE mode, programmatic embedding, endpoint reference |
 | [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Generic setup and options |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
@@ -204,6 +175,7 @@ Neither is required if you do not enable the `bash` built-in tool.
 | [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut reference |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
+| [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
 
 ---

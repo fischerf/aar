@@ -14,7 +14,7 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 
 ```
 agent/
-├── core/           # The heart: loop, agent, events, session, config
+├── core/           # The heart: loop, agent, events, session, config, tokens, multimodal, logging, guardrails
 ├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
 ├── tools/          # Tool registry, schema, execution engine
 ├── safety/         # Policy engine, permission manager, sandboxes
@@ -91,6 +91,9 @@ IDLE → RUNNING → COMPLETED
                 → ERROR
                 → MAX_STEPS
                 → TIMED_OUT
+                → BUDGET_EXCEEDED
+       RUNNING → WAITING_FOR_TOOL → RUNNING
+       RUNNING → WAITING_FOR_INPUT (interactive transports)
 ```
 
 State transitions are managed by the loop. The final state is set on the session before returning.
@@ -214,6 +217,7 @@ All events extend `Event` (`agent/core/events.py`) and carry a `type` field from
 | `ReasoningBlock` | `reasoning` | `content` |
 | `ProviderMeta` | `provider_meta` | `usage`, `duration_ms`, `model`, `provider` |
 | `ErrorEvent` | `error` | `message` |
+| `StreamChunk` | `stream_chunk` | `text`, `reasoning_text`, `finished` |
 | `SessionEvent` | `session` | `action` |
 
 Events are Pydantic models — fully serializable and type-safe. Subscribe with `agent.on_event(callback)`.
@@ -249,7 +253,8 @@ Shared TUI sub-packages:
 | Package | Contents |
 |---------|----------|
 | `transports/tui_utils/` | Formatting helpers shared by both TUI transports |
-| `transports/tui_widgets/` | Textual widget classes: bars, blocks, chat body, input |
+| `transports/keybinds.py` | Keyboard shortcut definitions for the fixed TUI |
+| `transports/tui_widgets/` | Textual widget classes: bars, blocks, chat body, input, log viewer, thinking panel |
 | `transports/themes/` | Theme models, built-in themes, theme registry |
 
 All transports share the same `AgentConfig` schema. Transport-specific behavior is limited to:
