@@ -20,6 +20,18 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
 
+### Transport modes
+
+| Command | Use case | Description |
+|---------|----------|-------------|
+| `aar run "…"` | Automation / CI | One-shot task — runs to completion and exits; no interaction |
+| `aar chat` | Interactive CLI | Conversational loop in the terminal with approval prompts |
+| `aar tui` | Interactive TUI | Scrollable Rich interface with live token counters |
+| `aar tui --fixed` | Interactive TUI | Full-screen Textual UI with fixed header/footer bars, mouse support |
+| `aar serve` | Remote / web | HTTP/SSE web API — use from a browser, curl, or remote agents |
+| `aar acp` | IDE integration | [ACP](https://agentcommunicationprotocol.dev) stdio agent for Zed and other ACP-compatible editors |
+| `aar acp --http` | Remote ACP | ACP over HTTP/SSE for programmatic or remote ACP clients |
+
 ## Installation
 
 ```bash
@@ -136,39 +148,31 @@ agent/
 
 See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
-## Token & cost tracking
+## ACP — IDE integration
 
-Aar tracks token usage and estimated costs in real time during every agent run.
+`aar acp` starts an [Agent Communication Protocol](https://agentcommunicationprotocol.dev) agent that editors like [Zed](https://zed.dev) connect to over stdio.
 
-### What you get out of the box
+```bash
+aar acp              # stdio — for Zed and other ACP-compatible editors
+aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
+```
 
-- **Live counters** — input/output tokens and estimated USD cost accumulate on the session after each provider call
-- **Built-in pricing** — pricing tables for Anthropic (Claude), OpenAI (GPT-4o, o3, etc.) models with automatic prefix matching
-- **Budget enforcement** — set `token_budget` or `cost_limit` to stop the agent before it exceeds your limits
-- **Visual warnings** — token counts turn red in the TUI when approaching the configured threshold (default 80%)
-- **Per-step breakdown** — the observability module provides per-step token and cost metrics
-
-### Configuration
+**Zed local dev** — add to `~/.config/zed/settings.json`:
 
 ```json
 {
-  "token_budget": 100000,
-  "cost_limit": 5.0,
-  "token_warning_threshold": 0.9,
-  "cost_warning_threshold": 0.9
+  "agent_servers": {
+    "Aar": {
+      "type": "custom",
+      "command": "aar",
+      "args": ["acp"],
+      "env": {}
+    }
+  }
 }
 ```
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `token_budget` | `0` | Max total tokens per run (0 = unlimited) |
-| `cost_limit` | `0.0` | Max estimated USD cost per run (0.0 = unlimited) |
-| `token_warning_threshold` | `0.8` | Fraction of budget for TUI warning color |
-| `cost_warning_threshold` | `0.8` | Fraction of cost limit for TUI warning color |
-
-When a limit is exceeded, the agent stops with `BUDGET_EXCEEDED` state and emits a non-recoverable error event.
-
-> **Note:** Cost estimates use approximate pricing from built-in tables. Local models (Ollama) without pricing entries show $0.00.
+See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint reference, and programmatic embedding.
 
 ## Requirements
 
@@ -196,7 +200,9 @@ Neither is required if you do not enable the `bash` built-in tool.
 
 | Document | Contents |
 |----------|----------|
-| [Configuration](docs/configuration.md) | `AgentConfig` reference, **token budgets, cost limits**, config precedence, approval modes, logging, system prompt, shell, project rules |
+| [Configuration](docs/configuration.md) | `AgentConfig` reference, config precedence, approval modes, logging, system prompt, shell, project rules |
+| [Tokens & Cost](docs/tokens.md) | Token tracking pipeline, budget enforcement, cost estimation, pricing tables, TUI display |
+| [ACP](docs/acp.md) | ACP stdio setup for Zed and other editors, HTTP/SSE mode, programmatic embedding, endpoint reference |
 | [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Generic setup and options |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
