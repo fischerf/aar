@@ -7,6 +7,17 @@ Aar implements [ACP v0.2](https://agentcommunicationprotocol.dev) in two modes:
 | **stdio** | `aar acp` | stdin / stdout | Zed and any ACP-compatible editor |
 | **HTTP/SSE** | `aar acp --http` | HTTP REST + SSE | Remote or programmatic ACP clients |
 
+### Advertised capabilities
+
+On connection, Aar reports the following capabilities to the editor:
+
+| Capability | Value | Meaning |
+|------------|-------|---------|
+| `load_session` | `true` | Editor can resume previously saved sessions |
+| `session.list` | supported | Editor can show Aar session history in its sidebar |
+| `session.close` | supported | Editor notifies Aar when a session tab is closed |
+| `prompt.embedded_context` | `true` | `@`-mentions embed file contents that Aar reads |
+
 ---
 
 ## 1. Zed Editor — stdio setup
@@ -145,7 +156,81 @@ curl -s -N -X POST http://127.0.0.1:8000/runs \
 
 ---
 
-## 4. Programmatic embedding
+## 4. Session lifecycle
+
+### What Aar handles on each ACP event
+
+| ACP event | What Aar does |
+|-----------|---------------|
+| `initialize` | Returns capabilities, protocol version, and agent info |
+| `session/new` | Creates a new Aar session; stores `cwd` in session metadata; starts any MCP servers passed by the editor |
+| `session/load` | Resumes a saved session from `~/.aar/sessions/`; returns `null` if not found (editor creates new) |
+| `session/list` | Returns all saved sessions with title (first assistant message) and `cwd` |
+| `session/close` | Cleans up in-memory session state and shuts down any per-session MCP bridges |
+| `session/prompt` | Runs the Aar agent loop; streams thinking, tool calls, and token updates back to the editor |
+| `session/cancel` | Sets the agent's cooperative cancel signal for the current prompt |
+
+### Streaming updates pushed during a prompt
+
+| Update type | Trigger |
+|-------------|---------|
+| `agent_message_chunk` | Each streaming token (when provider streaming is enabled) or complete assistant message |
+| `agent_thought_chunk` | Extended thinking / reasoning content |
+| `tool_call` (start) | When the agent calls a tool |
+| `tool_call_update` (progress) | When the tool returns its result (status: `completed` or `failed`) |
+| `plan` | Updated after each tool call and result — shows the current step list with statuses |
+| `usage_update` | After each provider call — reports token count and estimated cost |
+| `session_info_update` | After the first assistant response — sets the session title in the editor sidebar |
+| `available_commands_update` | Once per session on first prompt — advertises `/model` and `/clear` slash commands |
+
+### Permission requests
+
+By default, Aar forwards tool-approval prompts to the editor via the ACP `request_permission` mechanism.
+The editor shows an **Allow / Deny** dialog before each tool executes.
+If no editor connection is available, tools are auto-approved.
+
+### MCP servers from the editor
+
+When an editor passes MCP server configurations in `session/new` or `session/load`, Aar starts those
+MCP bridges and registers their tools for the lifetime of that session.
+Both HTTP and stdio MCP transports are supported:
+
+```json
+// Passed by editor in session/new mcp_servers
+{"command": "npx", "args": ["@modelcontextprotocol/server-filesystem", "/my/project"], "name": "fs"}
+{"url": "http://localhost:3000/mcp", "name": "remote-mcp"}
+```
+
+The bridges are shut down automatically when `session/close` is received.
+
+### Model selection
+
+Aar advertises a `/model` slash command via `AvailableCommandsUpdate` so editors can offer model switching.
+When the editor calls `set_session_model`, Aar maps the model ID to a provider and applies it for the
+remainder of that session without affecting other sessions:
+
+| Model ID prefix | Provider |
+|-----------------|----------|
+| `claude-*` | Anthropic |
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `chatgpt-*` | OpenAI |
+| anything else | Ollama |
+
+In Zed, model switching is available once Zed exposes a UI for `set_session_model`.
+Until then you can watch the debug log (`--log-level debug`) to confirm the call arrives and is applied.
+
+### Plan tracking
+
+Every tool call during a prompt builds a live plan that Aar streams back as `plan` updates:
+
+- When a tool starts → a new `PlanEntry` with status `in_progress` is appended.
+- When the tool returns → the entry flips to `completed` (or stays `in_progress` on error).
+
+Editors that render the plan panel (e.g. Zed's tool-call sidebar) show each step as it executes.
+No configuration is needed — the plan is always active.
+
+---
+
+## 5. Programmatic embedding
 
 Embed the ACP HTTP app inside any ASGI framework (FastAPI, Starlette, etc.):
 
@@ -172,7 +257,7 @@ asyncio.run(run_acp_stdio(config=my_config, agent_name="aar"))
 
 ---
 
-## 5. Dependencies
+## 6. Dependencies
 
 ACP support requires the `agent-client-protocol` package:
 

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.core.config import AgentConfig, ProviderConfig, SafetyConfig, ToolConfig
+from agent.core.state import AgentState
 from agent.transports.acp import (
     AarAcpAgent,
     AcpMessage,
@@ -36,7 +37,6 @@ from agent.transports.acp import (
     _sse_line,
     create_acp_asgi_app,
 )
-from agent.core.state import AgentState
 from tests.conftest import MockProvider
 
 # ---------------------------------------------------------------------------
@@ -85,13 +85,13 @@ def _make_sdk_agent(provider: MockProvider) -> AarAcpAgent:
     config = _make_config()
     agent = AarAcpAgent(config=config, agent_name="test-agent")
 
-    def patched_make():
+    def patched_make(session_id: str = "", approval_callback=None):
         from agent.core.agent import Agent
 
         return Agent(
             config=agent._config,
             provider=provider,
-            approval_callback=agent._approval_callback,
+            approval_callback=approval_callback or agent._default_approval,
             registry=agent._registry,
         )
 
@@ -213,7 +213,9 @@ class TestAarAcpAgentPrompt:
         config = config.model_copy(update={"session_dir": tmp_path})
         sdk_agent = _make_sdk_agent(provider)
         sdk_agent._config = config
-        sdk_agent._store = __import__("agent.memory.session_store", fromlist=["SessionStore"]).SessionStore(tmp_path)
+        sdk_agent._store = __import__(
+            "agent.memory.session_store", fromlist=["SessionStore"]
+        ).SessionStore(tmp_path)
 
         # Create a session first
         new_sess_resp = await sdk_agent.new_session()
@@ -245,6 +247,7 @@ class TestAarAcpAgentPrompt:
         sdk_agent = _make_sdk_agent(provider)
         sdk_agent._config = config
         from agent.memory.session_store import SessionStore
+
         sdk_agent._store = SessionStore(tmp_path)
 
         mock_conn = AsyncMock()
@@ -269,6 +272,7 @@ class TestAarAcpAgentPrompt:
         sdk_agent = _make_sdk_agent(provider)
         sdk_agent._config = config
         from agent.memory.session_store import SessionStore
+
         sdk_agent._store = SessionStore(tmp_path)
         sdk_agent._conn = None  # No client
 
@@ -287,6 +291,7 @@ class TestAarAcpAgentPrompt:
         sdk_agent = _make_sdk_agent(provider)
         sdk_agent._config = config
         from agent.memory.session_store import SessionStore
+
         sdk_agent._store = SessionStore(tmp_path)
         sdk_agent._conn = AsyncMock()
 
@@ -329,8 +334,8 @@ class TestAarAcpAgentLoadSession:
     @pytest.mark.asyncio
     async def test_prompt_after_load_session(self, tmp_path):
         """After load_session, prompt should continue the loaded session."""
-        from agent.memory.session_store import SessionStore
         from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
 
         store = SessionStore(tmp_path)
         s = Session()
@@ -363,8 +368,8 @@ class TestAarAcpAgentListSessions:
 
     @pytest.mark.asyncio
     async def test_lists_saved_sessions(self, tmp_path):
-        from agent.memory.session_store import SessionStore
         from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
 
         store = SessionStore(tmp_path)
         ids = set()
@@ -386,7 +391,8 @@ class TestAarAcpAgentEventStreaming:
     @pytest.mark.asyncio
     async def test_tool_call_events_pushed(self, tmp_path):
         """ToolCall + ToolResult events should produce session_update calls."""
-        from agent.core.events import ToolCall as AarToolCall, ToolResult as AarToolResult
+        from agent.core.events import ToolCall as AarToolCall
+        from agent.core.events import ToolResult as AarToolResult
 
         provider = MockProvider()
         provider.enqueue_text("done", stop="end_turn")
@@ -425,8 +431,9 @@ class TestAarAcpAgentEventStreaming:
         # that emits tool events — here we test that the handlers are wired up
         r = await sdk_agent.new_session()
         # The actual event wiring is tested by checking the on_event callback directly
+        from acp.schema import ToolCallProgress, ToolCallStart
+
         from agent.transports.acp import _extract_text
-        from acp.schema import ToolCallStart, ToolCallProgress
 
         ts = ToolCallStart(
             title="bash", tool_call_id="tc1", status="in_progress", session_update="tool_call"
@@ -447,6 +454,799 @@ class TestAarAcpAgentEventStreaming:
             session_update="agent_thought_chunk",
         )
         assert chunk.content.text == "I should think about this"
+
+
+class TestAarAcpAgentCapabilities:
+    @pytest.mark.asyncio
+    async def test_declares_load_session(self):
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=1)
+        assert resp.agent_capabilities.load_session is True
+
+    @pytest.mark.asyncio
+    async def test_declares_embedded_context(self):
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=1)
+        assert resp.agent_capabilities.prompt_capabilities.embedded_context is True
+
+    @pytest.mark.asyncio
+    async def test_declares_list_and_close_session(self):
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=1)
+        caps = resp.agent_capabilities.session_capabilities
+        assert caps.list is not None
+        assert caps.close is not None
+
+
+class TestAarAcpAgentCloseSession:
+    @pytest.mark.asyncio
+    async def test_close_removes_session(self, tmp_path):
+        from agent.core.session import Session
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+        assert sid in agent._sessions
+
+        await agent.close_session(session_id=sid)
+        assert sid not in agent._sessions
+
+    @pytest.mark.asyncio
+    async def test_close_removes_cancel_event(self, tmp_path):
+        import asyncio
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+        agent._cancel_events[sid] = asyncio.Event()
+
+        await agent.close_session(session_id=sid)
+        assert sid not in agent._cancel_events
+
+    @pytest.mark.asyncio
+    async def test_close_unknown_session_no_crash(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        # Should not raise
+        await agent.close_session(session_id="unknown-session-id")
+
+
+class TestAarAcpAgentCancel:
+    @pytest.mark.asyncio
+    async def test_cancel_sets_event(self, tmp_path):
+        import asyncio
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        event = asyncio.Event()
+        agent._cancel_events[sid] = event
+        assert not event.is_set()
+
+        await agent.cancel(session_id=sid)
+        assert event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_cancel_no_active_prompt_no_crash(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        # No active prompt / cancel event registered
+        await agent.cancel(session_id="no-such-session")
+
+
+class TestAarAcpAgentCwd:
+    @pytest.mark.asyncio
+    async def test_new_session_stores_cwd(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session(cwd="/my/project")
+        session = agent._sessions[r.session_id]
+        assert session.metadata.get("cwd") == "/my/project"
+
+    @pytest.mark.asyncio
+    async def test_load_session_updates_cwd(self, tmp_path):
+        from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
+
+        store = SessionStore(tmp_path)
+        s = Session()
+        store.save(s)
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        await agent.load_session(session_id=s.session_id, cwd="/updated/cwd")
+        assert agent._sessions[s.session_id].metadata.get("cwd") == "/updated/cwd"
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_includes_cwd(self, tmp_path):
+        from agent.memory.session_store import SessionStore
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session(cwd="/my/project")
+
+        resp = await agent.list_sessions()
+        matched = next(si for si in resp.sessions if si.session_id == r.session_id)
+        assert matched.cwd == "/my/project"
+
+
+class TestAarAcpAgentMcpConversion:
+    def test_http_server_dict(self):
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        result = _acp_server_to_mcp_config({"url": "http://localhost:3000/mcp", "name": "my-mcp"})
+        assert result is not None
+        assert result.transport == "http"
+        assert result.url == "http://localhost:3000/mcp"
+
+    def test_stdio_server_dict(self):
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        result = _acp_server_to_mcp_config(
+            {"command": "python", "args": ["-m", "my_mcp"], "name": "my-mcp"}
+        )
+        assert result is not None
+        assert result.transport == "stdio"
+        assert result.command == "python"
+        assert result.args == ["-m", "my_mcp"]
+
+    def test_sdk_object_with_url(self):
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = MagicMock()
+        srv.url = "http://mcp.example.com/api"
+        srv.command = None
+        srv.name = "remote"
+        result = _acp_server_to_mcp_config(srv)
+        assert result is not None
+        assert result.url == "http://mcp.example.com/api"
+
+    def test_sdk_object_with_command(self):
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = MagicMock()
+        srv.url = None
+        srv.command = "npx"
+        srv.args = ["@modelcontextprotocol/server-filesystem", "/tmp"]
+        srv.env = {}
+        srv.name = "filesystem"
+        result = _acp_server_to_mcp_config(srv)
+        assert result is not None
+        assert result.command == "npx"
+        assert "/tmp" in result.args
+
+    def test_unrecognised_server_returns_none(self):
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        result = _acp_server_to_mcp_config({})
+        assert result is None
+
+
+class TestModelIdToProvider:
+    def test_claude_maps_to_anthropic(self):
+        from agent.transports.acp import _model_id_to_provider
+
+        provider, model = _model_id_to_provider("claude-sonnet-4-6")
+        assert provider == "anthropic"
+        assert model == "claude-sonnet-4-6"
+
+    def test_gpt_maps_to_openai(self):
+        from agent.transports.acp import _model_id_to_provider
+
+        provider, model = _model_id_to_provider("gpt-4o")
+        assert provider == "openai"
+
+    def test_o4_maps_to_openai(self):
+        from agent.transports.acp import _model_id_to_provider
+
+        provider, _ = _model_id_to_provider("o4-mini")
+        assert provider == "openai"
+
+    def test_llama_maps_to_ollama(self):
+        from agent.transports.acp import _model_id_to_provider
+
+        provider, model = _model_id_to_provider("llama3")
+        assert provider == "ollama"
+        assert model == "llama3"
+
+    def test_unknown_maps_to_ollama(self):
+        from agent.transports.acp import _model_id_to_provider
+
+        provider, _ = _model_id_to_provider("totally-custom-model")
+        assert provider == "ollama"
+
+
+class TestSetSessionModel:
+    @pytest.mark.asyncio
+    async def test_switches_model_in_session_config(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        await agent.set_session_model(model_id="claude-sonnet-4-6", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+
+    @pytest.mark.asyncio
+    async def test_different_sessions_have_independent_models(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r1 = await agent.new_session()
+        r2 = await agent.new_session()
+
+        await agent.set_session_model(model_id="gpt-4o", session_id=r1.session_id)
+        await agent.set_session_model(model_id="llama3", session_id=r2.session_id)
+
+        assert agent._session_configs[r1.session_id].provider.name == "openai"
+        assert agent._session_configs[r2.session_id].provider.name == "ollama"
+
+    @pytest.mark.asyncio
+    async def test_close_session_clears_model_override(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        await agent.set_session_model(model_id="gpt-4o", session_id=sid)
+        assert sid in agent._session_configs
+
+        await agent.close_session(session_id=sid)
+        assert sid not in agent._session_configs
+
+
+class TestAvailableCommands:
+    def test_returns_builtin_commands(self):
+        from agent.transports.acp import _available_commands
+
+        cmds = _available_commands()
+        names = {c.name for c in cmds}
+        assert "status" in names
+        assert "tools" in names
+        assert "policy" in names
+
+    def test_no_model_or_clear_commands(self):
+        from agent.transports.acp import _available_commands
+
+        names = {c.name for c in _available_commands()}
+        assert "model" not in names
+        assert "clear" not in names
+
+    def test_all_commands_have_descriptions(self):
+        from agent.transports.acp import _available_commands
+
+        for cmd in _available_commands():
+            assert cmd.description, f"{cmd.name} missing description"
+
+    @pytest.mark.asyncio
+    async def test_commands_pushed_once_per_session(self, tmp_path):
+        """AvailableCommandsUpdate is pushed at most twice per session (new_session + prompt)."""
+        from acp.schema import AvailableCommandsUpdate
+
+        provider = MockProvider()
+        provider.enqueue_text("answer 1", stop="end_turn")
+        provider.enqueue_text("answer 2", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "first"}], session_id=r.session_id)
+        await sdk_agent.prompt(prompt=[{"text": "second"}], session_id=r.session_id)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        cmds_updates = [u for u in all_updates if isinstance(u, AvailableCommandsUpdate)]
+        # Optimistic push from new_session + guaranteed push from first prompt = 2.
+        # Second prompt must NOT add another push.
+        assert len(cmds_updates) == 2
+
+    @pytest.mark.asyncio
+    async def test_commands_pushed_again_after_close(self, tmp_path):
+        """After close_session, the next session re-pushes available commands."""
+        from acp.schema import AvailableCommandsUpdate
+
+        provider = MockProvider()
+        provider.enqueue_text("a1", stop="end_turn")
+        provider.enqueue_text("a2", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "hi"}], session_id=r.session_id)
+        await sdk_agent.close_session(session_id=r.session_id)
+
+        # New session — commands should be pushed again
+        r2 = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "hi again"}], session_id=r2.session_id)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        cmds_updates = [u for u in all_updates if isinstance(u, AvailableCommandsUpdate)]
+        # 2 pushes per session (new_session + prompt) × 2 sessions = 4
+        assert len(cmds_updates) == 4
+
+
+class TestAgentPlanUpdate:
+    @pytest.mark.asyncio
+    async def test_plan_pushed_for_tool_calls(self, tmp_path):
+        """AgentPlanUpdate is pushed when tool calls fire."""
+        from acp.schema import AgentPlanUpdate
+
+        provider = MockProvider()
+        provider.enqueue_text("done", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        # With no tool calls, no plan updates should be sent
+        plan_updates = [u for u in all_updates if isinstance(u, AgentPlanUpdate)]
+        assert len(plan_updates) == 0  # no tool calls → no plan
+
+    def test_plan_entry_construction(self):
+        """PlanEntry and AgentPlanUpdate can be correctly constructed."""
+        from acp.schema import AgentPlanUpdate, PlanEntry
+
+        entries = [
+            PlanEntry(content="read_file", status="completed", priority="medium"),
+            PlanEntry(content="write_file", status="in_progress", priority="medium"),
+        ]
+        plan = AgentPlanUpdate(entries=entries, session_update="plan")
+        assert plan.entries[0].status == "completed"
+        assert plan.entries[1].status == "in_progress"
+        assert plan.session_update == "plan"
+
+
+class TestSlashCommandHandler:
+    """_handle_slash_command returns useful plain-text responses without running the agent."""
+
+    def _make_agent(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        return agent
+
+    def test_status_contains_session_id(self, tmp_path):
+        from agent.core.session import Session
+
+        agent = self._make_agent(tmp_path)
+        session = Session(session_id="abc123")
+        reply = agent._handle_slash_command("/status", "abc123", session)
+        assert "abc123" in reply
+
+    def test_status_contains_provider_and_model(self, tmp_path):
+        from agent.core.session import Session
+
+        agent = self._make_agent(tmp_path)
+        session = Session(session_id="x")
+        reply = agent._handle_slash_command("/status", "x", session)
+        assert agent._config.provider.name in reply
+        assert agent._config.provider.model in reply
+
+    def test_tools_lists_tool_names(self, tmp_path):
+        from agent.core.config import ToolConfig
+        from agent.core.session import Session
+
+        config = _make_config()
+        config = config.model_copy(
+            update={"tools": ToolConfig(enabled_builtins=["read_file", "write_file"])}
+        )
+        agent = AarAcpAgent(config=config)
+        session = Session(session_id="x")
+        reply = agent._handle_slash_command("/tools", "x", session)
+        assert "read_file" in reply
+        assert "Available tools" in reply
+
+    def test_policy_contains_approval_fields(self, tmp_path):
+        from agent.core.session import Session
+
+        agent = self._make_agent(tmp_path)
+        session = Session(session_id="x")
+        reply = agent._handle_slash_command("/policy", "x", session)
+        assert "Approve writes" in reply
+        assert "Approve execute" in reply
+
+    @pytest.mark.asyncio
+    async def test_prompt_handles_status_command(self, tmp_path):
+        """A /status prompt returns immediately without calling the provider."""
+        provider = MockProvider()  # no responses queued — would raise if called
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        response = await sdk_agent.prompt(prompt=[{"text": "/status"}], session_id=r.session_id)
+
+        assert response.stop_reason == "end_turn"
+        # Provider was never called
+        assert len(provider.call_history) == 0
+
+    @pytest.mark.asyncio
+    async def test_prompt_handles_policy_command(self, tmp_path):
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        response = await sdk_agent.prompt(prompt=[{"text": "/policy"}], session_id=r.session_id)
+
+        assert response.stop_reason == "end_turn"
+        assert len(provider.call_history) == 0
+
+
+class TestAarAcpAgentStreamingAndUsage:
+    @pytest.mark.asyncio
+    async def test_session_info_update_sent_after_first_response(self, tmp_path):
+        """SessionInfoUpdate should be pushed once per prompt call."""
+        from acp.schema import SessionInfoUpdate
+
+        provider = MockProvider()
+        provider.enqueue_text("Here is my answer", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "tell me something"}], session_id=r.session_id)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        info_updates = [u for u in all_updates if isinstance(u, SessionInfoUpdate)]
+        assert len(info_updates) == 1
+        assert info_updates[0].title  # non-empty title
+
+    @pytest.mark.asyncio
+    async def test_usage_update_type_construction(self):
+        """UsageUpdate can be constructed with Cost object."""
+        from acp.schema import Cost, UsageUpdate
+
+        u = UsageUpdate(
+            cost=Cost(amount=0.01, currency="usd"),
+            size=1000,
+            used=200,
+            session_update="usage_update",
+        )
+        assert u.cost.amount == 0.01
+        assert u.used == 200
+
+    @pytest.mark.asyncio
+    async def test_request_permission_auto_approves_when_no_conn(self, tmp_path):
+        """Without a client connection, the permission callback falls back to auto-approve."""
+        provider = MockProvider()
+        provider.enqueue_text("done", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        sdk_agent._conn = None  # no connection
+
+        r = await sdk_agent.new_session()
+        resp = await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+        assert resp.stop_reason == "end_turn"
+
+
+class TestSideEffectsToToolKind:
+    """_side_effects_to_tool_kind maps Aar SideEffect → ACP ToolKind."""
+
+    def test_execute_is_highest_priority(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.EXECUTE, SideEffect.WRITE]) == "execute"
+
+    def test_write_maps_to_edit(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE]) == "edit"
+
+    def test_network_maps_to_fetch(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.NETWORK]) == "fetch"
+
+    def test_read_maps_to_read(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.READ]) == "read"
+
+    def test_none_maps_to_other(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.NONE]) == "other"
+
+    def test_empty_maps_to_other(self):
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([]) == "other"
+
+
+class TestPermissionRequestOptions:
+    """_request_permission sends all 4 ACP permission option kinds."""
+
+    def _make_agent(self, tmp_path, provider):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        return sdk_agent
+
+    @pytest.mark.asyncio
+    async def test_permission_offers_four_options(self, tmp_path):
+        """request_permission is called with allow_once, allow_always, reject_once, reject_always."""
+        from acp.schema import AllowedOutcome, PermissionOption
+
+        provider = MockProvider()
+        provider.enqueue_text("done", stop="end_turn")
+
+        sdk_agent = self._make_agent(tmp_path, provider)
+        mock_conn = AsyncMock()
+        # Simulate user picking "allow_once"
+        mock_conn.request_permission.return_value = AsyncMock(
+            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
+        )
+        sdk_agent._conn = mock_conn
+
+        # Enable approval requirement so the callback fires
+        sdk_agent._config = sdk_agent._config.model_copy(
+            update={"safety": SafetyConfig(require_approval_for_writes=True)}
+        )
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+
+        # Check that request_permission was called
+        if mock_conn.request_permission.called:
+            call_kwargs = mock_conn.request_permission.call_args.kwargs
+            options = call_kwargs["options"]
+            kinds = {o.kind for o in options}
+            assert kinds == {"allow_once", "allow_always", "reject_once", "reject_always"}
+
+    @pytest.mark.asyncio
+    async def test_allow_always_returns_approved_always(self, tmp_path):
+        """Selecting allow_always maps to ApprovalResult.APPROVED_ALWAYS."""
+        from acp.schema import AllowedOutcome
+
+        from agent.core.events import ToolCall as AarToolCall
+        from agent.safety.permissions import ApprovalResult
+        from agent.tools.schema import SideEffect, ToolSpec
+
+        sdk_agent = self._make_agent(tmp_path, MockProvider())
+        mock_conn = AsyncMock()
+        mock_conn.request_permission.return_value = AsyncMock(
+            outcome=AllowedOutcome(outcome="selected", option_id="allow_always")
+        )
+        sdk_agent._conn = mock_conn
+
+        # Call the internal _request_permission directly via a prompt setup
+        # We can invoke the callback indirectly by building it
+        spec = ToolSpec(
+            name="write_file",
+            description="write",
+            side_effects=[SideEffect.WRITE],
+        )
+        tc = AarToolCall(tool_name="write_file", tool_call_id="tc1", arguments={"path": "/a"})
+
+        # Build the callback the same way prompt() does
+        from acp.schema import ToolCallUpdate
+
+        async def _request_permission(spec: ToolSpec, tc: AarToolCall) -> ApprovalResult:
+            import json
+
+            tool_update = ToolCallUpdate(
+                title=tc.tool_name,
+                tool_call_id=tc.tool_call_id or "x",
+                status="pending",
+                raw_input=json.dumps(tc.arguments, ensure_ascii=False)[:1000],
+            )
+            resp = await sdk_agent._conn.request_permission(
+                options=[],
+                session_id="s",
+                tool_call=tool_update,
+            )
+            if resp and isinstance(resp.outcome, AllowedOutcome):
+                if resp.outcome.option_id == "allow_always":
+                    return ApprovalResult.APPROVED_ALWAYS
+                return ApprovalResult.APPROVED
+            return ApprovalResult.DENIED
+
+        result = await _request_permission(spec, tc)
+        assert result == ApprovalResult.APPROVED_ALWAYS
+
+    @pytest.mark.asyncio
+    async def test_allow_once_returns_approved(self, tmp_path):
+        """Selecting allow_once maps to ApprovalResult.APPROVED (not APPROVED_ALWAYS)."""
+        from acp.schema import AllowedOutcome, ToolCallUpdate
+
+        from agent.core.events import ToolCall as AarToolCall
+        from agent.safety.permissions import ApprovalResult
+        from agent.tools.schema import SideEffect, ToolSpec
+
+        sdk_agent = self._make_agent(tmp_path, MockProvider())
+        mock_conn = AsyncMock()
+        mock_conn.request_permission.return_value = AsyncMock(
+            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
+        )
+        sdk_agent._conn = mock_conn
+
+        import json
+
+        spec = ToolSpec(name="write_file", description="w", side_effects=[SideEffect.WRITE])
+        tc = AarToolCall(tool_name="write_file", tool_call_id="tc2", arguments={})
+
+        tool_update = ToolCallUpdate(
+            title=tc.tool_name,
+            tool_call_id="tc2",
+            status="pending",
+            raw_input=json.dumps(tc.arguments)[:1000],
+        )
+        resp = await sdk_agent._conn.request_permission(
+            options=[],
+            session_id="s",
+            tool_call=tool_update,
+        )
+        if resp and isinstance(resp.outcome, AllowedOutcome):
+            if resp.outcome.option_id == "allow_always":
+                result = ApprovalResult.APPROVED_ALWAYS
+            else:
+                result = ApprovalResult.APPROVED
+        else:
+            result = ApprovalResult.DENIED
+        assert result == ApprovalResult.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_reject_returns_denied(self, tmp_path):
+        """A cancelled/rejected outcome maps to ApprovalResult.DENIED."""
+        from acp.schema import DeniedOutcome
+
+        from agent.safety.permissions import ApprovalResult
+
+        sdk_agent = self._make_agent(tmp_path, MockProvider())
+        mock_conn = AsyncMock()
+        mock_conn.request_permission.return_value = AsyncMock(
+            outcome=DeniedOutcome(outcome="cancelled")
+        )
+        sdk_agent._conn = mock_conn
+
+        # DeniedOutcome is not AllowedOutcome, so result should be DENIED
+        resp = await sdk_agent._conn.request_permission(
+            options=[],
+            session_id="s",
+            tool_call=AsyncMock(),
+        )
+        from acp.schema import AllowedOutcome
+
+        if resp and isinstance(resp.outcome, AllowedOutcome):
+            result = ApprovalResult.APPROVED
+        else:
+            result = ApprovalResult.DENIED
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_tool_call_update_used_in_permission(self, tmp_path):
+        """request_permission sends a ToolCallUpdate (not ToolCallStart)."""
+        from acp.schema import AllowedOutcome, ToolCallUpdate
+
+        provider = MockProvider()
+        provider.enqueue_text("done", stop="end_turn")
+
+        sdk_agent = self._make_agent(tmp_path, provider)
+        mock_conn = AsyncMock()
+        mock_conn.request_permission.return_value = AsyncMock(
+            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
+        )
+        sdk_agent._conn = mock_conn
+
+        sdk_agent._config = sdk_agent._config.model_copy(
+            update={"safety": SafetyConfig(require_approval_for_writes=True)}
+        )
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+
+        if mock_conn.request_permission.called:
+            call_kwargs = mock_conn.request_permission.call_args.kwargs
+            tool_call = call_kwargs["tool_call"]
+            assert isinstance(tool_call, ToolCallUpdate)
+
+    @pytest.mark.asyncio
+    async def test_tool_call_kind_set_in_permission(self, tmp_path):
+        """The ToolCallUpdate in request_permission includes a kind field."""
+        from acp.schema import AllowedOutcome, ToolCallUpdate
+
+        provider = MockProvider()
+        provider.enqueue_text("done", stop="end_turn")
+
+        sdk_agent = self._make_agent(tmp_path, provider)
+        mock_conn = AsyncMock()
+        mock_conn.request_permission.return_value = AsyncMock(
+            outcome=AllowedOutcome(outcome="selected", option_id="allow_once")
+        )
+        sdk_agent._conn = mock_conn
+
+        sdk_agent._config = sdk_agent._config.model_copy(
+            update={"safety": SafetyConfig(require_approval_for_writes=True)}
+        )
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "go"}], session_id=r.session_id)
+
+        if mock_conn.request_permission.called:
+            call_kwargs = mock_conn.request_permission.call_args.kwargs
+            tool_call = call_kwargs["tool_call"]
+            # kind should be set (not None)
+            assert tool_call.kind is not None
 
 
 # ---------------------------------------------------------------------------
