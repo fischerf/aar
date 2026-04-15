@@ -510,7 +510,17 @@ class AarAcpAgent:
             self._cancel_events.pop(session_id, None)
             return PromptResponse(stop_reason="end_turn")
 
-        aar_agent = self._make_aar_agent(session_id=session_id)
+        # Build the approval callback: use ACP request_permission when a client
+        # is connected (Zed / stdio mode), fall back to the configured default
+        # (auto-approve or whatever the caller injected).
+        if self._conn is not None:
+            from agent.transports.acp_permissions import make_acp_approval_callback
+
+            _approval_cb = make_acp_approval_callback(self._conn, session_id)
+        else:
+            _approval_cb = self._default_approval
+
+        aar_agent = self._make_aar_agent(session_id=session_id, approval_callback=_approval_cb)
         aar_agent.on_event(on_event)
 
         # Wrap run() in a task so cancel() can interrupt it immediately
@@ -543,12 +553,16 @@ class AarAcpAgent:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _make_aar_agent(self, session_id: str = "") -> AarAgent:
+    def _make_aar_agent(
+        self,
+        session_id: str = "",
+        approval_callback: ApprovalCallback | None = None,
+    ) -> AarAgent:
         config = self._session_configs.get(session_id, self._config)
         registry = self._session_registries.get(session_id, self._registry)
         return AarAgent(
             config=config,
-            approval_callback=self._default_approval,
+            approval_callback=approval_callback or self._default_approval,
             registry=registry,
         )
 
