@@ -19,8 +19,8 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 <table width="100%">
   <tr>
     <td width="50%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar Agent — TUI" width="100%" />
-      <br/><sub><b>Aar Agent with Textual interface (TUI)</b></sub>
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — TUI" width="100%" />
+      <br/><sub><b>AAR Agent with Textual interface (TUI)</b></sub>
     </td>
     <td width="50%" align="center" valign="top">
       <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="Zed Editor — running AAR Agent via ACP" width="100%" />
