@@ -5,7 +5,11 @@
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
 
 <div style="text-align: center; margin: 30px 0;">
-  <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar TUI Demo" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
+  <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar Agent - TUI Demo" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
+</div>
+
+<div style="text-align: center; margin: 30px 0;">
+  <img src="https://github.com/fischerf/fischerf.github.io/blob/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="ZED Editor with Aar Agent with ACP" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
 </div>
 
 ## Design goals
