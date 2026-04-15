@@ -1,16 +1,33 @@
-# Aar — Adaptive Action & Reasoning Agent
+<div align="center">
+<pre>
+ █████╗  █████╗ ██████╗
+██╔══██╗██╔══██╗██╔══██╗
+███████║███████║██████╔╝
+██╔══██║██╔══██║██╔══██╗
+██║  ██║██║  ██║██║  ██║
+╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+</pre>
+
+**Adaptive Action & Reasoning Agent**
 
 [![Website](https://img.shields.io/badge/website-fischerf.github.io%2Faar-blue?style=flat-square)](https://fischerf.github.io/aar/)
 
+</div>
+
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
 
-<div style="text-align: center; margin: 30px 0;">
-  <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar Agent - TUI Demo" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
-</div>
-
-<div style="text-align: center; margin: 30px 0;">
-  <img src="https://github.com/fischerf/fischerf.github.io/blob/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="ZED Editor with Aar Agent with ACP" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
-</div>
+<table width="100%">
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar Agent — TUI Demo" width="100%" />
+      <br/><sub><b>TUI — full-screen Textual interface</b></sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="Aar Agent — Zed Editor with ACP" width="100%" />
+      <br/><sub><b>Zed editor via ACP</b></sub>
+    </td>
+  </tr>
+</table>
 
 ## Design goals
 
