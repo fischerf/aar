@@ -5,13 +5,21 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
+import sys
 import time
 
 from agent.core.config import SafetyConfig, ToolConfig
 from agent.core.events import ToolCall, ToolResult
 from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.permissions import ApprovalCallback, PermissionManager
-from agent.safety.sandbox import LocalSandbox, Sandbox, SubprocessSandbox
+from agent.safety.sandbox import (
+    LocalSandbox,
+    Sandbox,
+    SubprocessSandbox,
+    WindowsSubprocessSandbox,
+    WorkspaceSandbox,
+)
 from agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -165,6 +173,31 @@ def _validate_arguments(arguments: dict, schema: dict) -> str | None:
 
 
 def _create_sandbox(config: SafetyConfig, shell_path: str = "") -> Sandbox:
-    if config.sandbox == "subprocess":
+    workspace = config.sandbox_workspace or os.getcwd()
+    mode = config.sandbox
+
+    if mode == "auto":
+        if os.name == "nt":
+            mode = "windows"
+        elif sys.platform.startswith("linux"):
+            mode = "workspace"
+        else:
+            mode = "subprocess"
+
+    if mode == "workspace":
+        return WorkspaceSandbox(
+            workspace=workspace,
+            max_memory_mb=config.sandbox_max_memory_mb,
+            shell_path=shell_path,
+        )
+    if mode == "windows":
+        return WindowsSubprocessSandbox(
+            workspace=workspace,
+            max_memory_mb=config.sandbox_max_memory_mb,
+            max_processes=config.sandbox_max_processes,
+            use_low_integrity=config.sandbox_use_low_integrity,
+            shell_path=shell_path,
+        )
+    if mode == "subprocess":
         return SubprocessSandbox(max_memory_mb=config.sandbox_max_memory_mb, shell_path=shell_path)
     return LocalSandbox(shell_path=shell_path)

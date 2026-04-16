@@ -29,7 +29,11 @@ config = AgentConfig(
         require_approval_for_execute=False,        # ask before every shell command
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         allowed_paths=[],                          # whitelist (empty = allow all non-denied)
-        sandbox="local",                           # "local" | "subprocess"
+        sandbox="local",                           # "local" | "subprocess" | "workspace" | "windows" | "auto"
+        sandbox_max_memory_mb=512,                 # memory limit (MB) for subprocess/workspace/windows modes
+        sandbox_max_processes=10,                  # Windows Job Object: max active child processes
+        sandbox_workspace=None,                    # workspace root path; None → cwd at runtime
+        sandbox_use_low_integrity=True,            # Windows: run subprocess at Low integrity level
     ),
     guardrails=GuardrailsConfig(
         max_tokens_recoveries=2,                   # retry after output truncation (0 = disabled)

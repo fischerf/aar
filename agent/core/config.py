@@ -139,8 +139,11 @@ class SafetyConfig(BaseModel):
         ]
     )
     allowed_paths: list[str] = Field(default_factory=list)
-    sandbox: str = "local"  # "local", "subprocess", or "container"
+    sandbox: str = "local"  # "local" | "subprocess" | "workspace" | "windows" | "auto"
     sandbox_max_memory_mb: int = 512
+    sandbox_max_processes: int = 10       # Windows Job Object: max active processes
+    sandbox_workspace: str | None = None  # Workspace root for WorkspaceSandbox / WindowsSandbox
+    sandbox_use_low_integrity: bool = True  # Windows: run subprocess at Low integrity level
     log_all_commands: bool = True
 
 

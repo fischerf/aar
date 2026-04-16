@@ -136,7 +136,8 @@ Create a JSON file matching the `AgentConfig` schema:
     "require_approval_for_execute": true,
     "denied_paths": ["**/.env", "**/secrets/**"],
     "allowed_paths": ["/home/user/project/**"],
-    "sandbox": "subprocess"
+    "sandbox": "auto",
+    "sandbox_workspace": "/home/user/project"
   },
   "max_steps": 30,
   "timeout": 120.0
@@ -195,24 +196,183 @@ agent = Agent(config=config, approval_callback=my_callback)
 
 ## Sandbox modes
 
-| Mode | Description |
-|------|-------------|
-| `local` | Direct subprocess execution (default) |
-| `subprocess` | Isolated execution with `ulimit` resource limits and restricted environment variables |
+Aar's philosophy is that the agent works inside a configured workspace directory and should not write outside it. The sandbox is the OS-level enforcement layer for that boundary. It operates on top of the policy engine's `allowed_paths` check — the policy guards Aar's own tool calls, the sandbox guards anything that escapes through a subprocess.
 
-Set via `SafetyConfig(sandbox="subprocess")` or in a config file.
+> **Important distinction**: filesystem ACLs (`icacls`, `chmod`) control who can access a directory from *outside*. To restrict where a running *process* can go, you need OS-level mechanisms that act on the process itself — which is what the platform-native sandboxes provide.
 
-The subprocess sandbox applies:
-- Memory limit (`sandbox_max_memory_mb`, default 512 MB)
-- Restricted environment variables (strips sensitive vars)
-- Command timeout (`ToolConfig.command_timeout`, default 30s)
+### Available modes
+
+| Mode | Platform | Description |
+|------|----------|-------------|
+| `local` | all | Direct subprocess, no isolation (default — trusted dev environments) |
+| `subprocess` | all | Restricted env vars + `ulimit -v` memory cap on Unix; env restriction only on Windows |
+| `workspace` | Linux | **Landlock LSM** restricts subprocess to workspace — read/execute anywhere, write only in workspace — plus `ulimit`. Requires kernel ≥ 5.13. |
+| `windows` | Windows | **Job Object** resource limits + **Low Integrity Level** so subprocess cannot write outside the workspace |
+| `auto` | all | Selects `workspace` on Linux, `windows` on Windows, `subprocess` elsewhere |
+
+### Choosing a mode
+
+```
+Trusted local dev   →  local   (default — no overhead)
+CI / scripted runs  →  subprocess  (light isolation, cross-platform)
+Production Linux    →  workspace   (strongest — Landlock is kernel-enforced)
+Production Windows  →  windows     (Job Objects + Low Integrity)
+Any production      →  auto        (picks the best available for the platform)
+```
+
+### `workspace` — Linux Landlock (recommended for Linux)
+
+Landlock is a kernel security module (Linux ≥ 5.13) that lets an unprivileged process restrict its own filesystem access before spawning a child. After `landlock_restrict_self()` the spawned subprocess literally cannot call `open()` on files outside the allowed paths — the kernel refuses the syscall. No root, no container, no daemon required.
+
+**What it enforces:**
+- Subprocess can **read and execute** from anywhere on the filesystem (needed for tools, libraries, etc.)
+- Subprocess can **only write** within the configured workspace directory
+- Memory cap via `ulimit -v` (same as `subprocess` mode)
+- Restricted environment variables
+
+**Fallback:** If Landlock is unavailable (kernel < 5.13, LSM disabled), a warning is logged and the sandbox falls back to environment restriction + `ulimit` only.
+
+**Configuration:**
+
+```json
+{
+  "safety": {
+    "sandbox": "workspace",
+    "sandbox_workspace": "/home/user/project",
+    "sandbox_max_memory_mb": 512
+  }
+}
+```
+
+```python
+from agent.core.config import SafetyConfig
+
+safety = SafetyConfig(
+    sandbox="workspace",
+    sandbox_workspace="/home/user/project",
+    sandbox_max_memory_mb=512,
+)
+```
+
+If `sandbox_workspace` is not set, it defaults to the current working directory at runtime.
+
+**Smoke test** (verify Landlock is blocking writes outside workspace):
+
+```bash
+python -c "
+from agent.safety.sandbox import WorkspaceSandbox
+import asyncio
+
+sb = WorkspaceSandbox(workspace='/tmp/my_workspace')
+# Should be blocked — /etc/passwd is outside workspace
+r = asyncio.run(sb.execute('echo test > /etc/test_aar'))
+print('blocked' if r.exit_code != 0 else 'NOT blocked — landlock unavailable')
+"
+```
+
+### `windows` — Windows Job Objects + Low Integrity (recommended for Windows)
+
+Windows has no equivalent of Landlock. The `windows` mode layers two mechanisms:
+
+**1. Job Object** (via `ctypes kernel32`):
+- Enforces working-set memory limit (`sandbox_max_memory_mb`, default 512 MB)
+- Caps the number of active child processes (`sandbox_max_processes`, default 10)
+- `KILL_ON_JOB_CLOSE` — orphaned processes in the job are killed automatically when the agent exits
+
+**2. Low Integrity Level** (optional, `sandbox_use_low_integrity: true` by default):
+- The subprocess runs at Windows Mandatory Integrity Level *Low* (the same level as IE Protected Mode and sandboxed browser tabs)
+- A Low-integrity process **cannot write to** Medium/High-integrity locations: user profile (`C:\Users\<you>`), `C:\Program Files`, registry
+- The workspace is stamped as Low-integrity-writable via `icacls /setintegritylevel Low` so the subprocess *can* write there
+- If the integrity-level helper fails (rare: policy, UAC edge cases), the sandbox falls back to Job Object only and logs a warning
+
+**`icacls` role clarification**: `icacls` here is used correctly — it grants the Low-integrity subprocess write access *to the workspace*, not to restrict it. The restriction comes from the Low Integrity token.
+
+**Configuration:**
+
+```json
+{
+  "safety": {
+    "sandbox": "windows",
+    "sandbox_workspace": "C:/Users/user/project",
+    "sandbox_max_memory_mb": 512,
+    "sandbox_max_processes": 10,
+    "sandbox_use_low_integrity": true
+  }
+}
+```
+
+```python
+safety = SafetyConfig(
+    sandbox="windows",
+    sandbox_workspace="C:/Users/user/project",
+    sandbox_max_memory_mb=512,
+    sandbox_max_processes=10,
+    sandbox_use_low_integrity=True,
+)
+```
+
+Disable Low Integrity if you hit permission issues (rare) while keeping Job Object limits:
+
+```json
+{
+  "safety": {
+    "sandbox": "windows",
+    "sandbox_use_low_integrity": false
+  }
+}
+```
+
+### `auto` — pick best available (recommended for production)
+
+```json
+{
+  "safety": {
+    "sandbox": "auto",
+    "sandbox_workspace": "/home/user/project"
+  }
+}
+```
+
+Selection logic:
+
+| Platform | Selected mode |
+|----------|--------------|
+| Linux (`sys.platform.startswith("linux")`) | `workspace` (Landlock + ulimit) |
+| Windows (`os.name == "nt"`) | `windows` (Job Object + Low Integrity) |
+| macOS / other Unix | `subprocess` (env restriction + no OS-level filesystem restriction) |
+
+### `subprocess` — cross-platform baseline
+
+Available everywhere, provides:
+- Restricted environment variables (only `PATH`, `HOME`, `TERM`, `LANG` + Windows essentials)
+- `ulimit -v` memory cap on Unix (skipped on Windows)
+- Command timeout
+
+No filesystem-level restriction — a subprocess can still reach outside the workspace.
+
+### SafetyConfig sandbox fields reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sandbox` | `str` | `"local"` | Sandbox mode: `local` \| `subprocess` \| `workspace` \| `windows` \| `auto` |
+| `sandbox_max_memory_mb` | `int` | `512` | Memory limit (MB) for `subprocess`, `workspace`, and `windows` modes |
+| `sandbox_max_processes` | `int` | `10` | Max active child processes — Windows Job Object only |
+| `sandbox_workspace` | `str \| None` | `None` (→ cwd) | Workspace root path enforced by `workspace` and `windows` modes |
+| `sandbox_use_low_integrity` | `bool` | `True` | Windows: run subprocess at Low integrity level |
+
+### Shell tool wiring
+
+The sandbox is applied to **all shell commands** — both the built-in `bash` tool and any commands spawned by subprocesses. The `bash` tool handler delegates execution to `sandbox.execute()`, which applies the platform-appropriate isolation before the process is spawned.
+
+This means `sandbox="local"` is the only mode that provides no isolation. All other modes enforce their restrictions even for one-liner `bash` tool calls.
 
 ## Architecture
 
-The safety system has three components:
+The safety system has four components:
 
 - **`agent/safety/policy.py`** — `SafetyPolicy` evaluates tool calls against `PolicyConfig` rules, returning ALLOW/DENY/ASK
 - **`agent/safety/permissions.py`** — `PermissionManager` handles ASK decisions by calling the approval callback and caching APPROVED_ALWAYS results
-- **`agent/safety/sandbox.py`** — `LocalSandbox` and `SubprocessSandbox` control how shell commands are actually executed
+- **`agent/safety/sandbox.py`** — `LocalSandbox`, `SubprocessSandbox`, `WorkspaceSandbox`, and `WindowsSubprocessSandbox` control how shell commands are actually executed
+- **`agent/tools/builtin/shell.py`** — the `bash` tool handler delegates to the configured sandbox via a closure injected at registration time
 
 These are composed by `ToolExecutor` (`agent/tools/execution.py`), which is the single entry point for all tool execution in the agent loop.

@@ -5,15 +5,31 @@ from __future__ import annotations
 import asyncio
 import os
 
+from agent.safety.sandbox import Sandbox
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
 
 
-def register_shell_tools(registry: ToolRegistry, shell_path: str = "") -> None:
-    """Register the bash tool into the given registry."""
+def register_shell_tools(
+    registry: ToolRegistry,
+    sandbox: Sandbox | None = None,
+    shell_path: str = "",
+) -> None:
+    """Register the bash tool into the given registry.
+
+    When *sandbox* is provided, all commands are executed through it (applying
+    whatever isolation the sandbox implements).  Falls back to direct subprocess
+    creation when *sandbox* is None, preserving backwards compatibility.
+    """
 
     async def bash(command: str, timeout: int = 30) -> str:
         """Execute a shell command and return stdout + stderr."""
+        if sandbox is not None:
+            result = await sandbox.execute(command, timeout=timeout)
+            return result.output
+
+        # Fallback: direct subprocess (sandbox=None, e.g. LocalSandbox callers
+        # that register shell tools without going through ToolExecutor).
         # Use configured shell, or fall back to Git Bash on Windows /
         # system shell on Unix.
         if shell_path:

@@ -478,3 +478,51 @@ class TestParallelExecution:
         # 3 calls at 50ms each: sequential ~150ms, parallel ~50ms
         # Allow generous margin but it should be well under 150ms
         assert parallel_time < 0.12
+
+
+# ---------------------------------------------------------------------------
+# Sandbox wiring through ToolExecutor → shell tool
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxWiring:
+    """Verify that the sandbox configured in ToolExecutor is invoked by the bash tool."""
+
+    @pytest.mark.asyncio
+    async def test_sandbox_invoked_for_bash_tool(self):
+        """Bash tool calls must go through the sandbox, not bypass it."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agent.safety.sandbox import SandboxResult
+        from agent.tools.builtin.shell import register_shell_tools
+
+        # Build a mock sandbox that records calls
+        mock_sandbox = MagicMock()
+        mock_sandbox.execute = AsyncMock(
+            return_value=SandboxResult(stdout="mocked_output", exit_code=0)
+        )
+
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=mock_sandbox)
+
+        spec = reg.get("bash")
+        assert spec is not None
+        assert spec.handler is not None
+
+        output = await spec.handler(command="echo ignored", timeout=30)
+
+        mock_sandbox.execute.assert_called_once_with("echo ignored", timeout=30)
+        assert "mocked_output" in output
+
+    @pytest.mark.asyncio
+    async def test_no_sandbox_uses_direct_subprocess(self):
+        """With sandbox=None the bash tool executes directly (fallback path)."""
+        from agent.tools.builtin.shell import register_shell_tools
+
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=None)
+
+        spec = reg.get("bash")
+        assert spec is not None
+        output = await spec.handler(command="echo direct_ok", timeout=10)
+        assert "direct_ok" in output
