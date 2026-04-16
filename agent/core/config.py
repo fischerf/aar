@@ -139,11 +139,22 @@ class SafetyConfig(BaseModel):
         ]
     )
     allowed_paths: list[str] = Field(default_factory=list)
-    sandbox: str = "local"  # "local" | "subprocess" | "workspace" | "windows" | "auto"
+    sandbox: str = "local"  # "local" | "subprocess" | "workspace" | "windows" | "wsl" | "auto"
     sandbox_max_memory_mb: int = 512
-    sandbox_max_processes: int = 10       # Windows Job Object: max active processes
+    sandbox_max_processes: int = 10  # Windows Job Object: max active processes
     sandbox_workspace: str | None = None  # Workspace root for WorkspaceSandbox / WindowsSandbox
     sandbox_use_low_integrity: bool = True  # Windows: run subprocess at Low integrity level
+    # Shell used by local/subprocess/windows/workspace modes (empty = auto-detect bash on PATH)
+    sandbox_shell_path: str = ""
+    # WSL distro sandbox — used when sandbox = "wsl"
+    sandbox_wsl_distro: str = "aar-sandbox"
+    sandbox_wsl_shell: str = "sh"  # shell binary inside the distro
+    sandbox_wsl_install_path: str | None = None  # None → %LOCALAPPDATA%\aar\wsl-distros\<distro>
+    sandbox_wsl_rootfs_url: str = (
+        "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/"
+        "alpine-minirootfs-3.21.0-x86_64.tar.gz"
+    )
+    sandbox_wsl_packages: list[str] = Field(default_factory=lambda: ["python3", "py3-pip"])
     log_all_commands: bool = True
 
 
@@ -169,7 +180,6 @@ class AgentConfig(BaseModel):
     token_warning_threshold: float = 0.8  # fraction of budget to trigger warning style
     cost_warning_threshold: float = 0.8  # fraction of cost_limit to trigger warning style
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
-    shell_path: str = ""
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
     system_prompt: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
@@ -179,7 +189,7 @@ class AgentConfig(BaseModel):
         """Build the system prompt from config if not explicitly provided."""
         if not self.system_prompt:
             self.system_prompt = build_system_prompt(
-                shell_path=self.shell_path,
+                shell_path=self.safety.sandbox_shell_path,
                 project_rules_dir=self.project_rules_dir,
             )
 

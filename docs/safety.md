@@ -200,25 +200,51 @@ Aar's philosophy is that the agent works inside a configured workspace directory
 
 > **Important distinction**: filesystem ACLs (`icacls`, `chmod`) control who can access a directory from *outside*. To restrict where a running *process* can go, you need OS-level mechanisms that act on the process itself — which is what the platform-native sandboxes provide.
 
+### How the sandbox executes commands
+
+All sandbox modes share the same underlying mechanism: they call `bash -c <command>`. The modes differ only in what they wrap around that call — restricted environment variables, resource limits, or OS-level process restrictions.
+
+**On Windows this has a critical consequence:** the sandbox uses whatever `bash` binary is first on `PATH`. There are two common cases:
+
+| `bash` on PATH | Where commands run | Package installs go |
+|---|---|---|
+| WSL2 (`C:\Windows\System32\wsl.exe` resolves first) | Inside WSL2 Linux environment | WSL2 filesystem (`/home/...`, `/tmp/...`) |
+| Git Bash (`C:\Program Files\Git\bin\bash.exe`) | Native Windows filesystem via MSYS2 | Windows filesystem (POSIX paths translated) |
+
+These are completely separate runtime environments. A `pip install pip-install-test` that runs in WSL2 installs into WSL2's Python — invisible to a native Windows Python process and vice versa. Run `which bash` inside a shell tool call to confirm which environment your agent is using.
+
 ### Available modes
 
-| Mode | Platform | Description |
-|------|----------|-------------|
-| `local` | all | Direct subprocess, no isolation (default — trusted dev environments) |
-| `subprocess` | all | Restricted env vars + `ulimit -v` memory cap on Unix; env restriction only on Windows |
-| `workspace` | Linux | **Landlock LSM** restricts subprocess to workspace — read/execute anywhere, write only in workspace — plus `ulimit`. Requires kernel ≥ 5.13. |
-| `windows` | Windows | **Job Object** resource limits + **Low Integrity Level** so subprocess cannot write outside the workspace |
-| `auto` | all | Selects `workspace` on Linux, `windows` on Windows, `subprocess` elsewhere |
+| Mode | On Windows | On Linux |
+|------|-----------|---------|
+| `local` | `bash -c cmd` — inherits full parent env, no restrictions | `bash -c cmd` — inherits full parent env, no restrictions |
+| `subprocess` | `bash -c cmd` + restricted env vars (only essential vars passed in) | `bash -c cmd` + restricted env vars + `ulimit -v` memory cap |
+| `workspace` | `bash -c cmd` + restricted env vars *(Landlock silently skipped — aar process is win32)* | `bash -c cmd` + restricted env vars + `ulimit -v` + **Landlock LSM** (write-restricted to workspace) |
+| `windows` | `bash -c cmd` + restricted env vars + **Job Object** (memory/process limits) + **Low Integrity Level** | N/A — treated as `subprocess` |
+| `auto` | → `windows` | → `workspace` (with Landlock if kernel ≥ 5.13) |
 
 ### Choosing a mode
 
 ```
-Trusted local dev   →  local   (default — no overhead)
+Trusted local dev   →  local       (default — no overhead)
 CI / scripted runs  →  subprocess  (light isolation, cross-platform)
 Production Linux    →  workspace   (strongest — Landlock is kernel-enforced)
 Production Windows  →  windows     (Job Objects + Low Integrity)
 Any production      →  auto        (picks the best available for the platform)
 ```
+
+### Limits of each mode
+
+| Mode | Filesystem restriction | Memory cap | Process count cap | Network restriction |
+|------|----------------------|-----------|-------------------|---------------------|
+| `local` | None | None | None | None |
+| `subprocess` | None | Unix only (`ulimit`) | None | None |
+| `workspace` | **Linux only** — write-blocked outside workspace via Landlock | Unix only (`ulimit`) | None | None |
+| `windows` | **Partial** — Low Integrity cannot write to Medium/High locations; workspace is stamped writable | Yes — Job Object working-set limit | Yes — Job Object active process cap | None |
+
+No sandbox mode restricts outbound network access. If you need network isolation, use a container-based approach (see [Docker-free sandboxing](#docker-free-sandboxing-on-windows) below) or firewall rules outside Aar.
+
+The `workspace` mode on Windows is effectively `subprocess` — the Landlock `preexec_fn` is a Linux-only API and is silently skipped when the aar process itself is a native Windows Python process (even if `bash` resolves to WSL2). To get Landlock on Windows, run aar inside WSL2 directly.
 
 ### `workspace` — Linux Landlock (recommended for Linux)
 
@@ -345,20 +371,26 @@ Selection logic:
 
 Available everywhere, provides:
 - Restricted environment variables (only `PATH`, `HOME`, `TERM`, `LANG` + Windows essentials)
-- `ulimit -v` memory cap on Unix (skipped on Windows)
+- `ulimit -v` memory cap on Unix (skipped on Windows — `ulimit` is unreliable in Git Bash/WSL context)
 - Command timeout
 
-No filesystem-level restriction — a subprocess can still reach outside the workspace.
+**Limits:** No filesystem-level restriction — a subprocess can still read and write anywhere the user has permission. The only protection is that leaked credentials from the parent environment are not forwarded.
 
 ### SafetyConfig sandbox fields reference
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `sandbox` | `str` | `"local"` | Sandbox mode: `local` \| `subprocess` \| `workspace` \| `windows` \| `auto` |
+| `sandbox` | `str` | `"local"` | Sandbox mode: `local` \| `subprocess` \| `workspace` \| `windows` \| `wsl` \| `auto` |
 | `sandbox_max_memory_mb` | `int` | `512` | Memory limit (MB) for `subprocess`, `workspace`, and `windows` modes |
 | `sandbox_max_processes` | `int` | `10` | Max active child processes — Windows Job Object only |
-| `sandbox_workspace` | `str \| None` | `None` (→ cwd) | Workspace root path enforced by `workspace` and `windows` modes |
+| `sandbox_workspace` | `str \| None` | `None` (→ cwd) | Workspace root path. Windows paths are auto-translated to `/mnt/…` for `wsl` mode |
 | `sandbox_use_low_integrity` | `bool` | `True` | Windows: run subprocess at Low integrity level |
+| `sandbox_shell_path` | `str` | `""` | Path to bash binary for `local`/`subprocess`/`windows`/`workspace` modes (empty = auto-detect) |
+| `sandbox_wsl_distro` | `str` | `"aar-sandbox"` | WSL2 distro name for `wsl` mode |
+| `sandbox_wsl_shell` | `str` | `"sh"` | Shell binary inside the distro (`sh` works on minimal Alpine; use `bash` if installed) |
+| `sandbox_wsl_install_path` | `str \| None` | `None` | Where to store the distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
+| `sandbox_wsl_rootfs_url` | `str` | Alpine latest-stable | URL of the rootfs tarball used by `aar sandbox setup` |
+| `sandbox_wsl_packages` | `list[str]` | `["python3", "py3-pip"]` | Packages to install during `aar sandbox setup` |
 
 ### Shell tool wiring
 
@@ -366,13 +398,160 @@ The sandbox is applied to **all shell commands** — both the built-in `bash` to
 
 This means `sandbox="local"` is the only mode that provides no isolation. All other modes enforce their restrictions even for one-liner `bash` tool calls.
 
+## Docker-free sandboxing on Windows
+
+If you need strong process isolation with multi-language package support (not just Python), there are two practical options that do not require Docker Desktop.
+
+### Option A: Dedicated WSL2 distro — `sandbox = "wsl"` (recommended)
+
+Aar includes a first-class `wsl` sandbox mode backed by `WslDistroSandbox`. Commands run via
+`wsl -d <distro> -- sh -c <cmd>`, completely isolated from your main WSL2 environment. The
+distro is tiny, disposable, and can host any language.
+
+**What you get:**
+- Filesystem isolation from your main WSL2 distro and native Windows
+- Any language installable via the distro's package manager (`apk`, `apt`, …)
+- Package installs stay inside the distro — the host is untouched
+- Windows path translation is automatic (`B:\foo` → `/mnt/b/foo`)
+- No Docker Desktop, no daemon, no license cost
+
+#### 1. Configure (optional — defaults work out of the box)
+
+Edit `~/.aar/config.json` to set sandbox parameters before running setup:
+
+```json
+{
+  "safety": {
+    "sandbox": "wsl",
+    "sandbox_wsl_distro": "aar-sandbox",
+    "sandbox_wsl_packages": ["python3", "py3-pip", "nodejs", "npm"],
+    "sandbox_wsl_rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.21.0-x86_64.tar.gz"
+  }
+}
+```
+
+All `sandbox_wsl_*` fields are optional. The defaults use Alpine Linux with Python 3 and pip.
+
+#### 2. Set up the distro
+
+```bash
+# Reads defaults from ~/.aar/config.json — no flags required
+aar sandbox setup
+
+# Override packages for this run only (comma-separated)
+aar sandbox setup --packages "python3,py3-pip,nodejs,npm"
+
+# Use a different distro name
+aar sandbox setup --distro my-sandbox
+
+# Force-recreate an existing distro
+aar sandbox setup --force
+```
+
+`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, and
+installs the configured packages. It prints a config snippet at the end.
+
+#### 3. Verify
+
+```bash
+aar sandbox status
+# WSL2 available : yes
+# Distro exists  : yes
+# 5.15.153.1-microsoft-standard-WSL2
+# Python 3.12.3
+```
+
+#### 4. Run the agent
+
+Once `sandbox = "wsl"` is in config, `aar chat` / `aar run` automatically route all `bash`
+tool calls through the sandbox distro. No other changes needed.
+
+#### Reset / teardown
+
+Wipes all installed packages and distro state. Workspace files on the Windows filesystem are
+not affected.
+
+```bash
+aar sandbox reset              # prompts for distro name to confirm
+aar sandbox reset --yes        # skip confirmation
+```
+
+#### Using a non-Alpine rootfs
+
+Point `sandbox_wsl_rootfs_url` at any `.tar.gz` rootfs (Ubuntu, Debian, etc.) and update
+`sandbox_wsl_packages` to use that distro's package manager:
+
+```json
+{
+  "safety": {
+    "sandbox_wsl_rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+    "sandbox_wsl_packages": ["python3", "python3-pip", "nodejs", "npm"]
+  }
+}
+```
+
+> **Note:** The `apk add` command in `setup` is Alpine-specific. For other distros, install packages manually after import:
+> `wsl -d my-sandbox -- apt-get install -y python3 python3-pip`
+
+**Limits of the WSL2 distro approach:**
+- No outbound network restriction (WSL2 distros share the host network adapter)
+- Files in the workspace are accessed via `/mnt/<drive>/...` — this is automatic when `sandbox_workspace` is a Windows path
+- The distro persists between agent sessions — use `aar sandbox reset` to wipe accumulated state
+- `sandbox_wsl_shell` controls which shell runs commands inside the distro (default: `sh`; set to `bash` if you install it)
+
+---
+
+### Option B: Podman (rootless OCI containers, no daemon)
+
+Podman is a Docker-compatible CLI that runs OCI containers without a daemon and without requiring Docker Desktop. It runs inside WSL2 and supports the full OCI image ecosystem.
+
+**Install inside your main WSL2 distro:**
+
+```bash
+# Ubuntu/Debian in WSL2
+sudo apt-get install -y podman
+
+# Verify
+podman run --rm alpine echo "sandbox works"
+```
+
+**How the agent would use it** (future `PodmanSandbox` / `DockerSandbox` mode):
+
+```bash
+podman run --rm \
+  --network none \                        # no internet access
+  --memory 512m \                         # memory cap
+  -v /mnt/b/Github_my/aar:/workspace \   # workspace mounted read-write
+  -w /workspace \
+  python:3.12-slim \
+  bash -c "pip install pip-install-test && python script.py"
+```
+
+This gives the strongest possible isolation — the command runs in a fresh container with a clean filesystem. Packages installed with `pip install` live only inside that container run.
+
+**Limits of the Podman approach:**
+- Cold start per `podman run` call adds ~1–2 s overhead (use `podman exec` into a persistent container to avoid this)
+- Requires Podman installed inside WSL2 — an extra setup step
+- The `DockerSandbox`/`PodmanSandbox` backend is not yet implemented in Aar (contributions welcome — see `agent/safety/sandbox.py`)
+
+---
+
+### Comparison
+
+| Approach | Isolation strength | Setup effort | Multi-language | Network isolation | State persistence |
+|---|---|---|---|---|---|
+| `windows` mode (Job Object + Low IL) | Medium | None (built-in) | Depends on PATH | No | N/A |
+| Dedicated WSL2 distro | Strong | Low | Yes | No | Persists (resetable) |
+| Podman (WSL2) | Strongest | Medium | Yes (any image) | Yes (`--network none`) | Ephemeral per run |
+
 ## Architecture
 
 The safety system has four components:
 
 - **`agent/safety/policy.py`** — `SafetyPolicy` evaluates tool calls against `PolicyConfig` rules, returning ALLOW/DENY/ASK
 - **`agent/safety/permissions.py`** — `PermissionManager` handles ASK decisions by calling the approval callback and caching APPROVED_ALWAYS results
-- **`agent/safety/sandbox.py`** — `LocalSandbox`, `SubprocessSandbox`, `WorkspaceSandbox`, and `WindowsSubprocessSandbox` control how shell commands are actually executed
+- **`agent/safety/sandbox.py`** — `LocalSandbox`, `SubprocessSandbox`, `WorkspaceSandbox`, `WindowsSubprocessSandbox`, and `WslDistroSandbox` control how shell commands are actually executed
+- **`agent/safety/wsl_manager.py`** — helpers for WSL2 distro lifecycle (`is_wsl_available`, `list_distros`, `import_distro`, `unregister_distro`, `run_in_distro`, `download_rootfs`); used by `aar sandbox` commands
 - **`agent/tools/builtin/shell.py`** — the `bash` tool handler delegates to the configured sandbox via a closure injected at registration time
 
 These are composed by `ToolExecutor` (`agent/tools/execution.py`), which is the single entry point for all tool execution in the agent loop.

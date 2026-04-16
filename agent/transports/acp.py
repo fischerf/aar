@@ -596,7 +596,7 @@ class AarAcpAgent:
                     if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
                         register_filesystem_tools(tmp_reg)
                     if "bash" in enabled:
-                        register_shell_tools(tmp_reg, shell_path=cfg.shell_path)
+                        register_shell_tools(tmp_reg, shell_path=cfg.safety.sandbox_shell_path)
                     # Prune to only what's enabled
                     for name in list(tmp_reg._tools):
                         if name not in enabled:

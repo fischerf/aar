@@ -63,7 +63,6 @@ class Agent:
             self.config.tools,
             self.config.safety,
             approval_callback,
-            shell_path=self.config.shell_path,
         )
         self._on_event: list[Callable[[Event], Any]] = []
 
@@ -84,7 +83,6 @@ class Agent:
             register_shell_tools(
                 self.registry,
                 sandbox=self.executor.sandbox,
-                shell_path=self.config.shell_path,
             )
 
         # Only prune builtins we just added that weren't explicitly enabled

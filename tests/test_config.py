@@ -171,21 +171,23 @@ class TestBuildSystemPromptProjectRulesDir:
 
 
 # ---------------------------------------------------------------------------
-# AgentConfig — shell_path and project_rules_dir integration
+# AgentConfig — sandbox_shell_path and project_rules_dir integration
 # ---------------------------------------------------------------------------
 
 
 class TestAgentConfigNewFields:
-    def test_shell_path_default_is_empty(self):
+    def test_sandbox_shell_path_default_is_empty(self):
         config = AgentConfig()
-        assert config.shell_path == ""
+        assert config.safety.sandbox_shell_path == ""
 
     def test_project_rules_dir_default_is_dot_agent(self):
         config = AgentConfig()
         assert config.project_rules_dir == Path(".agent")
 
-    def test_shell_path_in_system_prompt(self):
-        config = AgentConfig(shell_path="/usr/bin/zsh")
+    def test_sandbox_shell_path_in_system_prompt(self):
+        from agent.core.config import SafetyConfig
+
+        config = AgentConfig(safety=SafetyConfig(sandbox_shell_path="/usr/bin/zsh"))
         assert "Shell: /usr/bin/zsh" in config.system_prompt
 
     def test_custom_project_rules_dir_used_in_prompt(self, tmp_path, monkeypatch):
@@ -199,8 +201,10 @@ class TestAgentConfigNewFields:
         assert "my custom rule" in config.system_prompt
 
     def test_explicit_system_prompt_still_overrides(self):
+        from agent.core.config import SafetyConfig
+
         config = AgentConfig(
-            shell_path="/bin/zsh",
+            safety=SafetyConfig(sandbox_shell_path="/bin/zsh"),
             system_prompt="explicit override",
         )
         assert config.system_prompt == "explicit override"
@@ -212,13 +216,13 @@ class TestAgentConfigNewFields:
     def test_load_config_with_new_fields(self, tmp_path):
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
-            '{"shell_path": "/bin/zsh", "project_rules_dir": ".myconfig"}',
+            '{"safety": {"sandbox_shell_path": "/bin/zsh"}, "project_rules_dir": ".myconfig"}',
             encoding="utf-8",
         )
         from agent.core.config import load_config
 
         config = load_config(cfg_file)
-        assert config.shell_path == "/bin/zsh"
+        assert config.safety.sandbox_shell_path == "/bin/zsh"
         assert config.project_rules_dir == Path(".myconfig")
 
 

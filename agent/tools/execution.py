@@ -19,6 +19,7 @@ from agent.safety.sandbox import (
     SubprocessSandbox,
     WindowsSubprocessSandbox,
     WorkspaceSandbox,
+    WslDistroSandbox,
 )
 from agent.tools.registry import ToolRegistry
 
@@ -34,7 +35,6 @@ class ToolExecutor:
         tool_config: ToolConfig,
         safety_config: SafetyConfig | None = None,
         approval_callback: ApprovalCallback | None = None,
-        shell_path: str = "",
     ) -> None:
         self.registry = registry
         self.tool_config = tool_config
@@ -51,7 +51,7 @@ class ToolExecutor:
         )
         self.policy = SafetyPolicy(policy_cfg)
         self.permissions = PermissionManager(approval_callback)
-        self.sandbox = _create_sandbox(sc, shell_path=shell_path)
+        self.sandbox = _create_sandbox(sc)
 
     async def execute(self, tool_calls: list[ToolCall], parallel: bool = True) -> list[ToolResult]:
         """Execute a batch of tool calls and return results.
@@ -172,8 +172,9 @@ def _validate_arguments(arguments: dict, schema: dict) -> str | None:
     return None
 
 
-def _create_sandbox(config: SafetyConfig, shell_path: str = "") -> Sandbox:
+def _create_sandbox(config: SafetyConfig) -> Sandbox:
     workspace = config.sandbox_workspace or os.getcwd()
+    shell_path = config.sandbox_shell_path
     mode = config.sandbox
 
     if mode == "auto":
@@ -184,6 +185,12 @@ def _create_sandbox(config: SafetyConfig, shell_path: str = "") -> Sandbox:
         else:
             mode = "subprocess"
 
+    if mode == "wsl":
+        return WslDistroSandbox(
+            distro_name=config.sandbox_wsl_distro,
+            workspace=config.sandbox_workspace,
+            shell=config.sandbox_wsl_shell,
+        )
     if mode == "workspace":
         return WorkspaceSandbox(
             workspace=workspace,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import sys
 import tempfile
 from abc import ABC, abstractmethod
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # transparently.  Bash (or the configured shell) is launched as a child of
 # this helper, so it also runs at Low integrity and inherits the Job Object
 # assigned to the helper's PID.
-_WINDOWS_INTEGRITY_HELPER = '''\
+_WINDOWS_INTEGRITY_HELPER = """\
 import sys, ctypes, ctypes.wintypes as wt, subprocess
 
 def _set_low_integrity():
@@ -72,7 +73,7 @@ _shell = sys.argv[1] if len(sys.argv) > 1 else "bash"
 _cmd = sys.argv[2] if len(sys.argv) > 2 else ""
 result = subprocess.run([_shell, "-c", _cmd])
 sys.exit(result.returncode)
-'''
+"""
 
 
 class SandboxResult:
@@ -116,7 +117,9 @@ async def _create_subprocess(
     """Create a subprocess using the configured shell, bash on Windows, or system shell on Unix."""
     if shell_path:
         return await asyncio.create_subprocess_exec(
-            shell_path, "-c", command,
+            shell_path,
+            "-c",
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -125,7 +128,9 @@ async def _create_subprocess(
         )
     if os.name == "nt":
         return await asyncio.create_subprocess_exec(
-            "bash", "-c", command,
+            "bash",
+            "-c",
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -185,9 +190,7 @@ class LocalSandbox(Sandbox):
         proc = await _create_subprocess(command, work_dir, proc_env, shell_path=self.shell_path)
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
@@ -202,11 +205,15 @@ class LocalSandbox(Sandbox):
     def _build_env(self, extra: dict[str, str] | None) -> dict[str, str] | None:
         if not self.restricted_env and not extra:
             return None  # inherit parent env
-        base = dict(os.environ) if not self.restricted_env else {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": os.environ.get("HOME", os.environ.get("USERPROFILE", "")),
-            "TERM": os.environ.get("TERM", "xterm"),
-        }
+        base = (
+            dict(os.environ)
+            if not self.restricted_env
+            else {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": os.environ.get("HOME", os.environ.get("USERPROFILE", "")),
+                "TERM": os.environ.get("TERM", "xterm"),
+            }
+        )
         if extra:
             base.update(extra)
         return base
@@ -253,9 +260,7 @@ class SubprocessSandbox(Sandbox):
         proc = await _create_subprocess(wrapped, work_dir, proc_env, shell_path=self.shell_path)
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
@@ -306,6 +311,7 @@ class WorkspaceSandbox(Sandbox):
             return self._landlock_available
         try:
             import ctypes
+
             libc = ctypes.CDLL(None, use_errno=True)
             libc.syscall.restype = ctypes.c_long
             # syscall 444 (landlock_create_ruleset) with flags=1 queries ABI version.
@@ -334,31 +340,40 @@ class WorkspaceSandbox(Sandbox):
                 libc.syscall.restype = ctypes.c_long
 
                 # Landlock syscall numbers (stable across archs since 5.13)
-                NR_CREATE  = 444
-                NR_ADD     = 445
+                NR_CREATE = 444
+                NR_ADD = 445
                 NR_RESTRICT = 446
                 LANDLOCK_RULE_PATH_BENEATH = 1
                 PR_SET_NO_NEW_PRIVS = 38
 
                 # Landlock ABI v1 access-right flags (kernel 5.13+)
-                FS_EXECUTE    = 1 << 0
+                FS_EXECUTE = 1 << 0
                 FS_WRITE_FILE = 1 << 1
-                FS_READ_FILE  = 1 << 2
-                FS_READ_DIR   = 1 << 3
+                FS_READ_FILE = 1 << 2
+                FS_READ_DIR = 1 << 3
                 FS_REMOVE_DIR = 1 << 4
                 FS_REMOVE_FILE = 1 << 5
-                FS_MAKE_CHAR  = 1 << 6
-                FS_MAKE_DIR   = 1 << 7
-                FS_MAKE_REG   = 1 << 8
-                FS_MAKE_SOCK  = 1 << 9
-                FS_MAKE_FIFO  = 1 << 10
+                FS_MAKE_CHAR = 1 << 6
+                FS_MAKE_DIR = 1 << 7
+                FS_MAKE_REG = 1 << 8
+                FS_MAKE_SOCK = 1 << 9
+                FS_MAKE_FIFO = 1 << 10
                 FS_MAKE_BLOCK = 1 << 11
-                FS_MAKE_SYM   = 1 << 12
+                FS_MAKE_SYM = 1 << 12
 
                 ALL_V1 = (
-                    FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_READ_DIR
-                    | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
-                    | FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK
+                    FS_EXECUTE
+                    | FS_WRITE_FILE
+                    | FS_READ_FILE
+                    | FS_READ_DIR
+                    | FS_REMOVE_DIR
+                    | FS_REMOVE_FILE
+                    | FS_MAKE_CHAR
+                    | FS_MAKE_DIR
+                    | FS_MAKE_REG
+                    | FS_MAKE_SOCK
+                    | FS_MAKE_FIFO
+                    | FS_MAKE_BLOCK
                     | FS_MAKE_SYM
                 )
                 # Root rule: read + execute everywhere (no writes outside workspace)
@@ -386,8 +401,9 @@ class WorkspaceSandbox(Sandbox):
                 root_fd = _os.open("/", O_PATH | _os.O_DIRECTORY)
                 try:
                     ra = PathBeneathAttr(allowed_access=READ_EXEC, parent_fd=root_fd)
-                    libc.syscall(NR_ADD, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
-                                 ctypes.byref(ra), 0)
+                    libc.syscall(
+                        NR_ADD, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(ra), 0
+                    )
                 finally:
                     _os.close(root_fd)
 
@@ -396,8 +412,9 @@ class WorkspaceSandbox(Sandbox):
                     ws_fd = _os.open(workspace, O_PATH | _os.O_DIRECTORY)
                     try:
                         wa = PathBeneathAttr(allowed_access=ALL_V1, parent_fd=ws_fd)
-                        libc.syscall(NR_ADD, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
-                                     ctypes.byref(wa), 0)
+                        libc.syscall(
+                            NR_ADD, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(wa), 0
+                        )
                     finally:
                         _os.close(ws_fd)
                 except OSError:
@@ -450,9 +467,7 @@ class WorkspaceSandbox(Sandbox):
             wrapped, work_dir, proc_env, shell_path=self.shell_path, **kwargs
         )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
@@ -496,8 +511,16 @@ class WindowsSubprocessSandbox(Sandbox):
         self.max_memory_mb = max_memory_mb
         self.max_processes = max_processes
         self.allowed_env_vars = allowed_env_vars or [
-            "PATH", "HOME", "TERM", "LANG",
-            "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "USERNAME",
+            "PATH",
+            "HOME",
+            "TERM",
+            "LANG",
+            "SYSTEMROOT",
+            "SYSTEMDRIVE",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+            "USERNAME",
         ]
         self.use_low_integrity = use_low_integrity
         self.shell_path = shell_path
@@ -529,9 +552,11 @@ class WindowsSubprocessSandbox(Sandbox):
         self._workspace_stamped = True
         try:
             import subprocess as _sp
+
             _sp.run(
                 ["icacls", self.workspace, "/setintegritylevel", "(OI)(CI)Low"],
-                check=False, capture_output=True,
+                check=False,
+                capture_output=True,
             )
             logger.debug("WorkspaceSandbox: stamped %s as Low-integrity-writable", self.workspace)
         except Exception as exc:
@@ -562,8 +587,8 @@ class WindowsSubprocessSandbox(Sandbox):
 
             KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-            JOB_OBJECT_LIMIT_ACTIVE_PROCESS  = 0x00000008
-            JOB_OBJECT_LIMIT_PROCESS_MEMORY  = 0x00000100
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
             PROCESS_ALL_ACCESS = 0x1F0FFF
             JobObjectExtendedLimitInformation = 9
@@ -578,34 +603,34 @@ class WindowsSubprocessSandbox(Sandbox):
             class _BasicLimit(ctypes.Structure):
                 _fields_ = [
                     ("PerProcessUserTimeLimit", ctypes.c_int64),
-                    ("PerJobUserTimeLimit",     ctypes.c_int64),
-                    ("LimitFlags",             wt.DWORD),
-                    ("MinimumWorkingSetSize",  ctypes.c_size_t),
-                    ("MaximumWorkingSetSize",  ctypes.c_size_t),
-                    ("ActiveProcessLimit",     wt.DWORD),
-                    ("Affinity",               ctypes.c_size_t),
-                    ("PriorityClass",          wt.DWORD),
-                    ("SchedulingClass",        wt.DWORD),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wt.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wt.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wt.DWORD),
+                    ("SchedulingClass", wt.DWORD),
                 ]
 
             class _IoCounters(ctypes.Structure):
                 _fields_ = [
-                    ("ReadOperationCount",  ctypes.c_uint64),
+                    ("ReadOperationCount", ctypes.c_uint64),
                     ("WriteOperationCount", ctypes.c_uint64),
                     ("OtherOperationCount", ctypes.c_uint64),
-                    ("ReadTransferCount",   ctypes.c_uint64),
-                    ("WriteTransferCount",  ctypes.c_uint64),
-                    ("OtherTransferCount",  ctypes.c_uint64),
+                    ("ReadTransferCount", ctypes.c_uint64),
+                    ("WriteTransferCount", ctypes.c_uint64),
+                    ("OtherTransferCount", ctypes.c_uint64),
                 ]
 
             class _ExtendedLimit(ctypes.Structure):
                 _fields_ = [
                     ("BasicLimitInformation", _BasicLimit),
-                    ("IoInfo",                _IoCounters),
-                    ("ProcessMemoryLimit",    ctypes.c_size_t),
-                    ("JobMemoryLimit",        ctypes.c_size_t),
+                    ("IoInfo", _IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
                     ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                    ("PeakJobMemoryUsed",     ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
                 ]
 
             info = _ExtendedLimit()
@@ -618,8 +643,10 @@ class WindowsSubprocessSandbox(Sandbox):
             info.ProcessMemoryLimit = self.max_memory_mb * 1024 * 1024
 
             KERNEL32.SetInformationJobObject(
-                job, JobObjectExtendedLimitInformation,
-                ctypes.byref(info), ctypes.sizeof(info),
+                job,
+                JobObjectExtendedLimitInformation,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
             )
 
             proc_handle = KERNEL32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
@@ -627,7 +654,8 @@ class WindowsSubprocessSandbox(Sandbox):
                 KERNEL32.CloseHandle(job)
                 logger.warning(
                     "Job Object: OpenProcess failed for pid %d (%d)",
-                    pid, ctypes.get_last_error(),
+                    pid,
+                    ctypes.get_last_error(),
                 )
                 return None
 
@@ -647,6 +675,7 @@ class WindowsSubprocessSandbox(Sandbox):
         """Close the Job Object handle (triggers KILL_ON_JOB_CLOSE for orphans)."""
         try:
             import ctypes
+
             ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(job)
         except Exception:
             pass
@@ -684,14 +713,10 @@ class WindowsSubprocessSandbox(Sandbox):
         work_dir: str,
         proc_env: dict[str, str],
     ) -> SandboxResult:
-        proc = await _create_subprocess(
-            command, work_dir, proc_env, shell_path=self.shell_path
-        )
+        proc = await _create_subprocess(command, work_dir, proc_env, shell_path=self.shell_path)
         job = self._assign_job_object(proc.pid)
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             if job is not None:
@@ -720,7 +745,10 @@ class WindowsSubprocessSandbox(Sandbox):
             helper = self._get_helper_path()
             shell = self.shell_path or "bash"
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, helper, shell, command,
+                sys.executable,
+                helper,
+                shell,
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=work_dir,
@@ -759,3 +787,121 @@ class WindowsSubprocessSandbox(Sandbox):
                 WindowsSubprocessSandbox._helper_path = None
             except OSError:
                 pass
+
+
+class WslDistroSandbox(Sandbox):
+    """Windows sandbox: execute commands inside a dedicated WSL2 distro.
+
+    Commands run via ``wsl -d <distro> -- <shell> -c <command>`` so they are
+    fully isolated from the user's main WSL2 environment.  The workspace is
+    exposed to the distro through the standard WSL2 DrvFs mounts
+    (``/mnt/<drive>/...``), so files written by the agent are immediately
+    visible from Windows and vice-versa.
+
+    **Isolation provided:**
+    - Filesystem: distro has its own root — cannot reach the user's main WSL2
+      distro or other distros.
+    - Package installs go into the distro only; the host Windows Python and the
+      user's main WSL2 distro are unaffected.
+    - The distro can be wiped and recreated with ``aar sandbox reset``.
+
+    **Limits:**
+    - No outbound network restriction (WSL2 distros share the host network).
+    - No memory/process cap (unlike the ``windows`` mode Job Object).
+    - Requires WSL2 and the target distro to be set up first
+      (``aar sandbox setup``).
+
+    The ``shell_path`` concept from other sandbox modes does not apply here —
+    the execution path is always ``wsl -d <distro> -- <shell> -c <cmd>``.
+    Use ``shell`` to choose which binary inside the distro runs the command
+    (default: ``sh``, works on minimal Alpine without bash installed).
+    """
+
+    def __init__(
+        self,
+        distro_name: str = "aar-sandbox",
+        workspace: str | None = None,
+        shell: str = "sh",
+        allowed_env_vars: list[str] | None = None,
+    ) -> None:
+        self.distro_name = distro_name
+        self.workspace = workspace or os.getcwd()
+        self.shell = shell
+        self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
+
+    # ------------------------------------------------------------------
+    # Path helpers
+    # ------------------------------------------------------------------
+
+    def _to_wsl_path(self, path: str) -> str:
+        """Translate a Windows absolute path to its WSL DrvFs mount point.
+
+        Examples::
+
+            "B:\\foo\\bar"  -> "/mnt/b/foo/bar"
+            "C:\\Users\\x"  -> "/mnt/c/Users/x"
+            "/mnt/b/foo"    -> "/mnt/b/foo"   (already a WSL path — returned as-is)
+        """
+        # Already a Unix-style path — return unchanged
+        if path.startswith("/"):
+            return path
+        from pathlib import PureWindowsPath
+
+        p = PureWindowsPath(path)
+        if p.drive:
+            drive_letter = p.drive[0].lower()  # "B:" -> "b"
+            # p.parts[1:] skips the drive component; join with forward slashes
+            rest = "/".join(p.parts[1:]) if len(p.parts) > 1 else ""
+            return f"/mnt/{drive_letter}/{rest}" if rest else f"/mnt/{drive_letter}"
+        return path
+
+    # ------------------------------------------------------------------
+    # execute
+    # ------------------------------------------------------------------
+
+    async def execute(
+        self,
+        command: str,
+        timeout: int = 30,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> SandboxResult:
+        work_dir = self._to_wsl_path(cwd or self.workspace)
+
+        # Build optional env-var prefix: "KEY=value KEY2=value2 "
+        env_prefix = ""
+        if env:
+            env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " "
+
+        full_cmd = f"cd {shlex.quote(work_dir)} && {env_prefix}{command}"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "wsl",
+                "-d",
+                self.distro_name,
+                "--",
+                self.shell,
+                "-c",
+                full_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return SandboxResult(
+                stderr="wsl.exe not found — WSL2 is not available on this system.",
+                exit_code=1,
+            )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return SandboxResult(timed_out=True, exit_code=-1)
+
+        return SandboxResult(
+            stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
+            stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
+            exit_code=proc.returncode or 0,
+        )
