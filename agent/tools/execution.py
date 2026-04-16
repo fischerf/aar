@@ -14,11 +14,10 @@ from agent.core.events import ToolCall, ToolResult
 from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.permissions import ApprovalCallback, PermissionManager
 from agent.safety.sandbox import (
+    LinuxSandbox,
     LocalSandbox,
     Sandbox,
-    SubprocessSandbox,
     WindowsSubprocessSandbox,
-    WorkspaceSandbox,
     WslDistroSandbox,
 )
 from agent.tools.registry import ToolRegistry
@@ -180,9 +179,9 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
         if os.name == "nt":
             mode = "windows"
         elif sys.platform.startswith("linux"):
-            mode = "workspace"
+            mode = "linux"
         else:
-            mode = "subprocess"
+            mode = "local"
 
     if mode == "wsl":
         return WslDistroSandbox(
@@ -190,10 +189,10 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
             workspace=sb.wsl.workspace,
             shell=sb.wsl.shell,
         )
-    if mode == "workspace":
-        return WorkspaceSandbox(
-            workspace=sb.workspace.workspace,
-            max_memory_mb=sb.workspace.max_memory_mb,
+    if mode == "linux":
+        return LinuxSandbox(
+            workspace=sb.linux.workspace,
+            max_memory_mb=sb.linux.max_memory_mb,
         )
     if mode == "windows":
         return WindowsSubprocessSandbox(
@@ -202,6 +201,4 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
             max_processes=sb.windows.max_processes,
             use_low_integrity=sb.windows.use_low_integrity,
         )
-    if mode == "subprocess":
-        return SubprocessSandbox(max_memory_mb=sb.subprocess.max_memory_mb)
     return LocalSandbox()

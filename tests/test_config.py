@@ -195,13 +195,13 @@ class TestAgentConfigNewFields:
     def test_load_config_with_new_fields(self, tmp_path):
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
-            '{"safety": {"sandbox": {"mode": "subprocess"}}, "project_rules_dir": ".myconfig"}',
+            '{"safety": {"sandbox": {"mode": "linux"}}, "project_rules_dir": ".myconfig"}',
             encoding="utf-8",
         )
         from agent.core.config import load_config
 
         config = load_config(cfg_file)
-        assert config.safety.sandbox.mode == "subprocess"
+        assert config.safety.sandbox.mode == "linux"
         assert config.project_rules_dir == Path(".myconfig")
 
 

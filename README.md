@@ -103,7 +103,7 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 # Interactive chat (asks before write/execute, file tools restricted to cwd)
 > aar chat --provider ollama --model llama3
 
-# Disable the workspace sandbox for full access and load config from a JSON file
+# Lift the file-tool cwd restriction and load config from a JSON file
 > aar chat --no-require-approval --no-restrict-to-cwd --config aar.json
 
 # One-shot task
@@ -187,7 +187,7 @@ aar sandbox setup   # one-time setup (reads ~/.aar/config.json for distro name a
 aar sandbox status  # verify
 ```
 
-See [Safety — Docker-free sandboxing](docs/safety.md#docker-free-sandboxing-on-windows) for full details.
+See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) for full details.
 
 ## Documentation
 

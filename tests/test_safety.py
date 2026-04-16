@@ -17,11 +17,10 @@ from agent.safety.policy import (
     SafetyPolicy,
 )
 from agent.safety.sandbox import (
+    LinuxSandbox,
     LocalSandbox,
     SandboxResult,
-    SubprocessSandbox,
     WindowsSubprocessSandbox,
-    WorkspaceSandbox,
 )
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
@@ -305,27 +304,6 @@ class TestLocalSandbox:
         assert result.output == "(no output)"
 
 
-class TestSubprocessSandbox:
-    @pytest.mark.asyncio
-    async def test_execute_simple(self):
-        sb = SubprocessSandbox()
-        result = await sb.execute("echo sandboxed")
-        assert "sandboxed" in result.stdout
-        assert result.exit_code == 0
-
-    @pytest.mark.asyncio
-    async def test_restricted_env(self):
-        sb = SubprocessSandbox(allowed_env_vars=["PATH"])
-        result = await sb.execute("echo ok")
-        assert result.exit_code == 0
-
-    @pytest.mark.asyncio
-    async def test_timeout(self):
-        sb = SubprocessSandbox()
-        result = await sb.execute("sleep 60", timeout=1)
-        assert result.timed_out
-
-
 class TestSandboxResult:
     def test_output_combined(self):
         r = SandboxResult(stdout="out", stderr="err", exit_code=1)
@@ -343,58 +321,58 @@ class TestSandboxResult:
 
 
 # ===========================================================================
-# WorkspaceSandbox (Linux / Landlock)
+# LinuxSandbox (Landlock)
 # ===========================================================================
 
 
-class TestWorkspaceSandbox:
-    """WorkspaceSandbox: Landlock probe, preexec factory, and fallback behaviour."""
+class TestLinuxSandbox:
+    """LinuxSandbox: Landlock probe, preexec factory, and fallback behaviour."""
 
     def test_check_landlock_returns_bool(self, tmp_path):
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         result = sb._check_landlock()
         assert isinstance(result, bool)
 
     def test_check_landlock_is_cached(self, tmp_path):
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         first = sb._check_landlock()
         # Force a different raw value — cache must win
         sb._landlock_available = not first
         assert sb._check_landlock() == (not first)
 
     def test_make_landlock_preexec_returns_callable(self, tmp_path):
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         fn = sb._make_landlock_preexec(str(tmp_path))
         assert callable(fn)
 
     def test_make_landlock_preexec_does_not_raise_called_directly(self, tmp_path):
         """The preexec closure must never raise — it silently falls back."""
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         fn = sb._make_landlock_preexec("/nonexistent_workspace_xyz")
         fn()  # Should not raise even with a bad workspace path
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(os.name == "nt", reason="WorkspaceSandbox is Linux-specific")
+    @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
     async def test_execute_simple(self, tmp_path):
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         result = await sb.execute("echo workspace_ok")
         assert "workspace_ok" in result.stdout
         assert result.exit_code == 0
         assert not result.timed_out
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(os.name == "nt", reason="WorkspaceSandbox is Linux-specific")
+    @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
     async def test_execute_timeout(self, tmp_path):
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         result = await sb.execute("sleep 60", timeout=1)
         assert result.timed_out
         assert result.exit_code == -1
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(os.name == "nt", reason="WorkspaceSandbox is Linux-specific")
+    @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
     async def test_restricted_env(self, tmp_path):
         """Only allowed env vars should reach the subprocess."""
-        sb = WorkspaceSandbox(workspace=str(tmp_path), allowed_env_vars=["PATH"])
+        sb = LinuxSandbox(workspace=str(tmp_path), allowed_env_vars=["PATH"])
         result = await sb.execute("echo ok")
         assert result.exit_code == 0
 
@@ -407,7 +385,7 @@ class TestWorkspaceSandbox:
         """When Landlock is unavailable, a warning is logged and execution succeeds."""
         import logging
 
-        sb = WorkspaceSandbox(workspace=str(tmp_path))
+        sb = LinuxSandbox(workspace=str(tmp_path))
         sb._landlock_available = False  # force fallback path
 
         with caplog.at_level(logging.WARNING, logger="agent.safety.sandbox"):

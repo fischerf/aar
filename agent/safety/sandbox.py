@@ -205,66 +205,7 @@ class LocalSandbox(Sandbox):
         return base
 
 
-class SubprocessSandbox(Sandbox):
-    """Isolated subprocess with restricted capabilities.
-
-    Uses resource limits and environment isolation without requiring containers.
-    """
-
-    def __init__(
-        self,
-        default_cwd: str | None = None,
-        max_memory_mb: int = 512,
-        allowed_env_vars: list[str] | None = None,
-    ) -> None:
-        self.default_cwd = default_cwd or os.getcwd()
-        self.max_memory_mb = max_memory_mb
-        self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
-
-    async def execute(
-        self,
-        command: str,
-        timeout: int = 30,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> SandboxResult:
-        work_dir = cwd or self.default_cwd
-        proc_env = {k: os.environ[k] for k in self.allowed_env_vars if k in os.environ}
-        if os.name == "nt":
-            # Windows requires these for processes to load correctly
-            for var in ("SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE"):
-                if var not in proc_env and var in os.environ:
-                    proc_env[var] = os.environ[var]
-        if env:
-            proc_env.update(env)
-
-        # On Unix, we can use ulimit to restrict resources
-        wrapped = self._wrap_command(command)
-
-        proc = await _create_subprocess(wrapped, work_dir, proc_env)
-
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return SandboxResult(timed_out=True, exit_code=-1)
-
-        return SandboxResult(
-            stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
-            stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
-            exit_code=proc.returncode or 0,
-        )
-
-    def _wrap_command(self, command: str) -> str:
-        """Wrap command with resource limits where available."""
-        if os.name == "nt":
-            return command  # ulimit is unreliable in Git Bash on Windows
-        mem_kb = self.max_memory_mb * 1024
-        return f"ulimit -v {mem_kb} 2>/dev/null; {command}"
-
-
-class WorkspaceSandbox(Sandbox):
+class LinuxSandbox(Sandbox):
     """Linux sandbox: Landlock LSM restricts subprocess to workspace + ulimit memory cap.
 
     The subprocess can read and execute anywhere on the filesystem but can only
@@ -441,7 +382,7 @@ class WorkspaceSandbox(Sandbox):
                 kwargs["preexec_fn"] = self._make_landlock_preexec(self.workspace)
             else:
                 logger.warning(
-                    "WorkspaceSandbox: Landlock unavailable (kernel < 5.13 or LSM disabled); "
+                    "LinuxSandbox: Landlock unavailable (kernel < 5.13 or LSM disabled); "
                     "falling back to env restriction + ulimit only"
                 )
 
@@ -536,9 +477,11 @@ class WindowsSubprocessSandbox(Sandbox):
                 check=False,
                 capture_output=True,
             )
-            logger.debug("WorkspaceSandbox: stamped %s as Low-integrity-writable", self.workspace)
+            logger.debug(
+                "WindowsSubprocessSandbox: stamped %s as Low-integrity-writable", self.workspace
+            )
         except Exception as exc:
-            logger.debug("WorkspaceSandbox: icacls stamp failed (non-fatal): %s", exc)
+            logger.debug("WindowsSubprocessSandbox: icacls stamp failed (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Environment builder

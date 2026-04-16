@@ -196,14 +196,16 @@ This works because `allowed_paths` restricts file tools but not bash (which can 
 
 ## Sandboxing
 
-Two sandbox implementations:
+Sandbox implementations:
 
 | Sandbox | How it works |
 |---------|-------------|
 | `LocalSandbox` | Direct `asyncio.create_subprocess_exec` — no isolation |
-| `SubprocessSandbox` | Adds `ulimit` memory limits, restricted environment variables, timeout enforcement |
+| `LinuxSandbox` | Landlock LSM restricts writes to workspace; `ulimit -v` memory cap; restricted env |
+| `WindowsSubprocessSandbox` | Windows Job Object (memory/process caps) + Low Integrity Level |
+| `WslDistroSandbox` | Runs commands inside a dedicated WSL2 distro (`wsl -d <distro> -- sh -c <cmd>`) |
 
-The sandbox is selected by `SafetyConfig.sandbox` (`"local"` or `"subprocess"`). Both return stdout+stderr as a string, capped at `ToolConfig.max_output_chars`.
+The sandbox is selected by `SafetyConfig.sandbox.mode` (`"local"`, `"linux"`, `"windows"`, `"wsl"`, or `"auto"`). All sandboxes return stdout+stderr as a string, capped at `ToolConfig.max_output_chars`. See [Safety](safety.md) for the full mode reference.
 
 ## Event model
 

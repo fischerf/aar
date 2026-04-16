@@ -108,14 +108,8 @@ class LocalSandboxConfig(BaseModel):
     pass  # no configuration options
 
 
-class SubprocessSandboxConfig(BaseModel):
-    """Restricted env vars + memory cap on Unix."""
-
-    max_memory_mb: int = 512
-
-
-class WorkspaceSandboxConfig(BaseModel):
-    """Linux Landlock LSM — write-restricted to workspace. Falls back to subprocess on older kernels."""
+class LinuxSandboxConfig(BaseModel):
+    """Linux Landlock LSM — write-restricted to workspace. Falls back to env restriction + ulimit on older kernels."""
 
     workspace: str | None = None  # None → cwd at runtime
     max_memory_mb: int = 512
@@ -152,18 +146,16 @@ class SandboxConfig(BaseModel):
     matching sub-section.  Settings in other sub-sections are ignored.
 
     Modes:
-      local      — no isolation (default, trusted dev)
-      subprocess — restricted env + memory cap on Unix
-      workspace  — Linux Landlock, write-restricted to workspace
-      windows    — Windows Job Object + Low Integrity Level
-      wsl        — dedicated WSL2 distro
-      auto       — picks workspace (Linux), windows (Windows), subprocess (other)
+      local   — no isolation (default, trusted dev)
+      linux   — Linux Landlock, write-restricted to workspace (+ ulimit memory cap)
+      windows — Windows Job Object + Low Integrity Level
+      wsl     — dedicated WSL2 distro
+      auto    — picks linux (Linux), windows (Windows), local (other)
     """
 
     mode: str = "local"
     local: LocalSandboxConfig = Field(default_factory=LocalSandboxConfig)
-    subprocess: SubprocessSandboxConfig = Field(default_factory=SubprocessSandboxConfig)
-    workspace: WorkspaceSandboxConfig = Field(default_factory=WorkspaceSandboxConfig)
+    linux: LinuxSandboxConfig = Field(default_factory=LinuxSandboxConfig)
     windows: WindowsSandboxConfig = Field(default_factory=WindowsSandboxConfig)
     wsl: WslSandboxConfig = Field(default_factory=WslSandboxConfig)
 
