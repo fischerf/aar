@@ -470,7 +470,7 @@ class TestBudgetEnforcement:
 
         assert result.state == AgentState.BUDGET_EXCEEDED
         errors = [e for e in result.events if isinstance(e, ErrorEvent)]
-        budget_errors = [e for e in errors if "budget" in e.message.lower()]
+        budget_errors = [e for e in errors if "exceeded" in e.message.lower()]
         assert len(budget_errors) == 1
         assert budget_errors[0].recoverable is False
 
