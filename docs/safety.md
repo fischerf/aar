@@ -235,7 +235,7 @@ macOS                        →  local    (no OS-level sandbox available)
 | `windows` | **mostly** — Low IL blocks writes to user profile, Program Files, HKCU; workspace stamped Low-writable | no — Low IL is write-side only | Job Object memory + process count | no |
 | `wsl` | **no** — entire Windows filesystem auto-mounted at `/mnt/<drive>/` | no | none | no |
 
-**No sandbox mode restricts outbound network access.** For network isolation, a container-based sandbox is required — see [`docker_sandbox_plan.md`](docker_sandbox_plan.md) for the planned additive Docker layer (runs via WSL-native Docker, no Docker Desktop required).
+**No sandbox mode restricts outbound network access.** None of the current modes restrict outbound network; consider running the agent inside an isolated VM or container outside of Aar if network egress control is required.
 
 ### `linux` — Linux Landlock (recommended for Linux)
 
@@ -371,7 +371,7 @@ A dedicated, disposable WSL2 distro is used as the execution environment. Comman
 - No memory or process count cap
 - The agent runs as **root** inside the distro
 
-**Use this mode for:** a clean, wipeable multi-language execution environment (install Node, Go, Rust, etc. without polluting your host). **Not suitable for:** protecting against a malicious command — use `windows` mode for that, or wait for the planned Docker layer.
+**Use this mode for:** a clean, wipeable multi-language execution environment (install Node, Go, Rust, etc. without polluting your host). **Not suitable for:** protecting against a malicious command — use `windows` mode (or `linux` on Linux) for write isolation.
 
 **Configuration** (defaults work out of the box once `aar sandbox setup` has been run):
 
@@ -525,10 +525,6 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 The sandbox is applied to **all shell commands** — both the built-in `bash` tool and any commands spawned by subprocesses. The `bash` tool handler delegates execution to `sandbox.execute()`, which applies the platform-appropriate isolation before the process is spawned.
 
 This means `mode: "local"` is the only setting that provides no isolation. All other modes enforce their restrictions even for one-liner `bash` tool calls.
-
-## Future — container-based sandboxing
-
-None of the current modes restrict outbound network access, and the `wsl` mode does not restrict host filesystem access via `/mnt/`. For stronger isolation, an optional Docker layer is planned that runs containers inside a WSL2 distro with Docker natively installed (no Docker Desktop required) — see [`docker_sandbox_plan.md`](docker_sandbox_plan.md).
 
 ## Architecture
 
