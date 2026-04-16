@@ -60,8 +60,9 @@
       "**/.pypirc"
     ],
     "allowed_paths": [],
-    "sandbox": "local",
-    "sandbox_max_memory_mb": 512,
+    "sandbox": {
+      "mode": "local"
+    },
     "log_all_commands": true
   },
   "tui": {
@@ -93,7 +94,6 @@
   "token_warning_threshold": 0.8,
   "cost_warning_threshold": 0.8,
   "session_dir": ".agent/sessions",
-  "shell_path": "",
   "project_rules_dir": ".agent",
   "log_level": "WARNING"
 }

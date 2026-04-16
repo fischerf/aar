@@ -1083,15 +1083,14 @@ def sandbox_setup(
     """Download a rootfs and import it as a dedicated sandbox WSL2 distro.
 
     All flags are optional — defaults come from ``~/.aar/config.json``
-    (``safety.sandbox_wsl_*`` fields).  Use flags only to override for a
+    (``safety.sandbox.wsl.*`` fields).  Use flags only to override for a
     one-off setup.
 
     After setup, add this to ``~/.aar/config.json``:
 
     \\b
         "safety": {
-          "sandbox": "wsl",
-          "sandbox_wsl_distro": "<distro>"
+          "sandbox": { "mode": "wsl", "wsl": { "distro": "<distro>" } }
         }
     """
     import os
@@ -1112,14 +1111,15 @@ def sandbox_setup(
 
     # Load config so flags can fall back to config values
     cfg = _build_config()
-    if distro == _DEFAULT_DISTRO and cfg.safety.sandbox_wsl_distro != _DEFAULT_DISTRO:
-        distro = cfg.safety.sandbox_wsl_distro
-    resolved_url = rootfs_url or cfg.safety.sandbox_wsl_rootfs_url
-    if packages == _DEFAULT_PACKAGES and cfg.safety.sandbox_wsl_packages:
-        packages = ",".join(cfg.safety.sandbox_wsl_packages)
+    wsl_cfg = cfg.safety.sandbox.wsl
+    if distro == _DEFAULT_DISTRO and wsl_cfg.distro != _DEFAULT_DISTRO:
+        distro = wsl_cfg.distro
+    resolved_url = rootfs_url or wsl_cfg.rootfs_url
+    if packages == _DEFAULT_PACKAGES and wsl_cfg.packages:
+        packages = ",".join(wsl_cfg.packages)
 
     resolved_install = _resolve_install_path(
-        distro, install_path or cfg.safety.sandbox_wsl_install_path
+        distro, install_path or wsl_cfg.install_path
     )
 
     # Handle existing distro
@@ -1180,7 +1180,7 @@ def sandbox_setup(
         "Add this to [bold]~/.aar/config.json[/] (inside the top-level object):\n"
     )
     console.print(
-        f'  "safety": {{\n    "sandbox": "wsl",\n    "sandbox_wsl_distro": "{distro}"\n  }}'
+        f'  "safety": {{\n    "sandbox": {{"mode": "wsl", "wsl": {{"distro": "{distro}"}}}}\n  }}'
     )
     console.print(f"\nThen run [bold]aar sandbox status --distro {distro}[/] to verify.")
 
@@ -1200,7 +1200,7 @@ def sandbox_status(
 
     cfg = _build_config()
     if distro == _DEFAULT_DISTRO:
-        distro = cfg.safety.sandbox_wsl_distro
+        distro = cfg.safety.sandbox.wsl.distro
 
     console.print(f"[bold]WSL2 sandbox status[/] — distro: [cyan]{distro}[/]\n")
 
@@ -1245,7 +1245,7 @@ def sandbox_reset(
 
     cfg = _build_config()
     if distro == _DEFAULT_DISTRO:
-        distro = cfg.safety.sandbox_wsl_distro
+        distro = cfg.safety.sandbox.wsl.distro
 
     if not wm.distro_exists(distro):
         console.print(f"[yellow]Distro '{distro}' does not exist — nothing to reset.[/]")

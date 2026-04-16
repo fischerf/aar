@@ -171,24 +171,23 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ### Windows — `bash` tool
 
-The `bash` built-in tool requires a Unix-compatible shell. **Either** is sufficient:
+The `bash` built-in tool requires **WSL** (Windows Subsystem for Linux). Install it once:
 
-| Option | Install | Notes |
-|--------|---------|-------|
-| **Git for Windows** (Git Bash) | [git-scm.com](https://git-scm.com/download/win) | Lightweight; adds `bash` to `PATH` |
-| **WSL** | `wsl --install` in an admin terminal | Full Linux environment |
-
-> **If both are installed**, WSL's `bash.exe` is found first by Windows `CreateProcess`, so WSL's bash will run. Keep this in mind for file path references.
-
-```
-Neither is required if you do not enable the `bash` built-in tool.
+```bash
+wsl --install
 ```
 
+> Not required if you do not enable the `bash` built-in tool.
+
+For strong process isolation, use the built-in `wsl` sandbox mode — it routes all agent shell
+commands through a dedicated, disposable Alpine distro instead of your main WSL environment:
+
+```bash
+aar sandbox setup   # one-time setup (reads ~/.aar/config.json for distro name and packages)
+aar sandbox status  # verify
 ```
-"NOTE: On Windows with WSL, 'python' in bash may resolve to WSL's Python (a separate env). "
-"To install packages that will be visible to bash-executed scripts, use the pip_install tool "
-"or run: bash('python -m pip install <package>'). "
-```
+
+See [Safety — Docker-free sandboxing](docs/safety.md#docker-free-sandboxing-on-windows) for full details.
 
 ## Documentation
 

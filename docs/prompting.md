@@ -46,6 +46,14 @@ Rules:
 
 ### Project rules file
 
+The system prompt is assembled from five layers (all optional except Base):
+
+1. **Base** — runtime facts (OS, cwd, shell) — always included
+2. **Global rules** — `~/.aar/rules.md` — user-wide preferences
+3. **Global drop-ins** — `~/.aar/rules.d/*.md` (sorted) — environment-specific additions without editing the main file
+4. **Project rules** — `<project_rules_dir>/rules.md` — project instructions checked into git
+5. **Project drop-ins** — `<project_rules_dir>/rules.d/*.md` (sorted) — per-contributor or per-machine overrides; can be gitignored
+
 For team projects, put rules in `.agent/rules.md` at the repo root and commit it.
 Aar picks it up automatically — no code change needed.
 
@@ -56,6 +64,8 @@ Aar picks it up automatically — no code change needed.
 - All routes must have an integration test in tests/api/.
 - Use Alembic for migrations; never edit the DB schema directly.
 ```
+
+For machine-local or per-contributor additions that shouldn't be committed, drop `.md` files into `.agent/rules.d/` and add the directory to `.gitignore`. Run `aar init` to scaffold both `rules.md` and `rules.d/` for global and project layers.
 
 ---
 

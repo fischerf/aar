@@ -13,7 +13,6 @@ from agent.tools.schema import SideEffect, ToolSpec
 def register_shell_tools(
     registry: ToolRegistry,
     sandbox: Sandbox | None = None,
-    shell_path: str = "",
 ) -> None:
     """Register the bash tool into the given registry.
 
@@ -28,20 +27,9 @@ def register_shell_tools(
             result = await sandbox.execute(command, timeout=timeout)
             return result.output
 
-        # Fallback: direct subprocess (sandbox=None, e.g. LocalSandbox callers
-        # that register shell tools without going through ToolExecutor).
-        # Use configured shell, or fall back to Git Bash on Windows /
-        # system shell on Unix.
-        if shell_path:
-            proc = await asyncio.create_subprocess_exec(
-                shell_path,
-                "-c",
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
-            )
-        elif os.name == "nt":
+        # Fallback: direct subprocess (sandbox=None).
+        # On Windows, bash resolves to WSL; on Unix use the system shell.
+        if os.name == "nt":
             proc = await asyncio.create_subprocess_exec(
                 "bash",
                 "-c",
@@ -78,7 +66,7 @@ def register_shell_tools(
             name="bash",
             description=(
                 "Execute a shell command. Returns stdout, stderr, and exit code. "
-                "On Windows commands run via Git Bash (bash -c), so standard Unix/bash "
+                "On Windows commands run via WSL (bash -c). Standard Unix/bash "
                 "syntax works (ls, cat, grep, find, …). Use Windows-style paths for "
                 "file tools, but bash syntax for shell commands."
             ),

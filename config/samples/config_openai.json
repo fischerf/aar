@@ -1,7 +1,7 @@
 {
   "provider": {
     "name": "openai",
-    "model": "gpt-5.4-mini",
+    "model": "gpt-4.1-mini",
     "temperature": 0.0,
     "max_tokens": 8192,
     "extra": {}
@@ -50,8 +50,9 @@
       "**/.pypirc"
     ],
     "allowed_paths": [],
-    "sandbox": "local",
-    "sandbox_max_memory_mb": 512,
+    "sandbox": {
+      "mode": "local"
+    },
     "log_all_commands": true
   },
   "tui": {
@@ -75,7 +76,6 @@
   "token_warning_threshold": 0.8,
   "cost_warning_threshold": 0.8,
   "session_dir": ".agent/sessions",
-  "shell_path": "",
   "project_rules_dir": ".agent",
   "log_level": "WARNING"
 }

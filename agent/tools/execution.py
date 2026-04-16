@@ -173,9 +173,8 @@ def _validate_arguments(arguments: dict, schema: dict) -> str | None:
 
 
 def _create_sandbox(config: SafetyConfig) -> Sandbox:
-    workspace = config.sandbox_workspace or os.getcwd()
-    shell_path = config.sandbox_shell_path
-    mode = config.sandbox
+    sb = config.sandbox
+    mode = sb.mode
 
     if mode == "auto":
         if os.name == "nt":
@@ -187,24 +186,22 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
 
     if mode == "wsl":
         return WslDistroSandbox(
-            distro_name=config.sandbox_wsl_distro,
-            workspace=config.sandbox_workspace,
-            shell=config.sandbox_wsl_shell,
+            distro_name=sb.wsl.distro,
+            workspace=sb.wsl.workspace,
+            shell=sb.wsl.shell,
         )
     if mode == "workspace":
         return WorkspaceSandbox(
-            workspace=workspace,
-            max_memory_mb=config.sandbox_max_memory_mb,
-            shell_path=shell_path,
+            workspace=sb.workspace.workspace,
+            max_memory_mb=sb.workspace.max_memory_mb,
         )
     if mode == "windows":
         return WindowsSubprocessSandbox(
-            workspace=workspace,
-            max_memory_mb=config.sandbox_max_memory_mb,
-            max_processes=config.sandbox_max_processes,
-            use_low_integrity=config.sandbox_use_low_integrity,
-            shell_path=shell_path,
+            workspace=sb.windows.workspace,
+            max_memory_mb=sb.windows.max_memory_mb,
+            max_processes=sb.windows.max_processes,
+            use_low_integrity=sb.windows.use_low_integrity,
         )
     if mode == "subprocess":
-        return SubprocessSandbox(max_memory_mb=config.sandbox_max_memory_mb, shell_path=shell_path)
-    return LocalSandbox(shell_path=shell_path)
+        return SubprocessSandbox(max_memory_mb=sb.subprocess.max_memory_mb)
+    return LocalSandbox()

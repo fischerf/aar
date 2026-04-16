@@ -111,21 +111,9 @@ async def _create_subprocess(
     command: str,
     cwd: str,
     env: dict[str, str] | None,
-    shell_path: str = "",
     **kwargs: object,
 ) -> asyncio.subprocess.Process:
-    """Create a subprocess using the configured shell, bash on Windows, or system shell on Unix."""
-    if shell_path:
-        return await asyncio.create_subprocess_exec(
-            shell_path,
-            "-c",
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            **kwargs,
-        )
+    """Create a subprocess using bash on Windows or the system shell on Unix."""
     if os.name == "nt":
         return await asyncio.create_subprocess_exec(
             "bash",
@@ -171,11 +159,9 @@ class LocalSandbox(Sandbox):
         self,
         default_cwd: str | None = None,
         restricted_env: bool = False,
-        shell_path: str = "",
     ) -> None:
         self.default_cwd = default_cwd or os.getcwd()
         self.restricted_env = restricted_env
-        self.shell_path = shell_path
 
     async def execute(
         self,
@@ -187,7 +173,7 @@ class LocalSandbox(Sandbox):
         work_dir = cwd or self.default_cwd
         proc_env = self._build_env(env)
 
-        proc = await _create_subprocess(command, work_dir, proc_env, shell_path=self.shell_path)
+        proc = await _create_subprocess(command, work_dir, proc_env)
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -230,12 +216,10 @@ class SubprocessSandbox(Sandbox):
         default_cwd: str | None = None,
         max_memory_mb: int = 512,
         allowed_env_vars: list[str] | None = None,
-        shell_path: str = "",
     ) -> None:
         self.default_cwd = default_cwd or os.getcwd()
         self.max_memory_mb = max_memory_mb
         self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
-        self.shell_path = shell_path
 
     async def execute(
         self,
@@ -257,7 +241,7 @@ class SubprocessSandbox(Sandbox):
         # On Unix, we can use ulimit to restrict resources
         wrapped = self._wrap_command(command)
 
-        proc = await _create_subprocess(wrapped, work_dir, proc_env, shell_path=self.shell_path)
+        proc = await _create_subprocess(wrapped, work_dir, proc_env)
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -294,12 +278,10 @@ class WorkspaceSandbox(Sandbox):
         workspace: str | None = None,
         max_memory_mb: int = 512,
         allowed_env_vars: list[str] | None = None,
-        shell_path: str = "",
     ) -> None:
         self.workspace = workspace or os.getcwd()
         self.max_memory_mb = max_memory_mb
         self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
-        self.shell_path = shell_path
         self._landlock_available: bool | None = None
 
     # ------------------------------------------------------------------
@@ -463,9 +445,7 @@ class WorkspaceSandbox(Sandbox):
                     "falling back to env restriction + ulimit only"
                 )
 
-        proc = await _create_subprocess(
-            wrapped, work_dir, proc_env, shell_path=self.shell_path, **kwargs
-        )
+        proc = await _create_subprocess(wrapped, work_dir, proc_env, **kwargs)
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -505,7 +485,6 @@ class WindowsSubprocessSandbox(Sandbox):
         max_processes: int = 10,
         allowed_env_vars: list[str] | None = None,
         use_low_integrity: bool = True,
-        shell_path: str = "",
     ) -> None:
         self.workspace = workspace or os.getcwd()
         self.max_memory_mb = max_memory_mb
@@ -523,7 +502,6 @@ class WindowsSubprocessSandbox(Sandbox):
             "USERNAME",
         ]
         self.use_low_integrity = use_low_integrity
-        self.shell_path = shell_path
         self._workspace_stamped = False
 
     # ------------------------------------------------------------------
@@ -713,7 +691,7 @@ class WindowsSubprocessSandbox(Sandbox):
         work_dir: str,
         proc_env: dict[str, str],
     ) -> SandboxResult:
-        proc = await _create_subprocess(command, work_dir, proc_env, shell_path=self.shell_path)
+        proc = await _create_subprocess(command, work_dir, proc_env)
         job = self._assign_job_object(proc.pid)
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -743,11 +721,10 @@ class WindowsSubprocessSandbox(Sandbox):
         """Run command via the Low Integrity helper. Returns None if unavailable."""
         try:
             helper = self._get_helper_path()
-            shell = self.shell_path or "bash"
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
                 helper,
-                shell,
+                "bash",
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

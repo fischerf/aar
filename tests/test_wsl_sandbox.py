@@ -244,22 +244,22 @@ class TestSafetyConfigWslFields:
         from agent.core.config import SafetyConfig
 
         sc = SafetyConfig()
-        assert sc.sandbox_wsl_distro == "aar-sandbox"
-        assert sc.sandbox_wsl_shell == "sh"
-        assert sc.sandbox_wsl_install_path is None
-        assert "alpine" in sc.sandbox_wsl_rootfs_url.lower()
-        assert "python3" in sc.sandbox_wsl_packages
+        assert sc.sandbox.wsl.distro == "aar-sandbox"
+        assert sc.sandbox.wsl.shell == "sh"
+        assert sc.sandbox.wsl.install_path is None
+        assert "alpine" in sc.sandbox.wsl.rootfs_url.lower()
+        assert "python3" in sc.sandbox.wsl.packages
 
-    def test_sandbox_shell_path_default_empty(self):
+    def test_sandbox_mode_default_is_local(self):
         from agent.core.config import SafetyConfig
 
-        assert SafetyConfig().sandbox_shell_path == ""
+        assert SafetyConfig().sandbox.mode == "local"
 
     def test_wsl_mode_creates_wsl_sandbox(self):
-        from agent.core.config import SafetyConfig
+        from agent.core.config import SafetyConfig, SandboxConfig, WslSandboxConfig
         from agent.tools.execution import _create_sandbox
 
-        sc = SafetyConfig(sandbox="wsl", sandbox_wsl_distro="my-distro")
+        sc = SafetyConfig(sandbox=SandboxConfig(mode="wsl", wsl=WslSandboxConfig(distro="my-distro")))
         sb = _create_sandbox(sc)
         assert isinstance(sb, WslDistroSandbox)
         assert sb.distro_name == "my-distro"

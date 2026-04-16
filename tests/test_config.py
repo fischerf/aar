@@ -27,6 +27,15 @@ class TestDefaultSystemPrompt:
         prompt = _default_system_prompt()
         assert "You are a helpful assistant" in prompt
 
+    def test_contains_shell_line(self):
+        prompt = _default_system_prompt()
+        assert "Shell:" in prompt
+
+    def test_no_git_bash_mention(self):
+        # Git Bash is no longer referenced; WSL is the Windows shell
+        prompt = _default_system_prompt()
+        assert "Git Bash" not in prompt
+
 
 # ---------------------------------------------------------------------------
 # build_system_prompt — rules file layering
@@ -113,25 +122,6 @@ class TestBuildSystemPrompt:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# _default_system_prompt — shell_path override
-# ---------------------------------------------------------------------------
-
-
-class TestDefaultSystemPromptShellPath:
-    def test_custom_shell_path_appears_in_prompt(self):
-        prompt = _default_system_prompt(shell_path="/usr/bin/zsh")
-        assert "Shell: /usr/bin/zsh" in prompt
-
-    def test_custom_shell_path_suppresses_default_shell_lines(self):
-        prompt = _default_system_prompt(shell_path="/usr/bin/zsh")
-        assert "Git Bash" not in prompt
-        assert "Shell: /bin/sh" not in prompt
-
-    def test_empty_shell_path_uses_default(self):
-        prompt = _default_system_prompt(shell_path="")
-        # Should contain one of the platform defaults
-        assert "Shell:" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -171,24 +161,18 @@ class TestBuildSystemPromptProjectRulesDir:
 
 
 # ---------------------------------------------------------------------------
-# AgentConfig — sandbox_shell_path and project_rules_dir integration
+# AgentConfig — sandbox config and project_rules_dir integration
 # ---------------------------------------------------------------------------
 
 
 class TestAgentConfigNewFields:
-    def test_sandbox_shell_path_default_is_empty(self):
+    def test_sandbox_mode_default_is_local(self):
         config = AgentConfig()
-        assert config.safety.sandbox_shell_path == ""
+        assert config.safety.sandbox.mode == "local"
 
     def test_project_rules_dir_default_is_dot_agent(self):
         config = AgentConfig()
         assert config.project_rules_dir == Path(".agent")
-
-    def test_sandbox_shell_path_in_system_prompt(self):
-        from agent.core.config import SafetyConfig
-
-        config = AgentConfig(safety=SafetyConfig(sandbox_shell_path="/usr/bin/zsh"))
-        assert "Shell: /usr/bin/zsh" in config.system_prompt
 
     def test_custom_project_rules_dir_used_in_prompt(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -200,13 +184,8 @@ class TestAgentConfigNewFields:
         config = AgentConfig(project_rules_dir=custom_dir)
         assert "my custom rule" in config.system_prompt
 
-    def test_explicit_system_prompt_still_overrides(self):
-        from agent.core.config import SafetyConfig
-
-        config = AgentConfig(
-            safety=SafetyConfig(sandbox_shell_path="/bin/zsh"),
-            system_prompt="explicit override",
-        )
+    def test_explicit_system_prompt_overrides(self):
+        config = AgentConfig(system_prompt="explicit override")
         assert config.system_prompt == "explicit override"
 
     def test_session_dir_default_unchanged(self):
@@ -216,13 +195,13 @@ class TestAgentConfigNewFields:
     def test_load_config_with_new_fields(self, tmp_path):
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
-            '{"safety": {"sandbox_shell_path": "/bin/zsh"}, "project_rules_dir": ".myconfig"}',
+            '{"safety": {"sandbox": {"mode": "subprocess"}}, "project_rules_dir": ".myconfig"}',
             encoding="utf-8",
         )
         from agent.core.config import load_config
 
         config = load_config(cfg_file)
-        assert config.safety.sandbox_shell_path == "/bin/zsh"
+        assert config.safety.sandbox.mode == "subprocess"
         assert config.project_rules_dir == Path(".myconfig")
 
 

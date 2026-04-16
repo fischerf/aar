@@ -136,8 +136,10 @@ Create a JSON file matching the `AgentConfig` schema:
     "require_approval_for_execute": true,
     "denied_paths": ["**/.env", "**/secrets/**"],
     "allowed_paths": ["/home/user/project/**"],
-    "sandbox": "auto",
-    "sandbox_workspace": "/home/user/project"
+    "sandbox": {
+      "mode": "auto",
+      "workspace": { "workspace": "/home/user/project" }
+    }
   },
   "max_steps": 30,
   "timeout": 120.0
@@ -202,16 +204,9 @@ Aar's philosophy is that the agent works inside a configured workspace directory
 
 ### How the sandbox executes commands
 
-All sandbox modes share the same underlying mechanism: they call `bash -c <command>`. The modes differ only in what they wrap around that call — restricted environment variables, resource limits, or OS-level process restrictions.
+All sandbox modes except `wsl` call `bash -c <command>`. On Windows, `bash` resolves to WSL2 — there is no Git Bash fallback. The `wsl` mode bypasses this entirely and routes commands directly to `wsl -d <distro> -- sh -c <cmd>`, providing full distro-level isolation.
 
-**On Windows this has a critical consequence:** the sandbox uses whatever `bash` binary is first on `PATH`. There are two common cases:
-
-| `bash` on PATH | Where commands run | Package installs go |
-|---|---|---|
-| WSL2 (`C:\Windows\System32\wsl.exe` resolves first) | Inside WSL2 Linux environment | WSL2 filesystem (`/home/...`, `/tmp/...`) |
-| Git Bash (`C:\Program Files\Git\bin\bash.exe`) | Native Windows filesystem via MSYS2 | Windows filesystem (POSIX paths translated) |
-
-These are completely separate runtime environments. A `pip install pip-install-test` that runs in WSL2 installs into WSL2's Python — invisible to a native Windows Python process and vice versa. Run `which bash` inside a shell tool call to confirm which environment your agent is using.
+The modes differ in what wraps around that call: restricted environment variables, resource limits, or OS-level process restrictions.
 
 ### Available modes
 
@@ -263,24 +258,29 @@ Landlock is a kernel security module (Linux ≥ 5.13) that lets an unprivileged 
 ```json
 {
   "safety": {
-    "sandbox": "workspace",
-    "sandbox_workspace": "/home/user/project",
-    "sandbox_max_memory_mb": 512
+    "sandbox": {
+      "mode": "workspace",
+      "workspace": {
+        "workspace": "/home/user/project",
+        "max_memory_mb": 512
+      }
+    }
   }
 }
 ```
 
 ```python
-from agent.core.config import SafetyConfig
+from agent.core.config import SafetyConfig, SandboxConfig, WorkspaceSandboxConfig
 
 safety = SafetyConfig(
-    sandbox="workspace",
-    sandbox_workspace="/home/user/project",
-    sandbox_max_memory_mb=512,
+    sandbox=SandboxConfig(
+        mode="workspace",
+        workspace=WorkspaceSandboxConfig(workspace="/home/user/project", max_memory_mb=512),
+    )
 )
 ```
 
-If `sandbox_workspace` is not set, it defaults to the current working directory at runtime.
+If `workspace` is not set, it defaults to the current working directory at runtime.
 
 **Smoke test** (verify Landlock is blocking writes outside workspace):
 
@@ -301,11 +301,11 @@ print('blocked' if r.exit_code != 0 else 'NOT blocked — landlock unavailable')
 Windows has no equivalent of Landlock. The `windows` mode layers two mechanisms:
 
 **1. Job Object** (via `ctypes kernel32`):
-- Enforces working-set memory limit (`sandbox_max_memory_mb`, default 512 MB)
-- Caps the number of active child processes (`sandbox_max_processes`, default 10)
+- Enforces working-set memory limit (`windows.max_memory_mb`, default 512 MB)
+- Caps the number of active child processes (`windows.max_processes`, default 10)
 - `KILL_ON_JOB_CLOSE` — orphaned processes in the job are killed automatically when the agent exits
 
-**2. Low Integrity Level** (optional, `sandbox_use_low_integrity: true` by default):
+**2. Low Integrity Level** (optional, `windows.use_low_integrity: true` by default):
 - The subprocess runs at Windows Mandatory Integrity Level *Low* (the same level as IE Protected Mode and sandboxed browser tabs)
 - A Low-integrity process **cannot write to** Medium/High-integrity locations: user profile (`C:\Users\<you>`), `C:\Program Files`, registry
 - The workspace is stamped as Low-integrity-writable via `icacls /setintegritylevel Low` so the subprocess *can* write there
@@ -318,22 +318,32 @@ Windows has no equivalent of Landlock. The `windows` mode layers two mechanisms:
 ```json
 {
   "safety": {
-    "sandbox": "windows",
-    "sandbox_workspace": "C:/Users/user/project",
-    "sandbox_max_memory_mb": 512,
-    "sandbox_max_processes": 10,
-    "sandbox_use_low_integrity": true
+    "sandbox": {
+      "mode": "windows",
+      "windows": {
+        "workspace": "C:/Users/user/project",
+        "max_memory_mb": 512,
+        "max_processes": 10,
+        "use_low_integrity": true
+      }
+    }
   }
 }
 ```
 
 ```python
+from agent.core.config import SafetyConfig, SandboxConfig, WindowsSandboxConfig
+
 safety = SafetyConfig(
-    sandbox="windows",
-    sandbox_workspace="C:/Users/user/project",
-    sandbox_max_memory_mb=512,
-    sandbox_max_processes=10,
-    sandbox_use_low_integrity=True,
+    sandbox=SandboxConfig(
+        mode="windows",
+        windows=WindowsSandboxConfig(
+            workspace="C:/Users/user/project",
+            max_memory_mb=512,
+            max_processes=10,
+            use_low_integrity=True,
+        ),
+    )
 )
 ```
 
@@ -342,8 +352,10 @@ Disable Low Integrity if you hit permission issues (rare) while keeping Job Obje
 ```json
 {
   "safety": {
-    "sandbox": "windows",
-    "sandbox_use_low_integrity": false
+    "sandbox": {
+      "mode": "windows",
+      "windows": { "use_low_integrity": false }
+    }
   }
 }
 ```
@@ -353,8 +365,11 @@ Disable Low Integrity if you hit permission issues (rare) while keeping Job Obje
 ```json
 {
   "safety": {
-    "sandbox": "auto",
-    "sandbox_workspace": "/home/user/project"
+    "sandbox": {
+      "mode": "auto",
+      "workspace": { "workspace": "/home/user/project" },
+      "windows": { "workspace": "/home/user/project" }
+    }
   }
 }
 ```
@@ -371,26 +386,70 @@ Selection logic:
 
 Available everywhere, provides:
 - Restricted environment variables (only `PATH`, `HOME`, `TERM`, `LANG` + Windows essentials)
-- `ulimit -v` memory cap on Unix (skipped on Windows — `ulimit` is unreliable in Git Bash/WSL context)
+- `ulimit -v` memory cap on Unix (skipped on Windows — `ulimit` is not available in WSL via `bash -c`)
 - Command timeout
 
 **Limits:** No filesystem-level restriction — a subprocess can still read and write anywhere the user has permission. The only protection is that leaked credentials from the parent environment are not forwarded.
 
-### SafetyConfig sandbox fields reference
+### Sandbox configuration reference
+
+`safety.sandbox` is a nested object with a `mode` field and one sub-object per sandbox type.
+Only the sub-object matching the active `mode` is used — all other sub-objects are ignored.
+
+```json
+{
+  "safety": {
+    "sandbox": {
+      "mode": "wsl",
+      "wsl": { "distro": "aar-sandbox", "packages": ["python3", "py3-pip"] }
+    }
+  }
+}
+```
+
+**Top-level `SandboxConfig`:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `sandbox` | `str` | `"local"` | Sandbox mode: `local` \| `subprocess` \| `workspace` \| `windows` \| `wsl` \| `auto` |
-| `sandbox_max_memory_mb` | `int` | `512` | Memory limit (MB) for `subprocess`, `workspace`, and `windows` modes |
-| `sandbox_max_processes` | `int` | `10` | Max active child processes — Windows Job Object only |
-| `sandbox_workspace` | `str \| None` | `None` (→ cwd) | Workspace root path. Windows paths are auto-translated to `/mnt/…` for `wsl` mode |
-| `sandbox_use_low_integrity` | `bool` | `True` | Windows: run subprocess at Low integrity level |
-| `sandbox_shell_path` | `str` | `""` | Path to bash binary for `local`/`subprocess`/`windows`/`workspace` modes (empty = auto-detect) |
-| `sandbox_wsl_distro` | `str` | `"aar-sandbox"` | WSL2 distro name for `wsl` mode |
-| `sandbox_wsl_shell` | `str` | `"sh"` | Shell binary inside the distro (`sh` works on minimal Alpine; use `bash` if installed) |
-| `sandbox_wsl_install_path` | `str \| None` | `None` | Where to store the distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
-| `sandbox_wsl_rootfs_url` | `str` | Alpine latest-stable | URL of the rootfs tarball used by `aar sandbox setup` |
-| `sandbox_wsl_packages` | `list[str]` | `["python3", "py3-pip"]` | Packages to install during `aar sandbox setup` |
+| `mode` | `str` | `"local"` | Active mode: `local` \| `subprocess` \| `workspace` \| `windows` \| `wsl` \| `auto` |
+| `local` | `LocalSandboxConfig` | — | Settings for `local` mode (no options) |
+| `subprocess` | `SubprocessSandboxConfig` | — | Settings for `subprocess` mode |
+| `workspace` | `WorkspaceSandboxConfig` | — | Settings for `workspace` mode |
+| `windows` | `WindowsSandboxConfig` | — | Settings for `windows` mode |
+| `wsl` | `WslSandboxConfig` | — | Settings for `wsl` mode |
+
+**`SubprocessSandboxConfig`:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_memory_mb` | `int` | `512` | Memory cap via `ulimit -v` (Unix only) |
+
+**`WorkspaceSandboxConfig`:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `workspace` | `str \| None` | `None` (→ cwd) | Workspace root path restricted by Landlock |
+| `max_memory_mb` | `int` | `512` | Memory cap via `ulimit -v` |
+
+**`WindowsSandboxConfig`:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `workspace` | `str \| None` | `None` (→ cwd) | Workspace root path stamped Low-integrity-writable |
+| `max_memory_mb` | `int` | `512` | Working-set limit via Job Object |
+| `max_processes` | `int` | `10` | Max active child processes — Job Object |
+| `use_low_integrity` | `bool` | `True` | Run subprocess at Windows Low Integrity level |
+
+**`WslSandboxConfig`:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `distro` | `str` | `"aar-sandbox"` | WSL2 distro name |
+| `shell` | `str` | `"sh"` | Shell binary inside the distro (`sh` works on minimal Alpine) |
+| `workspace` | `str \| None` | `None` (→ cwd) | Windows path — auto-translated to `/mnt/…` |
+| `install_path` | `str \| None` | `None` | Where to store distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
+| `rootfs_url` | `str` | Alpine latest-stable | Rootfs tarball URL used by `aar sandbox setup` |
+| `packages` | `list[str]` | `["python3", "py3-pip"]` | Packages installed during `aar sandbox setup` |
 
 ### Shell tool wiring
 
@@ -422,15 +481,19 @@ Edit `~/.aar/config.json` to set sandbox parameters before running setup:
 ```json
 {
   "safety": {
-    "sandbox": "wsl",
-    "sandbox_wsl_distro": "aar-sandbox",
-    "sandbox_wsl_packages": ["python3", "py3-pip", "nodejs", "npm"],
-    "sandbox_wsl_rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.21.0-x86_64.tar.gz"
+    "sandbox": {
+      "mode": "wsl",
+      "wsl": {
+        "distro": "aar-sandbox",
+        "packages": ["python3", "py3-pip", "nodejs", "npm"],
+        "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.21.0-x86_64.tar.gz"
+      }
+    }
   }
 }
 ```
 
-All `sandbox_wsl_*` fields are optional. The defaults use Alpine Linux with Python 3 and pip.
+All `wsl` sub-fields are optional. The defaults use Alpine Linux with Python 3 and pip.
 
 #### 2. Set up the distro
 
@@ -463,7 +526,7 @@ aar sandbox status
 
 #### 4. Run the agent
 
-Once `sandbox = "wsl"` is in config, `aar chat` / `aar run` automatically route all `bash`
+Once `"mode": "wsl"` is in config, `aar chat` / `aar run` automatically route all `bash`
 tool calls through the sandbox distro. No other changes needed.
 
 #### Reset / teardown
@@ -478,14 +541,19 @@ aar sandbox reset --yes        # skip confirmation
 
 #### Using a non-Alpine rootfs
 
-Point `sandbox_wsl_rootfs_url` at any `.tar.gz` rootfs (Ubuntu, Debian, etc.) and update
-`sandbox_wsl_packages` to use that distro's package manager:
+Point `wsl.rootfs_url` at any `.tar.gz` rootfs (Ubuntu, Debian, etc.) and update
+`wsl.packages` to use that distro's package manager:
 
 ```json
 {
   "safety": {
-    "sandbox_wsl_rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
-    "sandbox_wsl_packages": ["python3", "python3-pip", "nodejs", "npm"]
+    "sandbox": {
+      "mode": "wsl",
+      "wsl": {
+        "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+        "packages": ["python3", "python3-pip", "nodejs", "npm"]
+      }
+    }
   }
 }
 ```
@@ -495,9 +563,9 @@ Point `sandbox_wsl_rootfs_url` at any `.tar.gz` rootfs (Ubuntu, Debian, etc.) an
 
 **Limits of the WSL2 distro approach:**
 - No outbound network restriction (WSL2 distros share the host network adapter)
-- Files in the workspace are accessed via `/mnt/<drive>/...` — this is automatic when `sandbox_workspace` is a Windows path
+- Files in the workspace are accessed via `/mnt/<drive>/...` — this is automatic when `wsl.workspace` is a Windows path
 - The distro persists between agent sessions — use `aar sandbox reset` to wipe accumulated state
-- `sandbox_wsl_shell` controls which shell runs commands inside the distro (default: `sh`; set to `bash` if you install it)
+- `wsl.shell` controls which shell runs commands inside the distro (default: `sh`; set to `bash` if you install it)
 
 ---
 
