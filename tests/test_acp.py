@@ -1507,6 +1507,43 @@ class TestAcpApprovalBridge:
         tool_call: ToolCallUpdate = kwargs["tool_call"]
         assert tool_call.kind == "execute"
 
+    # ------------------------------------------------------------------
+    # M1: timeout validation
+    # ------------------------------------------------------------------
+
+    def test_negative_timeout_rejected(self):
+        """A negative timeout would deny every request silently — fail fast."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="timeout"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=-1)
+
+    def test_nan_timeout_rejected(self):
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="finite"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=float("nan"))
+
+    def test_inf_timeout_rejected(self):
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="finite"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=float("inf"))
+
+    def test_bool_timeout_rejected(self):
+        """bool is a subclass of int; reject it to avoid `True == 1` surprises."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="number"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=True)  # type: ignore[arg-type]
+
+    def test_zero_timeout_accepted_as_wait_forever(self):
+        """0 is the documented 'wait indefinitely' sentinel — must not raise."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        cb = make_acp_approval_callback(AsyncMock(), "sess-1", timeout=0)
+        assert callable(cb)
+
 
 # ---------------------------------------------------------------------------
 # Model tests

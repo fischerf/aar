@@ -82,12 +82,26 @@ def make_acp_approval_callback(
                     at module load time — the SDK is optional.
         session_id: The ACP session id for the current prompt.
         timeout:    Seconds to wait for a user response before auto-denying.
-                    ``0`` (default) means wait indefinitely.
+                    ``0`` (default) means wait indefinitely. Must be ``>= 0``;
+                    a negative value would make ``asyncio.wait_for`` raise
+                    ``TimeoutError`` immediately and silently deny every
+                    request, so it's rejected at factory time.
 
     Returns:
         An async callable ``(spec, tc) -> ApprovalResult`` compatible with
         ``agent.safety.permissions.ApprovalCallback``.
+
+    Raises:
+        ValueError: if ``timeout`` is negative or not a real number.
     """
+    import math
+
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise ValueError(f"timeout must be a number, got {type(timeout).__name__}")
+    if math.isnan(timeout) or math.isinf(timeout):
+        raise ValueError(f"timeout must be finite, got {timeout!r}")
+    if timeout < 0:
+        raise ValueError(f"timeout must be >= 0 (0 means wait indefinitely), got {timeout!r}")
 
     if conn is None:
         logger.debug("make_acp_approval_callback: no connection — using deny fallback")

@@ -175,6 +175,28 @@ ToolCall → SafetyPolicy.check_tool() → ALLOW → sandbox.run() → ToolResul
 
 The executor wraps results with timing (`duration_ms`) and enforces output truncation (`max_output_chars`).
 
+#### Error-result format
+
+Every error path returns a `ToolResult` whose `output` starts with a stable
+machine-readable category tag:
+
+```
+Error [<category>]: <human-readable message>
+```
+
+| Category | When it fires |
+|---|---|
+| `unknown_tool` | Tool name not found in the registry |
+| `no_handler` | Tool registered without a callable handler |
+| `invalid_arguments` | Arguments fail JSON-schema validation |
+| `blocked` | Safety policy denied the call (`PolicyDecision.DENY`) |
+| `denied` | Human declined an approval-gated call |
+| `timeout` | Handler exceeded `ToolConfig.command_timeout` |
+| `exception` | Handler raised an unhandled exception |
+
+Clients (ACP, TUI, tests) should pattern-match on the bracketed category
+rather than on the free-form message text.
+
 ## Safety
 
 See [`docs/safety.md`](safety.md) for the full safety reference.

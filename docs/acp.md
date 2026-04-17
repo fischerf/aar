@@ -189,6 +189,13 @@ By default, Aar forwards tool-approval prompts to the editor via the ACP `reques
 The editor shows an **Allow / Deny** dialog before each tool executes.
 If no editor connection is available, tools are auto-approved.
 
+**Approval timeout** — `make_acp_approval_callback(..., timeout=<seconds>)`
+caps how long Aar waits for the editor to return a decision before auto-denying
+the request. `timeout=0` (the default) means wait indefinitely. The factory
+validates the argument up-front and raises `ValueError` for negative, `NaN`,
+`inf`, or non-numeric values (including `bool`), so misconfigurations fail
+fast at wire-up time rather than silently denying every request later.
+
 ### MCP servers from the editor
 
 When an editor passes MCP server configurations in `session/new` or `session/load`, Aar starts those

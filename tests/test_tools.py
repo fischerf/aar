@@ -230,9 +230,63 @@ class TestToolExecution:
         executor = ToolExecutor(reg, config, SafetyConfig())
 
         tc = ToolCall(tool_name="slow", tool_call_id="tc_1", arguments={})
+        t_start = asyncio.get_event_loop().time()
         results = await executor.execute([tc])
+        elapsed = asyncio.get_event_loop().time() - t_start
+
+        # The timeout must fire at roughly ``command_timeout`` seconds —
+        # not let the full 100s sleep run to completion.
+        assert elapsed < 5, f"timeout did not actually bound runtime (took {elapsed:.2f}s)"
         assert results[0].is_error
+        # Stable machine-readable category prefix (see M4).
+        assert results[0].output.startswith("Error [timeout]:")
+        # Configured timeout value surfaces in the error message.
+        assert "1s" in results[0].output or "1.0" in results[0].output
         assert "timed out" in results[0].output.lower()
+        # duration_ms is recorded and reflects the actual (bounded) wait,
+        # not the handler's intended runtime.
+        assert results[0].duration_ms is not None
+        assert results[0].duration_ms < 5000
+
+    @pytest.mark.asyncio
+    async def test_execute_timeout_sync_handler(self):
+        """Sync (thread-offloaded) handlers must respect ``command_timeout`` too.
+
+        ``asyncio.wait_for(asyncio.to_thread(...))`` cannot interrupt the OS thread,
+        but it does return a TimeoutError to the coroutine — the error surfaces
+        to the caller on schedule even if the thread keeps running.
+        """
+        reg = ToolRegistry()
+
+        # NOTE: keep the sync sleep short. ``asyncio.to_thread`` cannot interrupt
+        # the underlying OS thread — if we sleep for minutes the test teardown
+        # hangs waiting for the default executor to drain.
+        def sync_slow() -> str:
+            import time
+
+            time.sleep(3)
+            return "done"
+
+        reg.add(
+            ToolSpec(
+                name="sync_slow",
+                description="sync slow",
+                handler=sync_slow,
+                input_schema={"type": "object", "properties": {}, "required": []},
+            )
+        )
+        config = ToolConfig(command_timeout=1)
+        executor = ToolExecutor(reg, config, SafetyConfig())
+
+        tc = ToolCall(tool_name="sync_slow", tool_call_id="tc_1", arguments={})
+        t_start = asyncio.get_event_loop().time()
+        results = await executor.execute([tc])
+        elapsed = asyncio.get_event_loop().time() - t_start
+
+        assert elapsed < 5, f"timeout did not bound sync handler (took {elapsed:.2f}s)"
+        assert results[0].is_error
+        assert results[0].output.startswith("Error [timeout]:")
+        assert "sync_slow" in results[0].output
 
     @pytest.mark.asyncio
     async def test_execute_sync_handler(self):
