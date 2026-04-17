@@ -8,7 +8,7 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent.core.guardrails import GuardrailsConfig
 
@@ -159,6 +159,14 @@ class SandboxConfig(BaseModel):
     windows: WindowsSandboxConfig = Field(default_factory=WindowsSandboxConfig)
     wsl: WslSandboxConfig = Field(default_factory=WslSandboxConfig)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_string(cls, data: Any) -> Any:
+        """Allow ``"sandbox": "local"`` as shorthand for ``{"mode": "local"}``."""
+        if isinstance(data, str):
+            return {"mode": data}
+        return data
+
 
 class SafetyConfig(BaseModel):
     read_only: bool = False
@@ -202,6 +210,7 @@ class SafetyConfig(BaseModel):
     allowed_paths: list[str] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     log_all_commands: bool = True
+    acp_approval_timeout: float = 0.0  # seconds the ACP client has to respond; 0 = wait indefinitely
 
 
 class TUIConfig(BaseModel):

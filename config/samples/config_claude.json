@@ -53,7 +53,8 @@
     "sandbox": {
       "mode": "local"
     },
-    "log_all_commands": true
+    "log_all_commands": true,
+    "acp_approval_timeout": 0.0
   },
   "tui": {
     "theme": "default",

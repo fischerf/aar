@@ -14,7 +14,7 @@ Usage (wired automatically by ``AarAcpAgent.prompt``)::
 
     from agent.transports.acp_permissions import make_acp_approval_callback
 
-    callback = make_acp_approval_callback(conn, session_id, timeout=60.0)
+    callback = make_acp_approval_callback(conn, session_id)
     aar_agent = AarAgent(config=cfg, approval_callback=callback)
 
 The ``conn`` object is the live ACP SDK connection supplied to
@@ -63,7 +63,7 @@ _OPTION_TO_RESULT: dict[str, ApprovalResult] = {
 def make_acp_approval_callback(
     conn: Any,
     session_id: str,
-    timeout: float = 60.0,
+    timeout: float = 0.0,
 ) -> ApprovalCallback:
     """Return an ``ApprovalCallback`` that routes approval requests to the ACP client.
 
@@ -82,7 +82,7 @@ def make_acp_approval_callback(
                     at module load time — the SDK is optional.
         session_id: The ACP session id for the current prompt.
         timeout:    Seconds to wait for a user response before auto-denying.
-                    Defaults to 60 seconds.
+                    ``0`` (default) means wait indefinitely.
 
     Returns:
         An async callable ``(spec, tc) -> ApprovalResult`` compatible with
@@ -155,7 +155,7 @@ def make_acp_approval_callback(
                     tool_call=acp_tool_call,
                     options=options,
                 ),
-                timeout=timeout,
+                timeout=timeout or None,
             )
         except asyncio.TimeoutError:
             logger.warning(

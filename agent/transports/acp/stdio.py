@@ -503,7 +503,9 @@ class AarAcpAgent:
         if self._conn is not None:
             from agent.transports.acp_permissions import make_acp_approval_callback
 
-            _approval_cb = make_acp_approval_callback(self._conn, session_id)
+            _approval_cb = make_acp_approval_callback(
+                self._conn, session_id, timeout=self._config.safety.acp_approval_timeout
+            )
         else:
             _approval_cb = self._default_approval
 
