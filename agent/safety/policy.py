@@ -107,8 +107,68 @@ class PolicyConfig(BaseModel):
     )
 
     # Logging
-    log_all_commands: bool = True
+    # Off by default: audit logging records full command strings, which frequently
+    # contain secrets (API keys, tokens, --password=…). Users who need an audit
+    # trail can opt in; output is still redacted via _redact_secrets.
+    log_all_commands: bool = False
     log_all_file_access: bool = False
+
+
+# Patterns for values that should be masked in audit logs. Each pattern captures
+# a key/prefix in group 1 and a secret-looking value in group 2.
+_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    # key=value / key:value  (key contains token/secret/pass/api_key/auth/bearer/...)
+    re.compile(
+        r"(?i)((?:api[_-]?key|secret|token|password|passwd|bearer|auth(?:orization)?)"
+        r"\s*[=:]\s*)(\S+)"
+    ),
+    # --password VALUE  /  --token VALUE
+    re.compile(r"(?i)(--(?:api[_-]?key|secret|token|password|passwd|bearer|auth)\s+)(\S+)"),
+    # Authorization: Bearer XYZ   (HTTP headers in curl -H etc.)
+    re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-]+)"),
+    # Long-ish hex/base64 blobs that look like credentials (>=24 chars of [A-Za-z0-9_-])
+    re.compile(r"\b([A-Za-z0-9_\-]{32,})\b"),
+]
+
+
+def _redact_secrets(command: str) -> str:
+    """Mask secret-looking values in *command* for safe audit logging."""
+    redacted = command
+    for i, pat in enumerate(_SECRET_PATTERNS):
+        if i < 3:
+            redacted = pat.sub(lambda m: f"{m.group(1)}***REDACTED***", redacted)
+        else:
+            # Standalone long tokens — replace the whole match
+            redacted = pat.sub("***REDACTED***", redacted)
+    return redacted
+
+
+def _collapse_posix_path(p: Any) -> str:
+    """Collapse ``.`` / ``..`` components in an absolute POSIX path."""
+    segments: list[str] = []
+    for part in p.parts[1:]:  # skip leading "/"
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(part)
+    return "/" + "/".join(segments) if segments else "/"
+
+
+def _collapse_windows_path(drive: str, p: Any) -> str:
+    """Collapse components of a Windows path with an already-lowercased *drive* prefix."""
+    segments: list[str] = []
+    for part in p.parts[1:]:  # skip drive+root (e.g. "C:\\")
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(part.replace("\\", ""))
+    return drive + "/" + "/".join(segments) if segments else drive + "/"
 
 
 class SafetyPolicy:
@@ -166,20 +226,43 @@ class SafetyPolicy:
     def _normalize_path(path: str) -> str:
         """Normalise *path* for policy comparison.
 
-        - Paths that are already absolute — Unix-style (``/etc/shadow``) or
-          Windows drive-rooted (``C:\\project\\file.py``) — are left as-is
-          with only their separators converted to ``/``.  Feeding them through
-          ``Path.resolve()`` on Windows would prepend the current drive letter
-          (``/etc/shadow`` → ``C:/etc/shadow``), which breaks patterns written
-          as ``/etc/**`` and the tests that use them.
-        - Truly relative paths (``"."``, ``"README.md"``, ``"src/app.py"``)
-          ARE resolved against the CWD so they can be matched against
-          whitelist patterns that contain the full absolute CWD
-          (e.g. ``C:/project/**``).
+        - Unix absolute (``/etc/shadow``): backslashes → forward slashes, then
+          collapse ``.``/``..`` components so tricks like ``/etc/../etc/passwd``
+          still match ``/etc/**``.
+        - Windows drive-rooted (``C:\\project\\file.py`` or ``C:/project/...``):
+          lowercase the drive letter for stable matching, collapse components.
+          We deliberately don't run these through ``Path.resolve()`` — on
+          Windows that would prepend the current drive to Unix paths
+          (``/etc/shadow`` → ``C:/etc/shadow``), breaking patterns like
+          ``/etc/**``.
+        - UNC paths (``\\\\server\\share\\file``): backslashes → forward
+          slashes; no resolution (resolving against CWD would be wrong).
+        - Truly relative paths (``"."``, ``"README.md"``, ``"src/app.py"``):
+          resolved against the CWD so whitelist patterns like ``C:/project/**``
+          can match.
         """
-        # Unix absolute (/…) or Windows drive-letter path (C:\… or C:/…)
-        if path.startswith("/") or (len(path) >= 2 and path[1] == ":"):
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        # UNC path (\\server\share\...) — absolute, don't resolve
+        if path.startswith("\\\\") or path.startswith("//"):
             return path.replace("\\", "/")
+
+        # Unix absolute (/…)
+        if path.startswith("/"):
+            try:
+                return _collapse_posix_path(PurePosixPath(path.replace("\\", "/")))
+            except Exception:
+                return path.replace("\\", "/")
+
+        # Windows drive-letter path (C:\… or C:/…)
+        if len(path) >= 2 and path[1] == ":":
+            try:
+                p = PureWindowsPath(path)
+                drive = p.drive[0].lower() + ":"  # "C:" / "c:" → "c:"
+                return _collapse_windows_path(drive, p)
+            except Exception:
+                return path.replace("\\", "/")
+
         # Relative path — resolve against CWD
         try:
             return str(Path(path).resolve()).replace("\\", "/")
@@ -232,23 +315,31 @@ class SafetyPolicy:
     def _check_command(self, command: str) -> PolicyDecision:
         """Check a shell command against command rules."""
         if self.config.log_all_commands:
-            logger.info("Command audit: %s", command)
+            logger.info("Command audit: %s", _redact_secrets(command))
 
         # Check explicit command rules first
         for pattern, decision in self._compiled_command_rules:
             if isinstance(pattern, re.Pattern):
                 if pattern.search(command):
-                    logger.info("Policy %s (command rule): %s", decision.value, command)
+                    logger.info(
+                        "Policy %s (command rule): %s", decision.value, _redact_secrets(command)
+                    )
                     return decision
             else:
                 if pattern in command:
-                    logger.info("Policy %s (command rule): %s", decision.value, command)
+                    logger.info(
+                        "Policy %s (command rule): %s", decision.value, _redact_secrets(command)
+                    )
                     return decision
 
         # Check default denied commands
         for denied in self.config.denied_commands:
             if denied in command:
-                logger.warning("Policy DENY (denied command): %s matches %s", command, denied)
+                logger.warning(
+                    "Policy DENY (denied command): %s matches %s",
+                    _redact_secrets(command),
+                    denied,
+                )
                 return PolicyDecision.DENY
 
         return PolicyDecision.ALLOW

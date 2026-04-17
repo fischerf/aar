@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,11 +24,8 @@ from agent.transports.acp import (
     AcpTransport,
     AgentManifest,
     MessagePart,
-    RunCancelledEvent,
     RunCompletedEvent,
     RunCreatedEvent,
-    RunFailedEvent,
-    RunInProgressEvent,
     RunMode,
     RunStatus,
     _collect_output,
@@ -434,11 +431,9 @@ class TestAarAcpAgentEventStreaming:
 
         # Just verify session_update is called; full integration needs provider mock
         # that emits tool events — here we test that the handlers are wired up
-        r = await sdk_agent.new_session()
+        await sdk_agent.new_session()
         # The actual event wiring is tested by checking the on_event callback directly
         from acp.schema import ToolCallProgress, ToolCallStart
-
-        from agent.transports.acp import _extract_text
 
         ts = ToolCallStart(
             title="bash", tool_call_id="tc1", status="in_progress", session_update="tool_call"
@@ -486,8 +481,6 @@ class TestAarAcpAgentCapabilities:
 class TestAarAcpAgentCloseSession:
     @pytest.mark.asyncio
     async def test_close_removes_session(self, tmp_path):
-        from agent.core.session import Session
-
         config = _make_config()
         config = config.model_copy(update={"session_dir": tmp_path})
         agent = AarAcpAgent(config=config)
@@ -548,6 +541,125 @@ class TestAarAcpAgentCancel:
         await agent.cancel(session_id="no-such-session")
 
 
+class TestAarAcpAgentConcurrency:
+    """C3+C4: fire-and-forget tracking and per-session serialization."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_tracks_task(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        async def _noop() -> None:
+            await asyncio.sleep(0)
+
+        task = agent._spawn(_noop(), name="unit-test-task")
+        assert task in agent._background_tasks
+        await task
+        # Done-callback runs on next tick
+        await asyncio.sleep(0)
+        assert task not in agent._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_spawn_exceptions_logged_and_cleared(self, tmp_path, caplog):
+        import logging
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        async def _boom() -> None:
+            raise RuntimeError("boom")
+
+        with caplog.at_level(logging.WARNING, logger="agent.transports.acp"):
+            task = agent._spawn(_boom(), name="boom-task")
+            # Await via gather so we don't re-raise
+            await asyncio.gather(task, return_exceptions=True)
+            # Let the done-callback fire
+            await asyncio.sleep(0)
+
+        assert task not in agent._background_tasks
+        assert any("boom" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_drains_background_tasks(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        done = asyncio.Event()
+
+        async def _slow() -> None:
+            await asyncio.sleep(0.01)
+            done.set()
+
+        agent._spawn(_slow(), name="slow-task")
+        await agent.shutdown()
+        assert done.is_set()
+        assert not agent._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_concurrent_prompt_same_session_rejected(self, tmp_path):
+        """A second prompt while the first is in flight must raise."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        # Simulate an in-flight prompt by parking a task in _run_tasks
+        gate = asyncio.Event()
+
+        async def _parked() -> None:
+            await gate.wait()
+
+        fake_task = asyncio.create_task(_parked())
+        agent._run_tasks[sid] = fake_task
+
+        with pytest.raises(RuntimeError, match="already in flight"):
+            await agent.prompt(prompt=[{"text": "hello"}], session_id=sid)
+
+        gate.set()
+        await fake_task
+
+    @pytest.mark.asyncio
+    async def test_close_session_cancels_in_flight_prompt(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        started = asyncio.Event()
+
+        async def _parked() -> None:
+            started.set()
+            await asyncio.sleep(30)
+
+        task = asyncio.create_task(_parked())
+        agent._run_tasks[sid] = task
+        agent._cancel_events[sid] = asyncio.Event()
+        await started.wait()
+
+        await agent.close_session(session_id=sid)
+
+        assert task.done()
+        assert task.cancelled() or task.exception() is not None
+        assert sid not in agent._run_tasks
+        assert sid not in agent._cancel_events
+
+    @pytest.mark.asyncio
+    async def test_session_lock_is_same_object_per_id(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        lock_a = agent._session_lock("abc123")
+        lock_b = agent._session_lock("abc123")
+        lock_c = agent._session_lock("other-sid")
+        assert lock_a is lock_b
+        assert lock_a is not lock_c
+
+
 class TestAarAcpAgentCwd:
     @pytest.mark.asyncio
     async def test_new_session_stores_cwd(self, tmp_path):
@@ -575,8 +687,6 @@ class TestAarAcpAgentCwd:
 
     @pytest.mark.asyncio
     async def test_list_sessions_includes_cwd(self, tmp_path):
-        from agent.memory.session_store import SessionStore
-
         config = _make_config()
         config = config.model_copy(update={"session_dir": tmp_path})
         agent = AarAcpAgent(config=config)
@@ -1136,6 +1246,303 @@ class TestCancellationStopReason:
 
     def test_map_stop_reason_timed_out_is_end_turn(self):
         assert _map_stop_reason(AgentState.TIMED_OUT) == "end_turn"
+
+
+# ---------------------------------------------------------------------------
+# ACP approval bridge tests
+# ---------------------------------------------------------------------------
+
+
+class TestAcpApprovalBridge:
+    """Tests for make_acp_approval_callback (agent.transports.acp_permissions).
+
+    Covers every outcome path: allow-once, allow-always, deny option, non-allowed
+    outcome, timeout, arbitrary exception, no-connection fallback, unknown option_id,
+    and tool_call_id passthrough / auto-assignment.
+    """
+
+    # ------------------------------------------------------------------
+    # Fixtures / helpers
+    # ------------------------------------------------------------------
+
+    def _spec(self, side_effects=None):
+        from agent.tools.schema import SideEffect, ToolSpec
+
+        return ToolSpec(
+            name="bash",
+            description="Run shell commands",
+            side_effects=side_effects or [SideEffect.EXECUTE],
+        )
+
+    def _tc(self, tool_call_id: str = "tc-1"):
+        from agent.core.events import ToolCall
+
+        return ToolCall(tool_name="bash", tool_call_id=tool_call_id, arguments={"cmd": "ls"})
+
+    def _allowed_response(self, option_id: str):
+        """Mock response whose .outcome passes isinstance(x, AllowedOutcome)."""
+        from acp.schema import AllowedOutcome
+
+        resp = MagicMock()
+        resp.outcome = MagicMock(spec=AllowedOutcome)
+        resp.outcome.option_id = option_id
+        return resp
+
+    def _rejected_response(self):
+        """Mock response whose .outcome is NOT an AllowedOutcome instance."""
+        resp = MagicMock()
+        resp.outcome = MagicMock()  # plain MagicMock — fails isinstance(x, AllowedOutcome)
+        return resp
+
+    # ------------------------------------------------------------------
+    # Happy-path outcome mapping
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_allow_once_returns_approved(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("allow_once")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_allow_always_returns_approved_always(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("allow_always")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.APPROVED_ALWAYS
+
+    @pytest.mark.asyncio
+    async def test_deny_option_id_returns_denied(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("deny")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_unknown_option_id_returns_denied(self):
+        """An unrecognised option_id in an AllowedOutcome is treated as deny."""
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("totally_unknown")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_non_allowed_outcome_returns_denied(self):
+        """A RejectedOutcome (or any non-AllowedOutcome) should deny the call."""
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._rejected_response()
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    # ------------------------------------------------------------------
+    # Error / timeout paths
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_denied(self):
+        """A timed-out permission request must auto-deny rather than crash."""
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.side_effect = asyncio.TimeoutError()
+
+        cb = make_acp_approval_callback(conn, "sess-1", timeout=60.0)
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_denied(self):
+        """Any other exception from request_permission must auto-deny."""
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.side_effect = RuntimeError("connection dropped")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    # ------------------------------------------------------------------
+    # No-connection fallback
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_no_connection_returns_denied(self):
+        """When conn=None the factory returns a safe deny-all callback."""
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        cb = make_acp_approval_callback(None, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_no_connection_never_calls_request_permission(self):
+        """The deny-all fallback must not attempt any network calls."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        cb = make_acp_approval_callback(None, "sess-1")
+        await cb(self._spec(), self._tc())
+
+        conn.request_permission.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # tool_call_id passthrough
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_existing_tool_call_id_passed_to_request_permission(self):
+        """Callback must forward tc.tool_call_id so Zed links the ToolCallStart."""
+        from acp.schema import ToolCallUpdate
+
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("allow_once")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        await cb(self._spec(), self._tc(tool_call_id="my-stable-id"))
+
+        _, kwargs = conn.request_permission.call_args
+        tool_call: ToolCallUpdate = kwargs["tool_call"]
+        assert isinstance(tool_call, ToolCallUpdate)
+        assert tool_call.tool_call_id == "my-stable-id"
+
+    @pytest.mark.asyncio
+    async def test_missing_tool_call_id_auto_assigned(self):
+        """A ToolCall with no id gets one assigned and the id is stored back."""
+        from acp.schema import ToolCallUpdate
+
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("allow_once")
+
+        tc = self._tc(tool_call_id="")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        await cb(self._spec(), tc)
+
+        assert tc.tool_call_id, "a non-empty id must be generated"
+        _, kwargs = conn.request_permission.call_args
+        tool_call: ToolCallUpdate = kwargs["tool_call"]
+        assert isinstance(tool_call, ToolCallUpdate)
+        # id on the ToolCallUpdate must match what was stored back on tc
+        assert tool_call.tool_call_id == tc.tool_call_id
+
+    # ------------------------------------------------------------------
+    # Side-effect → ToolKind forwarding
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_write_side_effect_passes_edit_kind(self):
+        """Write-only tools should be tagged 'edit' so Zed shows the right icon."""
+        from acp.schema import ToolCallUpdate
+
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("allow_once")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        await cb(self._spec(side_effects=[SideEffect.WRITE]), self._tc())
+
+        _, kwargs = conn.request_permission.call_args
+        tool_call: ToolCallUpdate = kwargs["tool_call"]
+        assert tool_call.kind == "edit"
+
+    @pytest.mark.asyncio
+    async def test_execute_side_effect_passes_execute_kind(self):
+        """Execute tools should be tagged 'execute'."""
+        from acp.schema import ToolCallUpdate
+
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("allow_once")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        await cb(self._spec(side_effects=[SideEffect.EXECUTE]), self._tc())
+
+        _, kwargs = conn.request_permission.call_args
+        tool_call: ToolCallUpdate = kwargs["tool_call"]
+        assert tool_call.kind == "execute"
+
+    # ------------------------------------------------------------------
+    # M1: timeout validation
+    # ------------------------------------------------------------------
+
+    def test_negative_timeout_rejected(self):
+        """A negative timeout would deny every request silently — fail fast."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="timeout"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=-1)
+
+    def test_nan_timeout_rejected(self):
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="finite"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=float("nan"))
+
+    def test_inf_timeout_rejected(self):
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="finite"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=float("inf"))
+
+    def test_bool_timeout_rejected(self):
+        """bool is a subclass of int; reject it to avoid `True == 1` surprises."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        with pytest.raises(ValueError, match="number"):
+            make_acp_approval_callback(AsyncMock(), "sess-1", timeout=True)  # type: ignore[arg-type]
+
+    def test_zero_timeout_accepted_as_wait_forever(self):
+        """0 is the documented 'wait indefinitely' sentinel — must not raise."""
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        cb = make_acp_approval_callback(AsyncMock(), "sess-1", timeout=0)
+        assert callable(cb)
 
 
 # ---------------------------------------------------------------------------

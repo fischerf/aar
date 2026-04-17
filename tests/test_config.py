@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
 
@@ -26,6 +27,15 @@ class TestDefaultSystemPrompt:
     def test_contains_assistant_preamble(self):
         prompt = _default_system_prompt()
         assert "You are a helpful assistant" in prompt
+
+    def test_contains_shell_line(self):
+        prompt = _default_system_prompt()
+        assert "Shell:" in prompt
+
+    def test_no_git_bash_mention(self):
+        # Git Bash is no longer referenced; WSL is the Windows shell
+        prompt = _default_system_prompt()
+        assert "Git Bash" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -113,25 +123,6 @@ class TestBuildSystemPrompt:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# _default_system_prompt — shell_path override
-# ---------------------------------------------------------------------------
-
-
-class TestDefaultSystemPromptShellPath:
-    def test_custom_shell_path_appears_in_prompt(self):
-        prompt = _default_system_prompt(shell_path="/usr/bin/zsh")
-        assert "Shell: /usr/bin/zsh" in prompt
-
-    def test_custom_shell_path_suppresses_default_shell_lines(self):
-        prompt = _default_system_prompt(shell_path="/usr/bin/zsh")
-        assert "Git Bash" not in prompt
-        assert "Shell: /bin/sh" not in prompt
-
-    def test_empty_shell_path_uses_default(self):
-        prompt = _default_system_prompt(shell_path="")
-        # Should contain one of the platform defaults
-        assert "Shell:" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -171,22 +162,18 @@ class TestBuildSystemPromptProjectRulesDir:
 
 
 # ---------------------------------------------------------------------------
-# AgentConfig — shell_path and project_rules_dir integration
+# AgentConfig — sandbox config and project_rules_dir integration
 # ---------------------------------------------------------------------------
 
 
 class TestAgentConfigNewFields:
-    def test_shell_path_default_is_empty(self):
+    def test_sandbox_mode_default_is_local(self):
         config = AgentConfig()
-        assert config.shell_path == ""
+        assert config.safety.sandbox.mode == "local"
 
     def test_project_rules_dir_default_is_dot_agent(self):
         config = AgentConfig()
         assert config.project_rules_dir == Path(".agent")
-
-    def test_shell_path_in_system_prompt(self):
-        config = AgentConfig(shell_path="/usr/bin/zsh")
-        assert "Shell: /usr/bin/zsh" in config.system_prompt
 
     def test_custom_project_rules_dir_used_in_prompt(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -198,11 +185,8 @@ class TestAgentConfigNewFields:
         config = AgentConfig(project_rules_dir=custom_dir)
         assert "my custom rule" in config.system_prompt
 
-    def test_explicit_system_prompt_still_overrides(self):
-        config = AgentConfig(
-            shell_path="/bin/zsh",
-            system_prompt="explicit override",
-        )
+    def test_explicit_system_prompt_overrides(self):
+        config = AgentConfig(system_prompt="explicit override")
         assert config.system_prompt == "explicit override"
 
     def test_session_dir_default_unchanged(self):
@@ -212,13 +196,13 @@ class TestAgentConfigNewFields:
     def test_load_config_with_new_fields(self, tmp_path):
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
-            '{"shell_path": "/bin/zsh", "project_rules_dir": ".myconfig"}',
+            '{"safety": {"sandbox": {"mode": "linux"}}, "project_rules_dir": ".myconfig"}',
             encoding="utf-8",
         )
         from agent.core.config import load_config
 
         config = load_config(cfg_file)
-        assert config.shell_path == "/bin/zsh"
+        assert config.safety.sandbox.mode == "linux"
         assert config.project_rules_dir == Path(".myconfig")
 
 
@@ -236,3 +220,23 @@ class TestAgentConfigSystemPrompt:
         config = AgentConfig(system_prompt="custom prompt only")
         assert config.system_prompt == "custom prompt only"
         assert "Operating system:" not in config.system_prompt
+
+
+class TestAgentConfigTimeoutValidation:
+    def test_acp_approval_timeout_exceeds_loop_timeout_is_valid(self):
+        # No error at config level — only a warning at ACP transport startup
+        cfg = AgentConfig(timeout=10.0, safety={"acp_approval_timeout": 30.0})
+        assert cfg.safety.acp_approval_timeout == 30.0
+
+    def test_acp_approval_timeout_equals_loop_timeout_is_ok(self):
+        cfg = AgentConfig(timeout=30.0, safety={"acp_approval_timeout": 30.0})
+        assert cfg.safety.acp_approval_timeout == 30.0
+
+    def test_loop_timeout_zero_is_valid(self):
+        cfg = AgentConfig(timeout=0.0, safety={"acp_approval_timeout": 999.0})
+        assert cfg.safety.acp_approval_timeout == 999.0
+
+    def test_acp_approval_timeout_zero_is_valid(self):
+        # Default config — conflict is warned at ACP transport startup only
+        cfg = AgentConfig(timeout=5.0, safety={"acp_approval_timeout": 0.0})
+        assert cfg.timeout == 5.0

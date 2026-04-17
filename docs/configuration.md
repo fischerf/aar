@@ -6,7 +6,7 @@ Aar is configured via `AgentConfig` — either in code or through a JSON config 
 
 ```python
 from agent import AgentConfig, GuardrailsConfig, ProviderConfig, SafetyConfig, ToolConfig
-from agent.core.config import TUIConfig
+from agent.core.config import SandboxConfig, TUIConfig
 
 config = AgentConfig(
     provider=ProviderConfig(
@@ -20,7 +20,7 @@ config = AgentConfig(
     ),
     tools=ToolConfig(
         enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
-        command_timeout=30,                        # seconds
+        command_timeout=30,                        # per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
     ),
     safety=SafetyConfig(
@@ -29,7 +29,10 @@ config = AgentConfig(
         require_approval_for_execute=False,        # ask before every shell command
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         allowed_paths=[],                          # whitelist (empty = allow all non-denied)
-        sandbox="local",                           # "local" | "subprocess"
+        sandbox=SandboxConfig(                     # see docs/safety.md for all modes and per-mode options
+            mode="local",                          # "local" | "subprocess" | "workspace" | "windows" | "wsl" | "auto"
+        ),
+        acp_approval_timeout=0.0,                  # seconds the ACP client has to respond to a permission request; 0.0 = wait indefinitely
     ),
     guardrails=GuardrailsConfig(
         max_tokens_recoveries=2,                   # retry after output truncation (0 = disabled)
@@ -39,7 +42,7 @@ config = AgentConfig(
     ),
     max_steps=50,
     max_retries=3,                                 # provider request retry attempts
-    timeout=300.0,                                 # seconds
+    timeout=0.0,                                   # wall-clock limit in seconds for the whole run; 0.0 = no limit
     streaming=False,                               # use token-level streaming when supported
     context_window=0,                              # model context limit in tokens; 0 = no management
     context_strategy="sliding_window",             # "sliding_window" | "none"
@@ -53,7 +56,6 @@ config = AgentConfig(
     token_warning_threshold=0.8,                   # TUI warning at 80% of budget
     cost_warning_threshold=0.8,                    # TUI warning at 80% of cost limit
     session_dir=".agent/sessions",
-    shell_path="",                                 # custom shell binary (see below)
     project_rules_dir=".agent",                    # project rules folder (see below)
     log_level="WARNING",                           # DEBUG | INFO | WARNING | ERROR | CRITICAL
     log_file=None,                                 # opt-in file logging path (append mode)
@@ -197,7 +199,7 @@ You can cap how many tokens or how much estimated cost a single agent run is all
 
 ### How token tracking works
 
-Token counts are read from the `ProviderMeta` event that fires after every provider call — for both streaming and non-streaming responses. In streaming mode the final chunk from the provider carries the usage data; `_consume_stream()` captures it and attaches it to the response before the event is emitted. See [Tokens, costs, and budgets](tokens.md) for the full pipeline, per-provider details, and how each transport displays the counts.
+Token counts are read from the `ProviderMeta` event that fires after every provider call — for both streaming and non-streaming responses. In streaming mode the final chunk from the provider carries the usage data; `_consume_stream()` (in `agent/core/provider_runner.py`) captures it and attaches it to the response before the event is emitted. See [Tokens, costs, and budgets](tokens.md) for the full pipeline, per-provider details, and how each transport displays the counts.
 
 ### How cost estimation works
 
@@ -273,15 +275,17 @@ The guardrails are deliberately minimal. Agent behavior (planning, persistence, 
 
 ## Configurable system prompt
 
-By default, the system prompt is assembled automatically from up to three layers:
+By default, the system prompt is assembled automatically from up to five layers (all optional except Base):
 
-| Layer | Source | Purpose |
-|-------|--------|---------|
-| **Base** | built-in | Runtime facts — OS, working directory, shell |
-| **Global rules** | `~/.aar/rules.md` | Personal preferences that apply to all projects |
-| **Project rules** | `<project_rules_dir>/rules.md` | Project-specific instructions (checked into git) |
+| # | Layer | Source | Purpose |
+|---|-------|--------|---------|
+| 1 | **Base** | built-in | Runtime facts — OS, working directory, shell |
+| 2 | **Global rules** | `~/.aar/rules.md` | Personal preferences that apply to all projects |
+| 3 | **Global drop-ins** | `~/.aar/rules.d/*.md` (sorted) | Environment-specific additions; drop files in without editing the main file |
+| 4 | **Project rules** | `<project_rules_dir>/rules.md` | Project-specific instructions (checked into git) |
+| 5 | **Project drop-ins** | `<project_rules_dir>/rules.d/*.md` (sorted) | Per-contributor or per-machine overrides; can be gitignored |
 
-Each layer is optional. If no rules files exist, only the base prompt is used. When present, the layers are concatenated in order, separated by `---`.
+If no rules files exist, only the base prompt is used. When present, the layers are concatenated in order, separated by `---`.
 
 **Global rules** — create `~/.aar/rules.md` for preferences that follow you across projects:
 
@@ -292,6 +296,8 @@ Each layer is optional. If no rules files exist, only the base prompt is used. W
 - Use ruff for formatting.
 ```
 
+**Global drop-ins** — place any number of `.md` files in `~/.aar/rules.d/` and they are appended after `rules.md`, sorted by filename. Useful for environment-specific rules (e.g. `10-work-proxy.md`, `20-local-models.md`) without touching the main file.
+
 **Project rules** — create `<project_rules_dir>/rules.md` (default `.agent/rules.md`) for instructions specific to the current repo:
 
 ```markdown
@@ -300,35 +306,11 @@ Each layer is optional. If no rules files exist, only the base prompt is used. W
 - Follow the existing service pattern in app/services/.
 ```
 
+**Project drop-ins** — place `.md` files in `<project_rules_dir>/rules.d/` for per-contributor or per-machine additions. Add `rules.d/` to `.gitignore` if you don't want them committed, or commit them for shared team overrides.
+
+Run `aar init` to create the skeleton files and directories (`rules.md`, `rules.d/`) for both global and project layers.
+
 **Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
-
-## Configurable shell
-
-By default, Aar uses Git Bash (`bash -c`) on Windows and the system shell (`/bin/sh`) on Unix for tool execution. Override this with `shell_path`:
-
-**Via config file:**
-
-```json
-{
-  "shell_path": "/usr/bin/zsh"
-}
-```
-
-**Via `AgentConfig` in code:**
-
-```python
-config = AgentConfig(shell_path="/usr/bin/zsh")
-```
-
-On Windows, common values include:
-
-| Shell | Typical path |
-|-------|-------------|
-| Git Bash | `bash` (default — found via PATH) |
-| WSL bash | `wsl.exe` (note: uses `-c` flag) |
-| PowerShell | Not supported (requires `-Command`, not `-c`) |
-
-When `shell_path` is set, it is used everywhere: the built-in `bash` tool, sandbox execution, and the system prompt sent to the model.
 
 ## Configurable project rules directory
 

@@ -1,12 +1,33 @@
-# Aar — Adaptive Action & Reasoning Agent
+<div align="center">
+<pre>
+ █████╗  █████╗ ██████╗
+██╔══██╗██╔══██╗██╔══██╗
+███████║███████║██████╔╝
+██╔══██║██╔══██║██╔══██╗
+██║  ██║██║  ██║██║  ██║
+╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+</pre>
+
+**Adaptive Action & Reasoning Agent**
 
 [![Website](https://img.shields.io/badge/website-fischerf.github.io%2Faar-blue?style=flat-square)](https://fischerf.github.io/aar/)
 
+</div>
+
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
 
-<div style="text-align: center; margin: 30px 0;">
-  <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="Aar TUI Demo" style="width: 90%; max-width: 900px; height: auto; border-radius: 8px;" />
-</div>
+<table width="100%">
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — TUI" width="100%" />
+      <br/><sub><b>AAR Agent with Textual interface (TUI)</b></sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="Zed Editor — running AAR Agent via ACP" width="100%" />
+      <br/><sub><b>Zed Editor — running AAR Agent via ACP</b></sub>
+    </td>
+  </tr>
+</table>
 
 ## Design goals
 
@@ -20,7 +41,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
 
-### Transport modes
+### Operating modes
 
 | Command | Use case | Description |
 |---------|----------|-------------|
@@ -82,7 +103,7 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama
 # Interactive chat (asks before write/execute, file tools restricted to cwd)
 > aar chat --provider ollama --model llama3
 
-# Disable the workspace sandbox for full access and load config from a JSON file
+# Lift the file-tool cwd restriction and load config from a JSON file
 > aar chat --no-require-approval --no-restrict-to-cwd --config aar.json
 
 # One-shot task
@@ -150,24 +171,23 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ### Windows — `bash` tool
 
-The `bash` built-in tool requires a Unix-compatible shell. **Either** is sufficient:
+The `bash` built-in tool requires **WSL** (Windows Subsystem for Linux). Install it once:
 
-| Option | Install | Notes |
-|--------|---------|-------|
-| **Git for Windows** (Git Bash) | [git-scm.com](https://git-scm.com/download/win) | Lightweight; adds `bash` to `PATH` |
-| **WSL** | `wsl --install` in an admin terminal | Full Linux environment |
-
-> **If both are installed**, WSL's `bash.exe` is found first by Windows `CreateProcess`, so WSL's bash will run. Keep this in mind for file path references.
-
-```
-Neither is required if you do not enable the `bash` built-in tool.
+```bash
+wsl --install
 ```
 
+> Not required if you do not enable the `bash` built-in tool.
+
+For strong process isolation, use the built-in `wsl` sandbox mode — it routes all agent shell
+commands through a dedicated, disposable Alpine distro instead of your main WSL environment:
+
+```bash
+aar sandbox setup   # one-time setup (reads ~/.aar/config.json for distro name and packages)
+aar sandbox status  # verify
 ```
-"NOTE: On Windows with WSL, 'python' in bash may resolve to WSL's Python (a separate env). "
-"To install packages that will be visible to bash-executed scripts, use the pip_install tool "
-"or run: bash('python -m pip install <package>'). "
-```
+
+See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) for full details.
 
 ## Documentation
 

@@ -4,7 +4,7 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 
 ## Principles
 
-1. **Thin core loop** — the main execution path (`loop.py`) is under 80 lines. It does exactly three things: call the provider, execute tool calls, and append events to the session.
+1. **Thin core loop** — the main execution path (`loop.py`) is a single coroutine focused on control flow only. Helpers for provider requests, retries, event emission, and budget accounting live in sibling modules (`provider_runner.py`, `loop_helpers.py`). The loop does exactly three things: call the provider, execute tool calls, and append events to the session.
 2. **Typed event model** — every interaction (messages, tool calls, results, metadata) is a Pydantic model. Events are serializable, inspectable, and carry timing data.
 3. **Provider-agnostic** — the agent loop works with any provider that implements the `Provider` ABC. Swapping between Anthropic, OpenAI, Ollama, or a generic endpoint requires changing one config field.
 4. **Safe by default** — path restrictions, command deny-lists, and approval gates are built in and always active. Interactive modes enable a workspace sandbox by default.
@@ -14,26 +14,82 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 
 ```
 agent/
-├── core/           # The heart: loop, agent, events, session, config, tokens, multimodal, logging, guardrails
-├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
-├── tools/          # Tool registry, schema, execution engine
-├── safety/         # Policy engine, permission manager, sandboxes
-├── memory/         # Session persistence (JSONL)
-├── extensions/     # MCP bridge, observability
-└── transports/     # CLI, TUI, web, event stream
-    ├── themes/     # Theme models, built-in themes, registry
-    ├── tui_utils/  # Shared formatting helpers for TUI transports
-    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
+├── core/                     # The heart
+│   ├── agent.py              # Agent class — orchestrator
+│   ├── loop.py               # run_loop() — control flow only
+│   ├── provider_runner.py    # request + retry + streaming
+│   ├── loop_helpers.py       # event emit, budget accounting, parse_stop
+│   ├── guardrails.py         # LoopGuardrails, GuardrailsConfig
+│   ├── events.py             # Pydantic event models
+│   ├── session.py            # event history + to_messages()
+│   ├── config.py             # AgentConfig schema
+│   ├── state.py              # AgentState enum
+│   ├── tokens.py             # token budget + cost tracking
+│   ├── multimodal.py         # multimodal content helpers
+│   └── logging.py            # structured audit logging
+│
+├── providers/                # LLM API adapters
+│   ├── base.py               # Provider ABC + ProviderResponse
+│   ├── anthropic.py          # tools, streaming, extended thinking
+│   ├── openai.py             # tools, streaming, Azure / Together via base_url
+│   ├── ollama.py             # tools, DeepSeek-r1 reasoning extraction
+│   └── generic.py            # any OpenAI-compatible endpoint
+│
+├── tools/                    # Tool registry and execution
+│   ├── registry.py           # ToolRegistry, ToolSpec
+│   ├── execution.py          # ToolExecutor → policy → sandbox
+│   ├── schema.py             # JSON schema helpers
+│   └── builtin/
+│       ├── filesystem.py     # read_file, write_file, edit_file, list_directory
+│       └── shell.py          # bash
+│
+├── safety/                   # Policy engine, permissions, sandboxes
+│   ├── policy.py             # SafetyPolicy  ALLOW / DENY / ASK
+│   ├── permissions.py        # ApprovalCallback, APPROVED_ALWAYS cache
+│   ├── sandbox.py            # Local / Linux / Windows / WSL sandboxes
+│   └── wsl_manager.py        # WSL2 distro lifecycle management
+│
+├── memory/
+│   └── session_store.py      # JSONL event persistence + compaction
+│
+├── extensions/
+│   ├── mcp.py                # MCP bridge (stdio + HTTP transports)
+│   └── observability.py      # session_metrics() — reads event history only
+│
+└── transports/               # Thin I/O adapters — no business logic
+    ├── cli.py                # Typer CLI (chat, run, tui, serve, acp)
+    ├── tui.py                # Rich inline TUI
+    ├── tui_fixed.py          # Textual full-screen TUI
+    ├── web.py                # ASGI web server + SSE streaming
+    ├── stream.py             # EventStream — cross-request pub/sub
+    ├── keybinds.py           # keyboard shortcuts for fixed TUI
+    ├── acp_permissions.py    # ACP approval callback
+    ├── acp/                  # ACP transport package
+    │   ├── common.py         # shared types + helpers
+    │   ├── http.py           # HTTP / SSE server (REST clients)
+    │   └── stdio.py          # SDK stdio transport (Zed)
+    ├── themes/
+    │   ├── models.py         # ThemeModel, ColorScheme
+    │   └── builtin.py        # built-in themes
+    ├── tui_utils/
+    │   └── formatting.py     # shared Rich formatting helpers
+    └── tui_widgets/          # Textual widget classes
+        ├── bars.py
+        ├── blocks.py
+        ├── chat_body.py
+        ├── input.py
+        ├── log_viewer.py
+        └── thinking_panel.py
 ```
 
 ## Core loop
 
-The agent loop lives in `agent/core/loop.py`. It runs until the provider signals completion, a step limit is reached, a timeout fires, or cancellation is requested.
+The agent loop lives in `agent/core/loop.py`. It runs until the provider signals completion, a step limit is reached, a timeout fires, or cancellation is requested. `timeout=0.0` (the default) disables the wall-clock check.
 
 ```
 while not done and step < max_steps:
     if cancel_event.is_set(): break
-    if elapsed > timeout: break
+    if timeout > 0.0 and elapsed > timeout: break
 
     # streaming path (streaming: true)
     async for delta in provider.stream(messages, tools, system):
@@ -63,7 +119,7 @@ while not done and step < max_steps:
 
 **Event emission order matters:** `ToolCall` events are emitted *before* the `AssistantMessage` in the same step. This allows `session.to_messages()` to bundle `tool_use` blocks into the assistant message for the next provider call, matching the Anthropic/OpenAI message format.
 
-**Token counts** arrive via the `ProviderMeta` event in both paths. For streaming responses, `_consume_stream()` captures the usage data from the provider's final done-chunk and attaches it to the `ProviderResponse` before the event is emitted. This means the counts are always available on the same `ProviderMeta` event regardless of whether streaming is enabled. See [Tokens, costs, and budgets](tokens.md) for the full pipeline.
+**Token counts** arrive via the `ProviderMeta` event in both paths. For streaming responses, `_consume_stream()` in `agent/core/provider_runner.py` captures the usage data from the provider's final done-chunk and attaches it to the `ProviderResponse` before the event is emitted. This means the counts are always available on the same `ProviderMeta` event regardless of whether streaming is enabled. See [Tokens, costs, and budgets](tokens.md) for the full pipeline.
 
 ### Runtime guardrails
 
@@ -175,6 +231,28 @@ ToolCall → SafetyPolicy.check_tool() → ALLOW → sandbox.run() → ToolResul
 
 The executor wraps results with timing (`duration_ms`) and enforces output truncation (`max_output_chars`).
 
+#### Error-result format
+
+Every error path returns a `ToolResult` whose `output` starts with a stable
+machine-readable category tag:
+
+```
+Error [<category>]: <human-readable message>
+```
+
+| Category | When it fires |
+|---|---|
+| `unknown_tool` | Tool name not found in the registry |
+| `no_handler` | Tool registered without a callable handler |
+| `invalid_arguments` | Arguments fail JSON-schema validation |
+| `blocked` | Safety policy denied the call (`PolicyDecision.DENY`) |
+| `denied` | Human declined an approval-gated call |
+| `timeout` | Handler exceeded `ToolConfig.command_timeout` |
+| `exception` | Handler raised an unhandled exception |
+
+Clients (ACP, TUI, tests) should pattern-match on the bracketed category
+rather than on the free-form message text.
+
 ## Safety
 
 See [`docs/safety.md`](safety.md) for the full safety reference.
@@ -196,14 +274,16 @@ This works because `allowed_paths` restricts file tools but not bash (which can 
 
 ## Sandboxing
 
-Two sandbox implementations:
+Sandbox implementations:
 
 | Sandbox | How it works |
 |---------|-------------|
 | `LocalSandbox` | Direct `asyncio.create_subprocess_exec` — no isolation |
-| `SubprocessSandbox` | Adds `ulimit` memory limits, restricted environment variables, timeout enforcement |
+| `LinuxSandbox` | Landlock LSM restricts writes to workspace; `ulimit -v` memory cap; restricted env |
+| `WindowsSubprocessSandbox` | Windows Job Object (memory/process caps) + Low Integrity Level |
+| `WslDistroSandbox` | Runs commands inside a dedicated WSL2 distro (`wsl -d <distro> -- sh -c <cmd>`) |
 
-The sandbox is selected by `SafetyConfig.sandbox` (`"local"` or `"subprocess"`). Both return stdout+stderr as a string, capped at `ToolConfig.max_output_chars`.
+The sandbox is selected by `SafetyConfig.sandbox.mode` (`"local"`, `"linux"`, `"windows"`, `"wsl"`, or `"auto"`). All sandboxes return stdout+stderr as a string, capped at `ToolConfig.max_output_chars`. See [Safety](safety.md) for the full mode reference.
 
 ## Event model
 

@@ -117,6 +117,29 @@ class Provider(ABC):
         tools: list[dict[str, Any]] | None = None,
         system: str = "",
     ) -> AsyncIterator[StreamDelta]:
-        """Stream response deltas. Default falls back to complete()."""
+        """Stream response deltas.
+
+        Default fallback for providers that don't implement real streaming:
+        calls ``complete()`` and replays the full response as a short sequence
+        of deltas so the consumer sees text, tool calls, reasoning and the
+        terminal ``done=True``/``meta`` just like a native stream would emit.
+        """
         response = await self.complete(messages, tools, system)
-        yield StreamDelta(text=response.content, done=True)
+
+        if response.content:
+            yield StreamDelta(text=response.content)
+
+        for block in response.reasoning:
+            if block.content:
+                yield StreamDelta(reasoning_delta=block.content)
+
+        for tc in response.tool_calls:
+            yield StreamDelta(
+                tool_call_delta={
+                    "tool_name": tc.tool_name,
+                    "tool_call_id": tc.tool_call_id,
+                    "arguments": tc.arguments,
+                }
+            )
+
+        yield StreamDelta(done=True, meta=response.meta)

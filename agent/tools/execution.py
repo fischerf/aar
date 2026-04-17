@@ -5,13 +5,21 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
+import sys
 import time
 
 from agent.core.config import SafetyConfig, ToolConfig
 from agent.core.events import ToolCall, ToolResult
 from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.permissions import ApprovalCallback, PermissionManager
-from agent.safety.sandbox import LocalSandbox, Sandbox, SubprocessSandbox
+from agent.safety.sandbox import (
+    LinuxSandbox,
+    LocalSandbox,
+    Sandbox,
+    WindowsSubprocessSandbox,
+    WslDistroSandbox,
+)
 from agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -26,7 +34,6 @@ class ToolExecutor:
         tool_config: ToolConfig,
         safety_config: SafetyConfig | None = None,
         approval_callback: ApprovalCallback | None = None,
-        shell_path: str = "",
     ) -> None:
         self.registry = registry
         self.tool_config = tool_config
@@ -43,7 +50,7 @@ class ToolExecutor:
         )
         self.policy = SafetyPolicy(policy_cfg)
         self.permissions = PermissionManager(approval_callback)
-        self.sandbox = _create_sandbox(sc, shell_path=shell_path)
+        self.sandbox = _create_sandbox(sc)
 
     async def execute(self, tool_calls: list[ToolCall], parallel: bool = True) -> list[ToolResult]:
         """Execute a batch of tool calls and return results.
@@ -63,52 +70,31 @@ class ToolExecutor:
     async def _execute_one(self, tc: ToolCall) -> ToolResult:
         spec = self.registry.get(tc.tool_name)
         if not spec:
-            return ToolResult(
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.tool_name,
-                output=f"Error: unknown tool '{tc.tool_name}'",
-                is_error=True,
-            )
+            return _error_result(tc, "unknown_tool", f"unknown tool '{tc.tool_name}'")
 
         if not spec.handler:
-            return ToolResult(
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.tool_name,
-                output=f"Error: tool '{tc.tool_name}' has no handler",
-                is_error=True,
-            )
+            return _error_result(tc, "no_handler", f"tool '{tc.tool_name}' has no handler")
 
         # --- Input validation against schema ---
         if spec.input_schema:
             validation_error = _validate_arguments(tc.arguments, spec.input_schema)
             if validation_error:
-                return ToolResult(
-                    tool_call_id=tc.tool_call_id,
-                    tool_name=tc.tool_name,
-                    output=f"Error: invalid arguments for '{tc.tool_name}': {validation_error}",
-                    is_error=True,
+                return _error_result(
+                    tc,
+                    "invalid_arguments",
+                    f"invalid arguments for '{tc.tool_name}': {validation_error}",
                 )
 
         # --- Safety policy check ---
         decision = self.policy.check_tool(spec, tc.arguments)
 
         if decision == PolicyDecision.DENY:
-            return ToolResult(
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.tool_name,
-                output="Error: blocked by safety policy",
-                is_error=True,
-            )
+            return _error_result(tc, "blocked", "blocked by safety policy")
 
         if decision == PolicyDecision.ASK:
             approval = await self.permissions.request_approval(spec, tc)
             if approval == PolicyDecision.DENY:
-                return ToolResult(
-                    tool_call_id=tc.tool_call_id,
-                    tool_name=tc.tool_name,
-                    output="Error: tool call denied by user",
-                    is_error=True,
-                )
+                return _error_result(tc, "denied", "tool call denied by user")
 
         # --- Execute ---
         t_start = time.monotonic()
@@ -133,22 +119,55 @@ class ToolExecutor:
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except asyncio.TimeoutError:
-            return ToolResult(
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.tool_name,
-                output=f"Error: tool '{tc.tool_name}' timed out after {self.tool_config.command_timeout}s",
-                is_error=True,
+            return _error_result(
+                tc,
+                "timeout",
+                f"tool '{tc.tool_name}' timed out after {self.tool_config.command_timeout}s",
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except Exception as e:
             logger.debug("Tool execution error: %s", tc.tool_name, exc_info=True)
-            return ToolResult(
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.tool_name,
-                output=f"Error: {type(e).__name__}: {e}",
-                is_error=True,
+            return _error_result(
+                tc,
+                "exception",
+                f"{type(e).__name__}: {e}",
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
+
+
+# Stable machine-readable categories for ToolResult.output on the error path.
+# Format: ``Error [<category>]: <message>``. Clients (ACP, TUI, tests) can
+# pattern-match on the bracketed category without parsing free-form text.
+_ERROR_CATEGORIES = frozenset(
+    {
+        "unknown_tool",
+        "no_handler",
+        "invalid_arguments",
+        "blocked",
+        "denied",
+        "timeout",
+        "exception",
+    }
+)
+
+
+def _error_result(
+    tc: ToolCall,
+    category: str,
+    message: str,
+    *,
+    duration_ms: float | None = None,
+) -> ToolResult:
+    assert category in _ERROR_CATEGORIES, f"unknown error category: {category}"
+    kwargs: dict = {
+        "tool_call_id": tc.tool_call_id,
+        "tool_name": tc.tool_name,
+        "output": f"Error [{category}]: {message}",
+        "is_error": True,
+    }
+    if duration_ms is not None:
+        kwargs["duration_ms"] = duration_ms
+    return ToolResult(**kwargs)
 
 
 def _validate_arguments(arguments: dict, schema: dict) -> str | None:
@@ -164,7 +183,34 @@ def _validate_arguments(arguments: dict, schema: dict) -> str | None:
     return None
 
 
-def _create_sandbox(config: SafetyConfig, shell_path: str = "") -> Sandbox:
-    if config.sandbox == "subprocess":
-        return SubprocessSandbox(max_memory_mb=config.sandbox_max_memory_mb, shell_path=shell_path)
-    return LocalSandbox(shell_path=shell_path)
+def _create_sandbox(config: SafetyConfig) -> Sandbox:
+    sb = config.sandbox
+    mode = sb.mode
+
+    if mode == "auto":
+        if os.name == "nt":
+            mode = "windows"
+        elif sys.platform.startswith("linux"):
+            mode = "linux"
+        else:
+            mode = "local"
+
+    if mode == "wsl":
+        return WslDistroSandbox(
+            distro_name=sb.wsl.distro,
+            workspace=sb.wsl.workspace,
+            shell=sb.wsl.shell,
+        )
+    if mode == "linux":
+        return LinuxSandbox(
+            workspace=sb.linux.workspace,
+            max_memory_mb=sb.linux.max_memory_mb,
+        )
+    if mode == "windows":
+        return WindowsSubprocessSandbox(
+            workspace=sb.windows.workspace,
+            max_memory_mb=sb.windows.max_memory_mb,
+            max_processes=sb.windows.max_processes,
+            use_low_integrity=sb.windows.use_low_integrity,
+        )
+    return LocalSandbox()

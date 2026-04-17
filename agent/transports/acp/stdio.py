@@ -1,0 +1,693 @@
+"""ACP stdio transport — SDK-based agent server for Zed and other editors.
+
+Uses the official ``agent-client-protocol`` Python SDK. This is what
+``aar acp`` starts by default and what editors connect to via the
+``"type": "custom"`` agent-server setting in their config.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Coroutine
+from typing import Any
+
+from agent.core.agent import Agent as AarAgent
+from agent.core.config import AgentConfig
+from agent.core.events import (
+    AssistantMessage,
+    Event,
+    ProviderMeta,
+    ReasoningBlock,
+    StreamChunk,
+    ToolCall,
+    ToolResult,
+)
+from agent.core.session import Session
+from agent.core.state import AgentState
+from agent.memory.session_store import SessionStore, validate_session_id
+from agent.safety.permissions import ApprovalCallback
+from agent.tools.registry import ToolRegistry
+
+from .common import (
+    _acp_server_to_mcp_config,
+    _auto_approve,
+    _available_commands,
+    _extract_text,
+    _load_default_config,
+    _map_stop_reason,
+    _model_id_to_provider,
+    _side_effects_to_tool_kind,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class AarAcpAgent:
+    """Aar agent wrapped as an ACP stdio agent via the official SDK.
+
+    Subclasses ``acp.Agent`` (from the ``agent-client-protocol`` package)
+    at runtime inside ``run_acp_stdio``. Zed and other ACP-compatible
+    editors communicate with this class over stdin/stdout using the SDK's
+    framing — no HTTP server needed.
+
+    The SDK is imported lazily so the package is optional at import time.
+    """
+
+    def __init__(
+        self,
+        config: AgentConfig | None = None,
+        approval_callback: ApprovalCallback | None = None,
+        registry: ToolRegistry | None = None,
+        agent_name: str = "aar",
+    ) -> None:
+        self._config = config or _load_default_config()
+        self._default_approval: ApprovalCallback = approval_callback or _auto_approve
+        self._registry = registry
+        self._agent_name = agent_name
+        self._store = SessionStore(self._config.session_dir)
+        self._sessions: dict[str, Session] = {}
+        self._cancel_events: dict[str, asyncio.Event] = {}
+        # Running prompt tasks — stored so cancel() can call task.cancel()
+        self._run_tasks: dict[str, asyncio.Task] = {}
+        # Per-session MCP state (started MCPBridge + its ToolRegistry)
+        self._mcp_bridges: dict[str, Any] = {}
+        self._session_registries: dict[str, ToolRegistry] = {}
+        # Per-session model override (from set_session_model)
+        self._session_configs: dict[str, AgentConfig] = {}
+        # Sessions that have already received AvailableCommandsUpdate
+        self._commands_pushed: set[str] = set()
+        self._conn: Any = None  # acp.interfaces.Client, set in on_connect
+        # Per-session async locks — serialize lifecycle mutations
+        # (new/load/close/prompt-setup) so two ACP requests for the same
+        # session don't corrupt the per-session dicts above.
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        # Strong refs for fire-and-forget tasks (push_available_commands,
+        # session_update, etc). Without this set the tasks can be GC'd
+        # mid-flight; the done-callback also surfaces silent exceptions.
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any], *, name: str = "") -> asyncio.Task:
+        """Create a tracked fire-and-forget task.
+
+        The task is held in ``_background_tasks`` until it completes, so it
+        cannot be garbage-collected mid-flight. Exceptions that the caller
+        never awaits are surfaced to the logger instead of being silently
+        dropped by asyncio.
+        """
+        task = asyncio.create_task(coro, name=name or "acp-background")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_done)
+        return task
+
+    def _on_background_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("ACP: background task %r failed: %s", task.get_name(), exc)
+
+    async def shutdown(self) -> None:
+        """Wait for any in-flight background tasks to finish.
+
+        Call from the server stop path to avoid warnings about pending tasks
+        and to give session_update notifications a chance to flush.
+        """
+        if not self._background_tasks:
+            return
+        pending = list(self._background_tasks)
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    # ------------------------------------------------------------------
+    # ACP SDK lifecycle hooks
+    # ------------------------------------------------------------------
+
+    def on_connect(self, conn: Any) -> None:
+        self._conn = conn
+
+    async def _push_available_commands(self, session_id: str) -> None:
+        """Send ``AvailableCommandsUpdate`` to the client for *session_id*.
+
+        Does **not** check or mutate ``_commands_pushed`` — callers are
+        responsible for gating and recording delivery.
+        """
+        from acp.schema import AvailableCommandsUpdate
+
+        if self._conn:
+            await self._conn.session_update(
+                session_id=session_id,
+                update=AvailableCommandsUpdate(
+                    available_commands=_available_commands(),
+                    session_update="available_commands_update",
+                ),
+                source=self._agent_name,
+            )
+
+    async def initialize(
+        self,
+        protocol_version: int,
+        client_capabilities: Any = None,
+        client_info: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        from acp import PROTOCOL_VERSION, InitializeResponse
+        from acp.schema import (
+            AgentCapabilities,
+            Implementation,
+            PromptCapabilities,
+            SessionCapabilities,
+            SessionCloseCapabilities,
+            SessionListCapabilities,
+        )
+
+        return InitializeResponse(
+            protocol_version=PROTOCOL_VERSION,
+            agent_capabilities=AgentCapabilities(
+                load_session=True,
+                prompt_capabilities=PromptCapabilities(embedded_context=True),
+                session_capabilities=SessionCapabilities(
+                    list=SessionListCapabilities(),
+                    close=SessionCloseCapabilities(),
+                ),
+            ),
+            agent_info=Implementation(name="aar", title="Aar Agent", version="0.3.2"),
+        )
+
+    async def new_session(
+        self,
+        cwd: str = "",
+        mcp_servers: list | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        from acp import NewSessionResponse
+
+        session = Session(metadata={"cwd": cwd} if cwd else {})
+        sid = session.session_id
+        async with self._session_lock(sid):
+            self._sessions[sid] = session
+            self._store.save(session)
+            await self._setup_mcp(sid, mcp_servers or [])
+        # Fire-and-forget: try to push commands early. The notification may
+        # arrive before the client acknowledges the session, so prompt() is
+        # the guaranteed delivery point.
+        self._spawn(self._push_available_commands(sid), name=f"push-cmds-{sid}")
+        logger.info("ACP: new session %s cwd=%r", sid, cwd)
+        return NewSessionResponse(session_id=sid)
+
+    async def load_session(
+        self,
+        cwd: str = "",
+        session_id: str = "",
+        mcp_servers: list | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Resume a previously saved session. Returns None when not found."""
+        from acp import LoadSessionResponse
+
+        try:
+            validate_session_id(session_id)
+        except ValueError as exc:
+            logger.info("ACP: session %s not found (%s)", session_id, exc)
+            return None
+        try:
+            async with self._session_lock(session_id):
+                session = self._store.load(session_id)
+                if cwd:
+                    session.metadata["cwd"] = cwd
+                self._sessions[session_id] = session
+                await self._setup_mcp(session_id, mcp_servers or [])
+            self._spawn(
+                self._push_available_commands(session_id),
+                name=f"push-cmds-{session_id}",
+            )
+            logger.info("ACP: loaded session %s (%d events)", session_id, len(session.events))
+            return LoadSessionResponse()
+        except (FileNotFoundError, ValueError) as exc:
+            logger.info("ACP: session %s not found (%s)", session_id, exc)
+            return None
+
+    async def list_sessions(
+        self,
+        cursor: str | None = None,
+        cwd: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Return all persisted sessions so Zed can show session history."""
+        from acp.schema import ListSessionsResponse, SessionInfo
+
+        session_infos: list[SessionInfo] = []
+        for sid in self._store.list_sessions():
+            try:
+                s = self._store.load(sid)
+                title = next(
+                    (
+                        e.content[:60]
+                        for e in s.events
+                        if isinstance(e, AssistantMessage) and e.content
+                    ),
+                    sid[:12],
+                )
+                session_cwd = s.metadata.get("cwd", "") if s.metadata else ""
+                session_infos.append(SessionInfo(session_id=sid, cwd=session_cwd, title=title))
+            except Exception:
+                session_infos.append(SessionInfo(session_id=sid, cwd="", title=sid[:12]))
+        return ListSessionsResponse(sessions=session_infos)
+
+    async def close_session(self, session_id: str, **kwargs: Any) -> Any:
+        """Clean up per-session state when Zed closes a session."""
+        from acp.schema import CloseSessionResponse
+
+        try:
+            validate_session_id(session_id)
+        except ValueError:
+            logger.warning("ACP: close_session ignoring invalid session_id %r", session_id)
+            return CloseSessionResponse()
+
+        # Cancel any prompt still running for this session and await its
+        # cleanup. Done outside the session lock — prompt() releases the
+        # lock while awaiting run_task, so cancellation can proceed without
+        # deadlocking.
+        task = self._run_tasks.get(session_id)
+        event = self._cancel_events.get(session_id)
+        if event is not None:
+            event.set()
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup path
+                pass
+
+        async with self._session_lock(session_id):
+            await self._teardown_mcp(session_id)
+            self._sessions.pop(session_id, None)
+            self._cancel_events.pop(session_id, None)
+            self._run_tasks.pop(session_id, None)
+            self._session_configs.pop(session_id, None)
+            self._commands_pushed.discard(session_id)
+        self._session_locks.pop(session_id, None)
+        logger.info("ACP: closed session %s", session_id)
+        return CloseSessionResponse()
+
+    async def cancel(self, session_id: str, **kwargs: Any) -> None:
+        """Cancel an ongoing prompt turn.
+
+        Sets the cooperative cancel event AND cancels the running asyncio task
+        so the agent stops as soon as possible — even if it's mid-LLM call or
+        mid-tool execution. Per the ACP spec the ``session/prompt`` response
+        MUST use ``stop_reason="cancelled"``.
+        """
+        try:
+            validate_session_id(session_id)
+        except ValueError:
+            logger.warning("ACP: cancel ignoring invalid session_id %r", session_id)
+            return
+        event = self._cancel_events.get(session_id)
+        if event:
+            event.set()
+
+        task = self._run_tasks.get(session_id)
+        if task and not task.done():
+            task.cancel()
+
+        if event or task:
+            logger.info("ACP: cancel requested for session %s", session_id)
+        else:
+            logger.debug("ACP: cancel for session %s — no active prompt", session_id)
+
+    async def set_session_model(
+        self,
+        model_id: str,
+        session_id: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Switch the model for an existing session (unstable protocol)."""
+        from acp.schema import SetSessionModelResponse
+
+        validate_session_id(session_id)
+        provider_name, model = _model_id_to_provider(model_id)
+        base_cfg = self._session_configs.get(session_id, self._config)
+        new_provider = base_cfg.provider.model_copy(update={"name": provider_name, "model": model})
+        self._session_configs[session_id] = base_cfg.model_copy(update={"provider": new_provider})
+        logger.info("ACP: session %s model → %s/%s", session_id, provider_name, model)
+        return SetSessionModelResponse()
+
+    async def prompt(
+        self,
+        prompt: list,
+        session_id: str,
+        **kwargs: Any,
+    ) -> Any:
+        from acp import PromptResponse, text_block, update_agent_message
+        from acp.schema import (
+            AgentThoughtChunk,
+            Cost,
+            SessionInfoUpdate,
+            TextContentBlock,
+            ToolCallProgress,
+            ToolCallStart,
+            UsageUpdate,
+        )
+
+        validate_session_id(session_id)
+        text = _extract_text(prompt)
+
+        # Reject concurrent prompts for the same session. Per the ACP spec
+        # only one prompt turn may be in flight per session at a time. A
+        # misbehaving client that sends a second prompt would otherwise
+        # silently overwrite _cancel_events[sid] and _run_tasks[sid].
+        existing = self._run_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            raise RuntimeError(
+                f"Prompt already in flight for session {session_id}; "
+                "cancel the previous prompt before starting a new one"
+            )
+
+        # Entry-phase setup is guarded by the per-session lock so cancel()
+        # or a second prompt() call cannot observe half-populated dicts.
+        # The long-running body (await run_task) runs outside the lock.
+        async with self._session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if session is None:
+                try:
+                    session = self._store.load(session_id)
+                    self._sessions[session_id] = session
+                except (FileNotFoundError, ValueError):
+                    logger.info("ACP: creating fresh session for id %s", session_id)
+                    session = Session(session_id=session_id)
+                    self._sessions[session_id] = session
+
+            cancel_event = asyncio.Event()
+            self._cancel_events[session_id] = cancel_event
+
+            first_push = session_id not in self._commands_pushed
+            if first_push:
+                self._commands_pushed.add(session_id)
+
+        update_tasks: list[asyncio.Task] = []
+        streamed_chunks = False
+        title_sent = False
+
+        if first_push:
+            _push_now = self._spawn(
+                self._push_available_commands(session_id),
+                name=f"push-cmds-{session_id}",
+            )
+            update_tasks.append(_push_now)
+
+        def _push(update: Any) -> None:
+            if self._conn:
+                task = asyncio.create_task(
+                    self._conn.session_update(
+                        session_id=session_id,
+                        update=update,
+                        source=self._agent_name,
+                    )
+                )
+                update_tasks.append(task)
+
+        def on_event(event: Event) -> None:
+            nonlocal streamed_chunks, title_sent
+
+            if isinstance(event, StreamChunk) and not event.finished and event.text:
+                streamed_chunks = True
+                _push(update_agent_message(text_block(event.text)))
+
+            elif isinstance(event, AssistantMessage) and event.content:
+                if not streamed_chunks:
+                    _push(update_agent_message(text_block(event.content)))
+                if not title_sent:
+                    title_sent = True
+                    _push(
+                        SessionInfoUpdate(
+                            title=text[:60] if text else event.content[:60],
+                            session_update="session_info_update",
+                        )
+                    )
+
+            elif isinstance(event, ReasoningBlock) and event.content:
+                _push(
+                    AgentThoughtChunk(
+                        content=TextContentBlock(type="text", text=event.content),
+                        session_update="agent_thought_chunk",
+                    )
+                )
+
+            elif isinstance(event, ToolCall):
+                # tool_call_id is guaranteed at construction (ToolCall model
+                # validator fills it with a uuid4 when providers leave it empty).
+                tc_id = event.tool_call_id
+                registry = self._session_registries.get(session_id, self._registry)
+                _spec = registry.get(event.tool_name) if registry else None
+                _kind = _side_effects_to_tool_kind(_spec.side_effects) if _spec else "other"
+                # Status MUST be "pending" — the tool hasn't started yet and
+                # may be awaiting approval. Zed only shows permission buttons
+                # for tool calls that are still in "pending" status.
+                _push(
+                    ToolCallStart(
+                        title=event.tool_name,
+                        tool_call_id=tc_id,
+                        kind=_kind,
+                        status="pending",
+                        raw_input=event.arguments,
+                        session_update="tool_call",
+                    )
+                )
+
+            elif isinstance(event, ToolResult):
+                tc_id = event.tool_call_id
+                _push(
+                    ToolCallProgress(
+                        title=event.tool_name,
+                        tool_call_id=tc_id,
+                        status="failed" if event.is_error else "completed",
+                        raw_output={"text": event.output[:4000]},
+                        session_update="tool_call_update",
+                    )
+                )
+
+            elif isinstance(event, ProviderMeta) and event.usage:
+                used = event.usage.get("input_tokens", 0) + event.usage.get("output_tokens", 0)
+                size = event.usage.get("input_tokens", 0)
+                _push(
+                    UsageUpdate(
+                        cost=Cost(
+                            amount=round(getattr(session, "total_cost", 0.0), 6), currency="usd"
+                        ),
+                        size=size,
+                        used=used,
+                        session_update="usage_update",
+                    )
+                )
+
+        # Handle slash commands locally — no agent loop needed
+        cmd = text.strip().split()[0].lower() if text.strip().startswith("/") else ""
+        if cmd in ("/status", "/tools", "/policy"):
+            reply = self._handle_slash_command(cmd, session_id, session)
+            _push(update_agent_message(text_block(reply)))
+            if update_tasks:
+                await asyncio.gather(*update_tasks, return_exceptions=True)
+            self._cancel_events.pop(session_id, None)
+            return PromptResponse(stop_reason="end_turn")
+
+        # Build the approval callback: use ACP request_permission when a client
+        # is connected (Zed / stdio mode), fall back to the configured default.
+        if self._conn is not None:
+            from agent.transports.acp_permissions import make_acp_approval_callback
+
+            acp_t = self._config.safety.acp_approval_timeout
+            loop_t = self._config.timeout
+            if loop_t > 0.0 and (acp_t == 0.0 or acp_t > loop_t):
+                logger.warning(
+                    "acp_approval_timeout (%s) exceeds the agent loop timeout (%.1fs) — "
+                    "approval requests may be cut off before the user responds; set "
+                    "acp_approval_timeout <= timeout, or set timeout=0.0 for no loop limit",
+                    "indefinite" if acp_t == 0.0 else f"{acp_t:.1f}s",
+                    loop_t,
+                )
+
+            _approval_cb = make_acp_approval_callback(
+                self._conn, session_id, timeout=acp_t
+            )
+        else:
+            _approval_cb = self._default_approval
+
+        aar_agent = self._make_aar_agent(session_id=session_id, approval_callback=_approval_cb)
+        aar_agent.on_event(on_event)
+
+        run_task = asyncio.create_task(aar_agent.run(text, session, cancel_event=cancel_event))
+        self._run_tasks[session_id] = run_task
+
+        try:
+            finished = await run_task
+        except asyncio.CancelledError:
+            # Per ACP spec: catch cancellation and return the semantically
+            # meaningful "cancelled" stop reason so clients can reliably
+            # confirm the cancellation.
+            logger.info("ACP: prompt task cancelled for session %s", session_id)
+            finished = session
+            finished.state = AgentState.CANCELLED
+        finally:
+            self._run_tasks.pop(session_id, None)
+
+        if update_tasks:
+            await asyncio.gather(*update_tasks, return_exceptions=True)
+
+        self._cancel_events.pop(session_id, None)
+        self._sessions[session_id] = finished
+        self._store.save(finished)
+
+        return PromptResponse(stop_reason=_map_stop_reason(finished.state))
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _make_aar_agent(
+        self,
+        session_id: str = "",
+        approval_callback: ApprovalCallback | None = None,
+    ) -> AarAgent:
+        config = self._session_configs.get(session_id, self._config)
+        registry = self._session_registries.get(session_id, self._registry)
+        return AarAgent(
+            config=config,
+            approval_callback=approval_callback or self._default_approval,
+            registry=registry,
+        )
+
+    def _handle_slash_command(self, cmd: str, session_id: str, session: Session) -> str:
+        """Return a plain-text reply for a built-in slash command."""
+        cfg = self._session_configs.get(session_id, self._config)
+        registry = self._session_registries.get(session_id, self._registry)
+
+        if cmd == "/status":
+            lines = [
+                f"**Session:** `{session_id}`",
+                f"**Provider:** {cfg.provider.name}",
+                f"**Model:** {cfg.provider.model}",
+                f"**Steps this session:** {session.step_count}",
+                f"**Messages:** {len(session.events)}",
+            ]
+            return "\n".join(lines)
+
+        if cmd == "/tools":
+            tools = registry.list_tools() if registry else []
+            if not tools:
+                try:
+                    from agent.tools.registry import ToolRegistry as TR
+
+                    tmp_reg = TR()
+                    from agent.tools.builtin.filesystem import register_filesystem_tools
+                    from agent.tools.builtin.shell import register_shell_tools
+
+                    enabled = set(cfg.tools.enabled_builtins)
+                    if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
+                        register_filesystem_tools(tmp_reg)
+                    if "bash" in enabled:
+                        register_shell_tools(tmp_reg)
+                    for name in list(tmp_reg._tools):
+                        if name not in enabled:
+                            del tmp_reg._tools[name]
+                    tools = tmp_reg.list_tools()
+                except Exception:
+                    pass
+            if not tools:
+                return "No tools registered."
+            lines = ["**Available tools:**", ""]
+            for t in sorted(tools, key=lambda x: x.name):
+                lines.append(f"- **{t.name}** — {t.description or ''}")
+            return "\n".join(lines)
+
+        if cmd == "/policy":
+            s = cfg.safety
+            lines = ["**Safety policy:**", ""]
+            lines.append(f"- **Approve writes:** {s.require_approval_for_writes}")
+            lines.append(f"- **Approve execute:** {s.require_approval_for_execute}")
+            lines.append(f"- **Read-only mode:** {s.read_only}")
+            lines.append(f"- **Sandbox:** {s.sandbox}")
+            if s.allowed_paths:
+                lines.append(f"- **Allowed paths:** {', '.join(s.allowed_paths)}")
+            return "\n".join(lines)
+
+        return f"Unknown command: {cmd}"
+
+    async def _setup_mcp(self, session_id: str, mcp_servers: list) -> None:
+        """Convert ACP mcp_servers → MCPServerConfig, start bridge, register tools."""
+        if not mcp_servers:
+            return
+        try:
+            from agent.extensions.mcp import MCPBridge, MCPServerConfig
+            from agent.tools.registry import ToolRegistry as TR
+
+            configs: list[MCPServerConfig] = []
+            for srv in mcp_servers:
+                cfg = _acp_server_to_mcp_config(srv)
+                if cfg:
+                    configs.append(cfg)
+            if not configs:
+                return
+
+            registry = TR()
+            bridge = MCPBridge(configs)
+            await bridge.__aenter__()
+            count = await bridge.register_all(registry)
+            self._mcp_bridges[session_id] = bridge
+            self._session_registries[session_id] = registry
+            logger.info("ACP: registered %d MCP tool(s) for session %s", count, session_id)
+        except Exception as exc:
+            logger.warning("ACP: MCP setup failed for session %s: %s", session_id, exc)
+
+    async def _teardown_mcp(self, session_id: str) -> None:
+        bridge = self._mcp_bridges.pop(session_id, None)
+        if bridge:
+            try:
+                await bridge.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.warning("ACP: MCP teardown error for session %s: %s", session_id, exc)
+        self._session_registries.pop(session_id, None)
+
+
+async def run_acp_stdio(
+    config: AgentConfig | None = None,
+    approval_callback: ApprovalCallback | None = None,
+    registry: ToolRegistry | None = None,
+    agent_name: str = "aar",
+) -> None:
+    """Run the Aar ACP agent over stdio (SDK transport).
+
+    Reads from stdin, writes to stdout. All other output (logging, errors)
+    goes to stderr so it does not corrupt the JSON-RPC stream.
+    """
+    try:
+        from acp import Agent as SdkAgent
+        from acp import run_agent
+    except ImportError as exc:
+        raise ImportError(
+            "agent-client-protocol is required for the ACP stdio transport. "
+            "Install with: pip install agent-client-protocol"
+        ) from exc
+
+    # Dynamically create a proper subclass of the SDK's Agent base class.
+    # AarAcpAgent must come first so our method implementations shadow the
+    # Protocol stubs defined on SdkAgent (Agent Protocol).
+    agent_cls = type(
+        "AarSdkAgent",
+        (AarAcpAgent, SdkAgent),
+        {},
+    )
+    agent = agent_cls(
+        config=config,
+        approval_callback=approval_callback,
+        registry=registry,
+        agent_name=agent_name,
+    )
+    await run_agent(agent, use_unstable_protocol=True)

@@ -8,12 +8,12 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent.core.guardrails import GuardrailsConfig
 
 
-def _default_system_prompt(shell_path: str = "") -> str:
+def _default_system_prompt() -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
     os_name = platform.system()  # "Windows", "Linux", "Darwin"
     cwd = str(Path.cwd())
@@ -25,12 +25,10 @@ def _default_system_prompt(shell_path: str = "") -> str:
         f"Working directory: {cwd}",
     ]
 
-    if shell_path:
-        lines.append(f"Shell: {shell_path}")
-    elif os.name == "nt":
+    if os.name == "nt":
         lines += [
             "",
-            "Shell: commands run via Git Bash (bash -c). Standard bash/Unix commands work (ls, cat, grep, find, pwd, …).",
+            "Shell: commands run via WSL (bash -c). Standard bash/Unix commands work (ls, cat, grep, find, pwd, …).",
             "File paths: use Windows-style paths for file tools, e.g. .\\file.py or subdirectory\\file.py.",
             f"When creating files, place them inside the working directory ({cwd}) unless told otherwise.",
             "Do NOT use Unix-style absolute paths like /file.py — on Windows they resolve to the drive root, not the project.",
@@ -42,7 +40,6 @@ def _default_system_prompt(shell_path: str = "") -> str:
 
 
 def build_system_prompt(
-    shell_path: str = "",
     project_rules_dir: Path | None = None,
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
@@ -54,7 +51,7 @@ def build_system_prompt(
       4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
       5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
-    sections = [_default_system_prompt(shell_path=shell_path)]
+    sections = [_default_system_prompt()]
 
     global_dir = Path.home() / ".aar"
 
@@ -99,6 +96,78 @@ class ToolConfig(BaseModel):
     max_output_chars: int = 50_000
 
 
+# ---------------------------------------------------------------------------
+# Per-mode sandbox configuration models
+# Each mode has only the settings that apply to it — no shared flat namespace.
+# ---------------------------------------------------------------------------
+
+
+class LocalSandboxConfig(BaseModel):
+    """No isolation — direct subprocess execution (trusted dev environments)."""
+
+    pass  # no configuration options
+
+
+class LinuxSandboxConfig(BaseModel):
+    """Linux Landlock LSM — write-restricted to workspace. Falls back to env restriction + ulimit on older kernels."""
+
+    workspace: str | None = None  # None → cwd at runtime
+    max_memory_mb: int = 512
+
+
+class WindowsSandboxConfig(BaseModel):
+    """Windows Job Object (memory/process limits) + Low Integrity Level."""
+
+    workspace: str | None = None  # None → cwd at runtime
+    max_memory_mb: int = 512
+    max_processes: int = 10
+    use_low_integrity: bool = True
+
+
+class WslSandboxConfig(BaseModel):
+    """Dedicated WSL2 distro sandbox. Commands run via wsl -d <distro> -- <shell> -c <cmd>."""
+
+    distro: str = "aar-sandbox"
+    shell: str = "sh"            # shell binary inside the distro
+    workspace: str | None = None  # Windows path, auto-translated to /mnt/…; None → cwd
+    # Provisioning fields (used by aar sandbox setup / reset)
+    install_path: str | None = None  # None → %LOCALAPPDATA%\aar\wsl-distros\<distro>
+    rootfs_url: str = (
+        "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/"
+        "alpine-minirootfs-3.21.0-x86_64.tar.gz"
+    )
+    packages: list[str] = Field(default_factory=lambda: ["python3", "py3-pip"])
+
+
+class SandboxConfig(BaseModel):
+    """Top-level sandbox configuration.
+
+    Set ``mode`` to choose the sandbox backend, then configure only the
+    matching sub-section.  Settings in other sub-sections are ignored.
+
+    Modes:
+      local   — no isolation (default, trusted dev)
+      linux   — Linux Landlock, write-restricted to workspace (+ ulimit memory cap)
+      windows — Windows Job Object + Low Integrity Level
+      wsl     — dedicated WSL2 distro
+      auto    — picks linux (Linux), windows (Windows), local (other)
+    """
+
+    mode: str = "local"
+    local: LocalSandboxConfig = Field(default_factory=LocalSandboxConfig)
+    linux: LinuxSandboxConfig = Field(default_factory=LinuxSandboxConfig)
+    windows: WindowsSandboxConfig = Field(default_factory=WindowsSandboxConfig)
+    wsl: WslSandboxConfig = Field(default_factory=WslSandboxConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_string(cls, data: Any) -> Any:
+        """Allow ``"sandbox": "local"`` as shorthand for ``{"mode": "local"}``."""
+        if isinstance(data, str):
+            return {"mode": data}
+        return data
+
+
 class SafetyConfig(BaseModel):
     read_only: bool = False
     require_approval_for_writes: bool = True
@@ -139,9 +208,9 @@ class SafetyConfig(BaseModel):
         ]
     )
     allowed_paths: list[str] = Field(default_factory=list)
-    sandbox: str = "local"  # "local", "subprocess", or "container"
-    sandbox_max_memory_mb: int = 512
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     log_all_commands: bool = True
+    acp_approval_timeout: float = 0.0  # seconds the ACP client has to respond; 0 = wait indefinitely
 
 
 class TUIConfig(BaseModel):
@@ -156,7 +225,7 @@ class AgentConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     max_steps: int = 50
-    timeout: float = 300.0
+    timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
@@ -166,7 +235,6 @@ class AgentConfig(BaseModel):
     token_warning_threshold: float = 0.8  # fraction of budget to trigger warning style
     cost_warning_threshold: float = 0.8  # fraction of cost_limit to trigger warning style
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
-    shell_path: str = ""
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
     system_prompt: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
@@ -176,7 +244,6 @@ class AgentConfig(BaseModel):
         """Build the system prompt from config if not explicitly provided."""
         if not self.system_prompt:
             self.system_prompt = build_system_prompt(
-                shell_path=self.shell_path,
                 project_rules_dir=self.project_rules_dir,
             )
 

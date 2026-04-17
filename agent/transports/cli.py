@@ -885,8 +885,7 @@ def acp(
             import uvicorn
         except ImportError:
             console.print(
-                "[red]uvicorn is required for --http mode. "
-                "Install with: pip install uvicorn[/]",
+                "[red]uvicorn is required for --http mode. Install with: pip install uvicorn[/]",
                 err=True,
             )
             raise typer.Exit(1)
@@ -1030,6 +1029,249 @@ def init(
         console.print("  6. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
+
+
+# ---------------------------------------------------------------------------
+# aar sandbox — WSL2 distro sandbox management
+# ---------------------------------------------------------------------------
+
+_sandbox_app = typer.Typer(
+    name="sandbox",
+    help="Manage the Aar WSL2 sandbox distro.",
+    no_args_is_help=True,
+)
+app.add_typer(_sandbox_app, name="sandbox")
+
+_DEFAULT_DISTRO = "aar-sandbox"
+_DEFAULT_PACKAGES = "python3,py3-pip"
+
+
+def _resolve_install_path(distro: str, install_path: Optional[str]) -> "Path":
+    from agent.safety.wsl_manager import default_install_path
+
+    if install_path:
+        return Path(install_path)
+    return default_install_path(distro)
+
+
+def _resolve_rootfs_url(rootfs_url: Optional[str]) -> str:
+    from agent.safety.wsl_manager import default_rootfs_url
+
+    return rootfs_url or default_rootfs_url()
+
+
+@_sandbox_app.command("setup")
+def sandbox_setup(
+    distro: str = typer.Option(_DEFAULT_DISTRO, "--distro", "-d", help="Name for the WSL2 distro"),
+    install_path: Optional[str] = typer.Option(
+        None,
+        "--install-path",
+        help=r"Where to store distro data (default: %%LOCALAPPDATA%%\aar\wsl-distros\<distro>)",
+    ),
+    rootfs_url: Optional[str] = typer.Option(
+        None,
+        "--rootfs-url",
+        help="URL of the rootfs tarball (default: Alpine latest-stable x86_64)",
+    ),
+    packages: str = typer.Option(
+        _DEFAULT_PACKAGES,
+        "--packages",
+        help="Comma-separated packages to install via apk add (Alpine) or the distro's package manager",
+    ),
+    force: bool = typer.Option(False, "--force", help="Unregister existing distro and recreate"),
+) -> None:
+    """Download a rootfs and import it as a dedicated sandbox WSL2 distro.
+
+    All flags are optional — defaults come from ``~/.aar/config.json``
+    (``safety.sandbox.wsl.*`` fields).  Use flags only to override for a
+    one-off setup.
+
+    After setup, add this to ``~/.aar/config.json``:
+
+    \\b
+        "safety": {
+          "sandbox": { "mode": "wsl", "wsl": { "distro": "<distro>" } }
+        }
+    """
+    import os
+    import tempfile
+
+    from agent.safety import wsl_manager as wm
+
+    if os.name != "nt":
+        console.print("[red]Error:[/] WSL2 sandbox setup is only supported on Windows.")
+        raise typer.Exit(1)
+
+    if not wm.is_wsl_available():
+        console.print(
+            "[red]Error:[/] WSL2 is not available or not enabled on this system.\n"
+            "Enable it with: [bold]wsl --install[/]"
+        )
+        raise typer.Exit(1)
+
+    # Load config so flags can fall back to config values
+    cfg = _build_config()
+    wsl_cfg = cfg.safety.sandbox.wsl
+    if distro == _DEFAULT_DISTRO and wsl_cfg.distro != _DEFAULT_DISTRO:
+        distro = wsl_cfg.distro
+    resolved_url = rootfs_url or wsl_cfg.rootfs_url
+    if packages == _DEFAULT_PACKAGES and wsl_cfg.packages:
+        packages = ",".join(wsl_cfg.packages)
+
+    resolved_install = _resolve_install_path(
+        distro, install_path or wsl_cfg.install_path
+    )
+
+    # Handle existing distro
+    if wm.distro_exists(distro):
+        if not force:
+            console.print(
+                f"[yellow]Distro '[bold]{distro}[/]' already exists.[/]\n"
+                "Use [bold]--force[/] to unregister and recreate, or "
+                "[bold]aar sandbox status[/] to inspect it."
+            )
+            raise typer.Exit(1)
+        console.print(f"[yellow]Unregistering existing distro '{distro}'…[/]")
+        wm.unregister_distro(distro)
+
+    # Download rootfs
+    console.print(f"Downloading rootfs from:\n  [dim]{resolved_url}[/]")
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        _last: list[int] = [0]
+
+        def _progress(downloaded: int, total: int) -> None:
+            if total > 0:
+                pct = int(downloaded * 100 / total)
+                if pct != _last[0] and pct % 10 == 0:
+                    console.print(f"  [dim]{pct}%[/]", end="\r")
+                    _last[0] = pct
+
+        wm.download_rootfs(resolved_url, tmp_path, progress_cb=_progress)
+        console.print(f"  [green]Downloaded[/] → {tmp_path.stat().st_size // 1024} KB")
+
+        # Import distro
+        console.print(f"Importing distro '[bold]{distro}[/]' to {resolved_install} …")
+        wm.import_distro(distro, resolved_install, tmp_path)
+        console.print("  [green]Imported[/]")
+
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    # Install packages
+    pkg_list = [p.strip() for p in packages.split(",") if p.strip()]
+    if pkg_list:
+        console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
+        stdout, stderr, rc = wm.run_in_distro(
+            distro, f"apk add --no-cache {' '.join(pkg_list)} 2>&1", timeout=600
+        )
+        if rc != 0:
+            console.print(f"[yellow]Warning:[/] Package install returned exit code {rc}.")
+            if stderr:
+                console.print(f"[dim]{stderr[:400]}[/]")
+        else:
+            console.print("  [green]Packages installed[/]")
+
+    # Success — print config snippet
+    console.print(
+        f"\n[bold green]✓ Sandbox '{distro}' is ready.[/]\n\n"
+        "Add this to [bold]~/.aar/config.json[/] (inside the top-level object):\n"
+    )
+    console.print(
+        f'  "safety": {{\n    "sandbox": {{"mode": "wsl", "wsl": {{"distro": "{distro}"}}}}\n  }}'
+    )
+    console.print(f"\nThen run [bold]aar sandbox status --distro {distro}[/] to verify.")
+
+
+@_sandbox_app.command("status")
+def sandbox_status(
+    distro: str = typer.Option(_DEFAULT_DISTRO, "--distro", "-d", help="Distro name to inspect"),
+) -> None:
+    """Show status of the WSL2 sandbox distro."""
+    import os
+
+    from agent.safety import wsl_manager as wm
+
+    if os.name != "nt":
+        console.print("[yellow]WSL2 sandbox is Windows-only.[/]")
+        raise typer.Exit(0)
+
+    cfg = _build_config()
+    if distro == _DEFAULT_DISTRO:
+        distro = cfg.safety.sandbox.wsl.distro
+
+    console.print(f"[bold]WSL2 sandbox status[/] — distro: [cyan]{distro}[/]\n")
+
+    wsl_ok = wm.is_wsl_available()
+    console.print(f"  WSL2 available : {'[green]yes[/]' if wsl_ok else '[red]no[/]'}")
+
+    if not wsl_ok:
+        raise typer.Exit(1)
+
+    exists = wm.distro_exists(distro)
+    console.print(
+        f"  Distro exists  : {'[green]yes[/]' if exists else '[red]no — run aar sandbox setup[/]'}"
+    )
+
+    if exists:
+        stdout, _, rc = wm.run_in_distro(
+            distro, "uname -r && python3 --version 2>/dev/null || echo 'python3: not installed'"
+        )
+        for line in stdout.strip().splitlines():
+            console.print(f"  [dim]{line}[/]")
+
+
+@_sandbox_app.command("reset")
+def sandbox_reset(
+    distro: str = typer.Option(_DEFAULT_DISTRO, "--distro", "-d", help="Distro name to reset"),
+    rootfs_url: Optional[str] = typer.Option(None, "--rootfs-url"),
+    packages: str = typer.Option(_DEFAULT_PACKAGES, "--packages"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Unregister the sandbox distro and recreate it from scratch.
+
+    All installed packages and state inside the distro are wiped.
+    Workspace files (on the Windows filesystem) are not affected.
+    """
+    import os
+
+    from agent.safety import wsl_manager as wm
+
+    if os.name != "nt":
+        console.print("[red]Error:[/] WSL2 sandbox reset is only supported on Windows.")
+        raise typer.Exit(1)
+
+    cfg = _build_config()
+    if distro == _DEFAULT_DISTRO:
+        distro = cfg.safety.sandbox.wsl.distro
+
+    if not wm.distro_exists(distro):
+        console.print(f"[yellow]Distro '{distro}' does not exist — nothing to reset.[/]")
+        raise typer.Exit(0)
+
+    if not yes:
+        confirm = console.input(
+            f"[bold red]This will permanently delete distro '{distro}' and all its contents.[/]\n"
+            "Type the distro name to confirm: "
+        )
+        if confirm.strip() != distro:
+            console.print("[dim]Aborted.[/]")
+            raise typer.Exit(0)
+
+    console.print(f"[yellow]Unregistering '{distro}'…[/]")
+    wm.unregister_distro(distro)
+    console.print("  [green]Unregistered[/]")
+
+    # Re-run setup with same options
+    sandbox_setup(
+        distro=distro,
+        install_path=None,
+        rootfs_url=rootfs_url,
+        packages=packages,
+        force=False,
+    )
 
 
 if __name__ == "__main__":

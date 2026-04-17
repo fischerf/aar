@@ -63,7 +63,6 @@ class Agent:
             self.config.tools,
             self.config.safety,
             approval_callback,
-            shell_path=self.config.shell_path,
         )
         self._on_event: list[Callable[[Event], Any]] = []
 
@@ -81,7 +80,10 @@ class Agent:
         if enabled & fs_tools:
             register_filesystem_tools(self.registry)
         if enabled & shell_tools:
-            register_shell_tools(self.registry, shell_path=self.config.shell_path)
+            register_shell_tools(
+                self.registry,
+                sandbox=self.executor.sandbox,
+            )
 
         # Only prune builtins we just added that weren't explicitly enabled
         newly_added = set(self.registry.names()) - pre_existing

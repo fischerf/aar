@@ -50,9 +50,11 @@
       "**/.pypirc"
     ],
     "allowed_paths": [],
-    "sandbox": "local",
-    "sandbox_max_memory_mb": 512,
-    "log_all_commands": true
+    "sandbox": {
+      "mode": "local"
+    },
+    "log_all_commands": true,
+    "acp_approval_timeout": 0.0
   },
   "tui": {
     "theme": "default",
@@ -65,7 +67,7 @@
     "reserve_cost_fraction": 0.1
   },
   "max_steps": 50,
-  "timeout": 300.0,
+  "timeout": 0.0,
   "max_retries": 3,
   "streaming": true,
   "context_window": 200000,
@@ -75,7 +77,6 @@
   "token_warning_threshold": 0.8,
   "cost_warning_threshold": 0.8,
   "session_dir": ".agent/sessions",
-  "shell_path": "",
   "project_rules_dir": ".agent",
   "log_level": "WARNING"
 }

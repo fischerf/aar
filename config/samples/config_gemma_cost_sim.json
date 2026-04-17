@@ -60,19 +60,31 @@
       "**/.pypirc"
     ],
     "allowed_paths": [],
-    "sandbox": "local",
-    "sandbox_max_memory_mb": 512,
-    "log_all_commands": true
+    "sandbox": {
+      "mode": "local"
+    },
+    "log_all_commands": true,
+    "acp_approval_timeout": 0.0
   },
   "tui": {
     "theme": "",
     "layout": {
-      "reasoning": { "visible": false },
-      "token_usage": { "visible": true },
-      "welcome": { "visible": true },
+      "reasoning": {
+        "visible": false
+      },
+      "token_usage": {
+        "visible": true
+      },
+      "welcome": {
+        "visible": true
+      },
       "extensions": {
-        "metrics": { "visible": true },
-        "custom_panel": { "visible": false }
+        "metrics": {
+          "visible": true
+        },
+        "custom_panel": {
+          "visible": false
+        }
       }
     }
   },
@@ -83,7 +95,7 @@
     "reserve_cost_fraction": 0.15
   },
   "max_steps": 150,
-  "timeout": 500.0,
+  "timeout": 0.0,
   "max_retries": 3,
   "streaming": true,
   "context_window": 32768,
@@ -93,7 +105,6 @@
   "token_warning_threshold": 0.7,
   "cost_warning_threshold": 0.7,
   "session_dir": ".agent/sessions",
-  "shell_path": "",
   "project_rules_dir": ".agent",
   "log_level": "WARNING"
 }

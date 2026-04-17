@@ -228,75 +228,129 @@ class TestPlanExecution:
         agent = Agent(config=agent_config)
         session = await agent.run(PLAN_PROMPT)
 
-        # ── Basic session checks ──────────────────────────────────────
-        assert session.state in {
-            AgentState.COMPLETED,
-            AgentState.MAX_STEPS,
-        }, f"Agent ended in unexpected state: {session.state}"
+        failures: list[str] = []
 
-        # ── Collect all assistant text ────────────────────────────────
-        assistant_text = "\n".join(
+        def ok(label: str) -> None:
+            print(f'  \u2705 {label}')
+
+        def fail(label: str, detail: str = '') -> None:
+            msg = f'{label}: {detail}' if detail else label
+            failures.append(msg)
+            print(f'  \u274c {msg}')
+
+        print(f'\n\u2500\u2500 Deliverable checks (state={session.state}, steps={session.step_count}) \u2500\u2500')
+
+        # \u2500\u2500 Basic session checks
+        if session.state not in {AgentState.COMPLETED, AgentState.MAX_STEPS}:
+            fail('session state', f'unexpected state {session.state!r}')
+        else:
+            ok(f'session state ({session.state})')
+
+        # \u2500\u2500 Collect all assistant text
+        assistant_text = '\n'.join(
             e.content for e in session.events if isinstance(e, AssistantMessage) and e.content
         )
 
-        # ── Check the agent declared completion ───────────────────────
-        assert "ALL_TASKS_COMPLETED" in assistant_text, "Agent did not output ALL_TASKS_COMPLETED"
+        # \u2500\u2500 Verify utils.py was implemented
+        utils_path = work_dir / 'utils.py'
+        utils_mod = None
+        if not utils_path.exists():
+            fail('utils.py exists')
+        else:
+            utils_src = utils_path.read_text(encoding='utf-8')
+            if 'def process_numbers' not in utils_src:
+                fail('process_numbers defined', 'function not found in utils.py')
+            else:
+                func_body = utils_src.split('def process_numbers')[1]
+                code_lines = [
+                    ln.split('#')[0].strip()
+                    for ln in func_body.splitlines()
+                    if ln.strip() and not ln.strip().startswith('#')
+                ]
+                if all(ln == 'pass' for ln in code_lines if ln):
+                    fail('process_numbers implemented', 'still only contains bare pass')
+                else:
+                    ok('process_numbers implemented')
 
-        # ── Verify utils.py was implemented ───────────────────────────
-        utils_path = work_dir / "utils.py"
-        assert utils_path.exists(), "utils.py missing"
-        utils_src = utils_path.read_text(encoding="utf-8")
-        assert "def process_numbers" in utils_src, "process_numbers not defined"
+                # Try to import and run the function
+                try:
+                    spec = importlib.util.spec_from_file_location('utils_live', utils_path)
+                    assert spec is not None and spec.loader is not None
+                    utils_mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(utils_mod)  # type: ignore[arg-type]
 
-        # Make sure the stub `pass` was replaced with a real body
-        func_body = utils_src.split("def process_numbers")[1]
-        code_lines = [
-            ln.split("#")[0].strip()
-            for ln in func_body.splitlines()
-            if ln.strip() and not ln.strip().startswith("#")
-        ]
-        assert not all(ln == "pass" for ln in code_lines if ln), (
-            "process_numbers still has only a bare pass"
-        )
+                    cases = [
+                        ([1, 2, 3, 4], [1, 4, 9, 8]),
+                        ([], []),
+                        ([2], [4]),
+                        ([3], [9]),
+                    ]
+                    for inp, expected in cases:
+                        got = utils_mod.process_numbers(inp)
+                        if got != expected:
+                            fail(
+                                f'process_numbers({inp!r})',
+                                f'expected {expected!r}, got {got!r}',
+                            )
+                        else:
+                            ok(f'process_numbers({inp!r}) == {expected!r}')
+                except Exception as exc:
+                    fail('process_numbers import/run', str(exc))
 
-        # ── Verify the implementation is correct ──────────────────────
-        spec = importlib.util.spec_from_file_location("utils", utils_path)
-        assert spec is not None and spec.loader is not None
-        utils_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(utils_mod)
+        # \u2500\u2500 Verify test_utils.py exists and passes
+        test_path = work_dir / 'test_utils.py'
+        if not test_path.exists():
+            fail('test_utils.py created')
+        else:
+            ok('test_utils.py created')
+            result = _run_python(work_dir, 'test_utils.py')
+            if result.returncode != 0:
+                fail(
+                    'test_utils.py passes',
+                    f'stdout: {result.stdout!r}  stderr: {result.stderr!r}',
+                )
+            else:
+                ok('test_utils.py passes')
 
-        assert utils_mod.process_numbers([1, 2, 3, 4]) == [1, 4, 9, 8], (
-            f"process_numbers([1,2,3,4]) returned {utils_mod.process_numbers([1, 2, 3, 4])}"
-        )
-        assert utils_mod.process_numbers([]) == [], "Empty list case failed"
-        assert utils_mod.process_numbers([2]) == [4], "Single even number case failed"
-        assert utils_mod.process_numbers([3]) == [9], "Single odd number case failed"
+        # \u2500\u2500 Verify main.py prints DONE
+        main_path = work_dir / 'main.py'
+        if not main_path.exists():
+            fail('main.py exists')
+        else:
+            result = _run_python(work_dir, 'main.py')
+            if result.returncode != 0:
+                fail(
+                    'main.py runs',
+                    f'stdout: {result.stdout!r}  stderr: {result.stderr!r}',
+                )
+            elif 'DONE' not in result.stdout:
+                fail('main.py prints DONE', f'stdout: {result.stdout!r}')
+            else:
+                ok('main.py runs and prints DONE')
 
-        # ── Verify test_utils.py exists ───────────────────────────────
-        test_path = work_dir / "test_utils.py"
-        assert test_path.exists(), "test_utils.py was not created"
-
-        # ── Verify tests pass when run ────────────────────────────────
-        result = _run_python(work_dir, "test_utils.py")
-        assert result.returncode == 0, (
-            f"test_utils.py failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-        )
-
-        # ── Verify main.py prints DONE ────────────────────────────────
-        main_path = work_dir / "main.py"
-        assert main_path.exists(), "main.py missing"
-        result = _run_python(work_dir, "main.py")
-        assert result.returncode == 0, (
-            f"main.py failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-        )
-        assert "DONE" in result.stdout, f"main.py output does not contain DONE:\n{result.stdout}"
-
-        # ── Check no unrecoverable errors in the session ──────────────
+        # \u2500\u2500 Check no unrecoverable errors in the session
         errors = [e for e in session.events if isinstance(e, ErrorEvent) and not e.recoverable]
-        assert len(errors) == 0, f"Agent had unrecoverable errors: {[e.message for e in errors]}"
+        if errors:
+            fail('no unrecoverable errors', str([e.message for e in errors]))
+        else:
+            ok('no unrecoverable errors')
 
-        # ── Summary ───────────────────────────────────────────────────
-        print("\n✅ Plan execution test passed!")
-        print(f"   Steps: {session.step_count}")
-        print(f"   Total tokens: {session.total_tokens}")
-        print(f"   Total cost: ${session.total_cost:.4f}")
+        # \u2500\u2500 Check the agent declared completion (checked last)
+        if 'ALL_TASKS_COMPLETED' not in assistant_text:
+            fail('agent output ALL_TASKS_COMPLETED')
+        else:
+            ok('agent output ALL_TASKS_COMPLETED')
+
+        # \u2500\u2500 Summary
+        print(f'\n\u2500\u2500 Session stats \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500')
+        print(f'   Steps: {session.step_count}')
+        print(f'   Total tokens: {session.total_tokens}')
+        print(f'   Total cost: ${session.total_cost:.4f}')
+
+        if failures:
+            print(f'\n\u274c {len(failures)} check(s) failed:')
+            for f in failures:
+                print(f'   \u2022 {f}')
+            pytest.fail('\n'.join(failures))
+        else:
+            print('\n\u2705 Plan execution test passed!')

@@ -903,3 +903,92 @@ async def test_streaming_calls_stream_method(streaming_mock_provider, tool_regis
     await run_loop(session, streaming_mock_provider, executor, config)
 
     assert streaming_mock_provider.stream_call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# H3: Stream teardown always emits finished=True
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_finished_when_no_done_delta(streaming_mock_provider, tool_registry):
+    """A stream that ends without done=True must still emit StreamChunk(finished=True).
+
+    Without this, SSE/TUI consumers would block forever waiting for the end
+    marker.
+    """
+    streaming_mock_provider.enqueue_stream(
+        [
+            StreamDelta(text="Partial"),
+            StreamDelta(text=" content"),
+            # Note: no done=True — provider closed the stream abruptly.
+        ]
+    )
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock_stream"),
+        max_steps=2,
+        timeout=30.0,
+        streaming=True,
+    )
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    await run_loop(session, streaming_mock_provider, executor, config, on_event=collected.append)
+
+    finished = [e for e in collected if isinstance(e, StreamChunk) and e.finished]
+    assert len(finished) >= 1, "stream must emit finished=True even without done delta"
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_finished_on_exception(tool_registry):
+    """If the stream generator raises, the finished=True marker still fires."""
+    from agent.core.events import ErrorEvent
+    from agent.core.config import ProviderConfig
+    from agent.providers.base import Provider
+
+    class _BoomProvider(Provider):
+        def __init__(self):
+            super().__init__(ProviderConfig(name="boom", model="x"))
+
+        @property
+        def name(self):
+            return "boom"
+
+        @property
+        def supports_streaming(self):
+            return True
+
+        async def complete(self, messages, tools=None, system=""):
+            raise RuntimeError("unreachable")
+
+        async def stream(self, messages, tools=None, system=""):
+            yield StreamDelta(text="partial")
+            raise RuntimeError("transport blew up")
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="boom"),
+        max_steps=1,
+        timeout=30.0,
+        streaming=True,
+        max_retries=1,
+    )
+
+    session = Session()
+    session.add_user_message("Hi")
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    await run_loop(session, _BoomProvider(), executor, config, on_event=collected.append)
+
+    finished = [e for e in collected if isinstance(e, StreamChunk) and e.finished]
+    assert len(finished) == 1, "stream-end marker must fire even on exception"
+
+    # And the error should surface as an ErrorEvent (not silently swallow)
+    errors = [e for e in collected if isinstance(e, ErrorEvent)]
+    assert any(
+        "transport blew up" in (e.message or "") or "Provider" in (e.message or "") for e in errors
+    )

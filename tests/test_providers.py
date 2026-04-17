@@ -53,7 +53,9 @@ class TestAnthropicNormalization:
         """Create an Anthropic provider with a mocked client."""
         from agent.providers.anthropic import AnthropicProvider
 
-        config = ProviderConfig(name="anthropic", model="claude-sonnet-4-20250514", api_key="test-key")
+        config = ProviderConfig(
+            name="anthropic", model="claude-sonnet-4-20250514", api_key="test-key"
+        )
         with patch("anthropic.AsyncAnthropic"):
             provider = AnthropicProvider(config)
         return provider
@@ -300,9 +302,10 @@ class TestOpenAIMessageConversion:
         from agent.providers.openai import _build_messages
 
         msgs = [
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tc_1", "content": "output"}
-            ]}
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tc_1", "content": "output"}],
+            }
         ]
         result = _build_messages(msgs, "")
         assert result[0]["role"] == "tool"
@@ -312,10 +315,13 @@ class TestOpenAIMessageConversion:
         from agent.providers.openai import _build_messages
 
         msgs = [
-            {"role": "assistant", "content": [
-                {"type": "text", "text": "Let me check"},
-                {"type": "tool_use", "id": "tc_1", "name": "bash", "input": {"command": "ls"}},
-            ]}
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me check"},
+                    {"type": "tool_use", "id": "tc_1", "name": "bash", "input": {"command": "ls"}},
+                ],
+            }
         ]
         result = _build_messages(msgs, "")
         assert result[0]["role"] == "assistant"
@@ -469,9 +475,10 @@ class TestOllamaMessageConversion:
         from agent.providers.ollama import _build_messages
 
         msgs = [
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tc_1", "content": "output"}
-            ]}
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tc_1", "content": "output"}],
+            }
         ]
         result = _build_messages(msgs, "")
         assert result[0]["role"] == "tool"
@@ -516,11 +523,14 @@ class TestLiveAnthropic:
     def _provider(self):
         import os
         from agent.providers.anthropic import AnthropicProvider
-        return AnthropicProvider(ProviderConfig(
-            name="anthropic",
-            model="claude-haiku-4-5-20251001",
-            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-        ))
+
+        return AnthropicProvider(
+            ProviderConfig(
+                name="anthropic",
+                model="claude-haiku-4-5-20251001",
+                api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+            )
+        )
 
     @pytest.mark.asyncio
     async def test_plain_text_response(self):
@@ -571,11 +581,14 @@ class TestLiveOpenAI:
     def _provider(self):
         import os
         from agent.providers.openai import OpenAIProvider
-        return OpenAIProvider(ProviderConfig(
-            name="openai",
-            model="gpt-4o-mini",
-            api_key=os.environ.get("OPENAI_API_KEY", ""),
-        ))
+
+        return OpenAIProvider(
+            ProviderConfig(
+                name="openai",
+                model="gpt-4o-mini",
+                api_key=os.environ.get("OPENAI_API_KEY", ""),
+            )
+        )
 
     @pytest.mark.asyncio
     async def test_plain_text_response(self):
@@ -609,3 +622,138 @@ class TestLiveOpenAI:
         assert result.meta is not None
         assert result.meta.provider == "openai"
         assert result.meta.model
+
+
+# ---------------------------------------------------------------------------
+# Base Provider.stream() fallback — covers providers that don't implement
+# native streaming and rely on the default in agent/providers/base.py.
+# ---------------------------------------------------------------------------
+
+
+class TestProviderStreamFallback:
+    """The default ``Provider.stream()`` replays a ``complete()`` response as deltas.
+
+    The previous implementation yielded only one ``StreamDelta(text=..., done=True)``
+    and silently dropped tool calls, reasoning, and provider metadata. The fix
+    replays each piece as its own delta so the stream consumer assembles a
+    response indistinguishable from a native stream.
+    """
+
+    def _provider(self, response):
+        from agent.providers.base import Provider
+
+        class _FakeProvider(Provider):
+            @property
+            def name(self) -> str:
+                return "fake"
+
+            async def complete(self, messages, tools=None, system=""):
+                return response
+
+        return _FakeProvider(ProviderConfig(name="fake", model="m"))
+
+    @pytest.mark.asyncio
+    async def test_fallback_emits_text_and_terminal_done(self):
+        from agent.core.events import ProviderMeta
+        from agent.providers.base import ProviderResponse
+
+        response = ProviderResponse(
+            content="hello world",
+            stop_reason="end_turn",
+            meta=ProviderMeta(provider="fake", model="m"),
+        )
+        provider = self._provider(response)
+
+        deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+
+        texts = [d.text for d in deltas if d.text]
+        assert "".join(texts) == "hello world"
+        assert deltas[-1].done is True
+        assert deltas[-1].meta is not None
+        assert deltas[-1].meta.provider == "fake"
+        # Exactly one terminal delta
+        assert sum(1 for d in deltas if d.done) == 1
+
+    @pytest.mark.asyncio
+    async def test_fallback_preserves_tool_calls(self):
+        """Without the fix tool calls vanish — they must survive the fallback."""
+        from agent.core.events import ProviderMeta, ToolCall
+        from agent.providers.base import ProviderResponse
+
+        response = ProviderResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="read_file",
+                    tool_call_id="tc_1",
+                    arguments={"path": "/tmp/x"},
+                )
+            ],
+            stop_reason="tool_use",
+            meta=ProviderMeta(provider="fake", model="m"),
+        )
+        provider = self._provider(response)
+
+        deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+        tool_deltas = [d.tool_call_delta for d in deltas if d.tool_call_delta]
+        assert len(tool_deltas) == 1
+        assert tool_deltas[0]["tool_name"] == "read_file"
+        assert tool_deltas[0]["tool_call_id"] == "tc_1"
+        assert tool_deltas[0]["arguments"] == {"path": "/tmp/x"}
+
+    @pytest.mark.asyncio
+    async def test_fallback_preserves_reasoning(self):
+        from agent.core.events import ProviderMeta, ReasoningBlock
+        from agent.providers.base import ProviderResponse
+
+        response = ProviderResponse(
+            content="answer",
+            reasoning=[ReasoningBlock(content="first thought"), ReasoningBlock(content="second")],
+            stop_reason="end_turn",
+            meta=ProviderMeta(provider="fake", model="m"),
+        )
+        provider = self._provider(response)
+
+        deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+        reasoning = "".join(d.reasoning_delta for d in deltas if d.reasoning_delta)
+        assert "first thought" in reasoning
+        assert "second" in reasoning
+
+    @pytest.mark.asyncio
+    async def test_fallback_roundtrip_through_consume_stream(self):
+        """End-to-end: run the fallback through the loop's stream consumer
+        and confirm the assembled ProviderResponse matches complete()."""
+        from agent.core.events import ProviderMeta, ToolCall
+        from agent.core.provider_runner import _consume_stream
+        from agent.core.session import Session
+        from agent.providers.base import ProviderResponse
+
+        response = ProviderResponse(
+            content="hi there",
+            tool_calls=[ToolCall(tool_name="search", tool_call_id="tc_42", arguments={"q": "x"})],
+            stop_reason="tool_use",
+            meta=ProviderMeta(provider="fake", model="m"),
+        )
+        provider = self._provider(response)
+        session = Session()
+
+        events = []
+
+        def on_event(ev):
+            events.append(ev)
+
+        assembled = await _consume_stream(
+            provider=provider,
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            system="",
+            session=session,
+            on_event=on_event,
+        )
+
+        assert assembled.content == "hi there"
+        assert len(assembled.tool_calls) == 1
+        assert assembled.tool_calls[0].tool_name == "search"
+        assert assembled.tool_calls[0].tool_call_id == "tc_42"
+        assert assembled.stop_reason == "tool_use"
+        assert assembled.meta is not None and assembled.meta.provider == "fake"

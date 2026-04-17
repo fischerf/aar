@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 
 import pytest
 
@@ -15,7 +16,12 @@ from agent.safety.policy import (
     PolicyDecision,
     SafetyPolicy,
 )
-from agent.safety.sandbox import LocalSandbox, SandboxResult, SubprocessSandbox
+from agent.safety.sandbox import (
+    LinuxSandbox,
+    LocalSandbox,
+    SandboxResult,
+    WindowsSubprocessSandbox,
+)
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
@@ -123,6 +129,35 @@ class TestPolicyPathRestrictions:
 
         assert policy.check_tool(read_spec, {"path": "/etc/safe_config"}) == PolicyDecision.ALLOW
         assert policy.check_tool(write_spec, {"path": "/etc/safe_config"}) == PolicyDecision.DENY
+
+
+class TestPolicyNormalizePath:
+    """H6: normalization collapses traversal, UNC, drive-letter case."""
+
+    def test_dotdot_traversal_still_denied(self):
+        """A `..` escape must not dodge a denied pattern."""
+        policy = SafetyPolicy()
+        spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
+        # /tmp/../etc/shadow resolves to /etc/shadow and must be blocked.
+        assert policy.check_tool(spec, {"path": "/tmp/../etc/shadow"}) == PolicyDecision.DENY
+
+    def test_dot_components_stripped(self):
+        """`.` segments should collapse so matching is stable."""
+        assert SafetyPolicy._normalize_path("/etc/./shadow") == "/etc/shadow"
+
+    def test_windows_drive_letter_lowercased(self):
+        """Mixed-case drive letters should normalize to a single form."""
+        assert SafetyPolicy._normalize_path("C:\\Proj\\file.py") == "c:/Proj/file.py"
+        assert SafetyPolicy._normalize_path("c:/Proj/file.py") == "c:/Proj/file.py"
+
+    def test_unc_path_preserved_not_resolved(self):
+        """UNC paths are absolute; don't pass them through Path.resolve()."""
+        assert SafetyPolicy._normalize_path(r"\\server\share\file") == "//server/share/file"
+
+    def test_posix_trailing_slash_and_empty(self):
+        """Empty and root-only segments collapse to the bare root."""
+        assert SafetyPolicy._normalize_path("/") == "/"
+        assert SafetyPolicy._normalize_path("/./") == "/"
 
 
 class TestPolicyModes:
@@ -298,27 +333,6 @@ class TestLocalSandbox:
         assert result.output == "(no output)"
 
 
-class TestSubprocessSandbox:
-    @pytest.mark.asyncio
-    async def test_execute_simple(self):
-        sb = SubprocessSandbox()
-        result = await sb.execute("echo sandboxed")
-        assert "sandboxed" in result.stdout
-        assert result.exit_code == 0
-
-    @pytest.mark.asyncio
-    async def test_restricted_env(self):
-        sb = SubprocessSandbox(allowed_env_vars=["PATH"])
-        result = await sb.execute("echo ok")
-        assert result.exit_code == 0
-
-    @pytest.mark.asyncio
-    async def test_timeout(self):
-        sb = SubprocessSandbox()
-        result = await sb.execute("sleep 60", timeout=1)
-        assert result.timed_out
-
-
 class TestSandboxResult:
     def test_output_combined(self):
         r = SandboxResult(stdout="out", stderr="err", exit_code=1)
@@ -333,6 +347,191 @@ class TestSandboxResult:
     def test_output_timeout(self):
         r = SandboxResult(timed_out=True, exit_code=-1)
         assert "(timed out)" in r.output
+
+
+# ===========================================================================
+# LinuxSandbox (Landlock)
+# ===========================================================================
+
+
+class TestLinuxSandbox:
+    """LinuxSandbox: Landlock probe, preexec factory, and fallback behaviour."""
+
+    def test_check_landlock_returns_bool(self, tmp_path):
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        result = sb._check_landlock()
+        assert isinstance(result, bool)
+
+    def test_check_landlock_is_cached(self, tmp_path):
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        first = sb._check_landlock()
+        # Force a different raw value — cache must win
+        sb._landlock_available = not first
+        assert sb._check_landlock() == (not first)
+
+    def test_make_landlock_preexec_returns_callable(self, tmp_path):
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        fn = sb._make_landlock_preexec(str(tmp_path))
+        assert callable(fn)
+
+    def test_make_landlock_preexec_does_not_raise_called_directly(self, tmp_path):
+        """The preexec closure must never raise — it silently falls back."""
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        fn = sb._make_landlock_preexec("/nonexistent_workspace_xyz")
+        fn()  # Should not raise even with a bad workspace path
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
+    async def test_execute_simple(self, tmp_path):
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        result = await sb.execute("echo workspace_ok")
+        assert "workspace_ok" in result.stdout
+        assert result.exit_code == 0
+        assert not result.timed_out
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
+    async def test_execute_timeout(self, tmp_path):
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        result = await sb.execute("sleep 60", timeout=1)
+        assert result.timed_out
+        assert result.exit_code == -1
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
+    async def test_restricted_env(self, tmp_path):
+        """Only allowed env vars should reach the subprocess."""
+        sb = LinuxSandbox(workspace=str(tmp_path), allowed_env_vars=["PATH"])
+        result = await sb.execute("echo ok")
+        assert result.exit_code == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("sys").platform.startswith("linux"),
+        reason="Landlock probe only meaningful on Linux",
+    )
+    async def test_landlock_fallback_logged(self, tmp_path, caplog):
+        """When Landlock is unavailable, a warning is logged and execution succeeds."""
+        import logging
+
+        sb = LinuxSandbox(workspace=str(tmp_path))
+        sb._landlock_available = False  # force fallback path
+
+        with caplog.at_level(logging.WARNING, logger="agent.safety.sandbox"):
+            result = await sb.execute("echo fallback_ok")
+
+        assert "fallback" in caplog.text.lower()
+        assert "fallback_ok" in result.stdout
+
+
+# ===========================================================================
+# WindowsSubprocessSandbox
+# ===========================================================================
+
+
+class TestWindowsSubprocessSandbox:
+    """WindowsSubprocessSandbox: ctypes mocking, Job Object, Low Integrity, fallback."""
+
+    def test_build_env_includes_allowed_vars(self, tmp_path):
+        sb = WindowsSubprocessSandbox(
+            workspace=str(tmp_path),
+            allowed_env_vars=["PATH"],
+            use_low_integrity=False,
+        )
+        env = sb._build_env(None)
+        assert "PATH" in env or len(env) == 0  # PATH might not exist in CI
+
+    def test_build_env_merges_extra(self, tmp_path):
+        sb = WindowsSubprocessSandbox(
+            workspace=str(tmp_path),
+            allowed_env_vars=[],
+            use_low_integrity=False,
+        )
+        env = sb._build_env({"MY_VAR": "hello"})
+        assert env["MY_VAR"] == "hello"
+
+    def test_get_helper_path_creates_file(self, tmp_path, monkeypatch):
+        """_get_helper_path() should write a Python script to disk."""
+        # Reset class-level state so the file is re-created
+        WindowsSubprocessSandbox._helper_path = None
+        path = WindowsSubprocessSandbox._get_helper_path()
+        assert path.endswith(".py")
+        assert __import__("os").path.exists(path)
+        # Calling again returns the same path (cached)
+        assert WindowsSubprocessSandbox._get_helper_path() == path
+        # Cleanup
+        __import__("os").unlink(path)
+        WindowsSubprocessSandbox._helper_path = None
+
+    def test_assign_job_object_graceful_on_non_windows(self, tmp_path):
+        """On non-Windows, _assign_job_object should return None without raising."""
+        import sys
+
+        if sys.platform == "win32":
+            pytest.skip("Non-Windows graceful-degradation test")
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=False)
+        result = sb._assign_job_object(os.getpid())
+        assert result is None
+
+    def test_stamp_workspace_integrity_is_idempotent(self, tmp_path):
+        """_stamp_workspace_integrity() should not raise and only run once."""
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=False)
+        sb._stamp_workspace_integrity()
+        sb._stamp_workspace_integrity()  # second call is a no-op
+        assert sb._workspace_stamped is True
+
+    @pytest.mark.asyncio
+    async def test_execute_simple_no_low_integrity(self, tmp_path):
+        """With use_low_integrity=False, execution goes through _execute_with_job_object."""
+        sb = WindowsSubprocessSandbox(
+            workspace=str(tmp_path),
+            use_low_integrity=False,
+        )
+        result = await sb.execute("echo windows_ok")
+        assert "windows_ok" in result.stdout
+        assert result.exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_execute_timeout_no_low_integrity(self, tmp_path):
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=False)
+        result = await sb.execute("sleep 60", timeout=1)
+        assert result.timed_out
+
+    @pytest.mark.asyncio
+    async def test_execute_low_integrity_falls_back_on_failure(self, tmp_path, monkeypatch):
+        """When the helper script fails, fallback to plain subprocess."""
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=True)
+
+        # Simulate helper execution failure
+        async def _fail(*a, **kw):
+            return None
+
+        monkeypatch.setattr(sb, "_execute_low_integrity", _fail)
+        result = await sb.execute("echo fallback_ok")
+        assert "fallback_ok" in result.stdout
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        __import__("sys").platform != "win32",
+        reason="Job Object ctypes test only on Windows",
+    )
+    async def test_job_object_assigned_on_windows(self, tmp_path, monkeypatch):
+        """On Windows, _assign_job_object should return a non-None handle."""
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=False)
+        import asyncio as _asyncio
+
+        proc = await _asyncio.create_subprocess_exec(
+            "cmd",
+            "/c",
+            "echo hi",
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+        )
+        handle = sb._assign_job_object(proc.pid)
+        await proc.communicate()
+        if handle is not None:
+            sb._close_job(handle)
+        assert handle is not None
 
 
 # ===========================================================================

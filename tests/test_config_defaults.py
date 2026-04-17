@@ -239,7 +239,6 @@ class TestInitConfigMatchesDefaults:
         assert loaded.safety.denied_paths == canonical.safety.denied_paths
         assert loaded.safety.allowed_paths == canonical.safety.allowed_paths
         assert loaded.safety.sandbox == canonical.safety.sandbox
-        assert loaded.safety.sandbox_max_memory_mb == canonical.safety.sandbox_max_memory_mb
         assert loaded.safety.log_all_commands == canonical.safety.log_all_commands
         assert loaded.max_steps == canonical.max_steps
         assert loaded.timeout == canonical.timeout

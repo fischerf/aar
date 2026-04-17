@@ -36,7 +36,7 @@ provider.stream()
     │   …
     └─ StreamDelta(done=True, meta=ProviderMeta(usage={…}))
                                 │
-                        _consume_stream()   ← in loop.py
+                        _consume_stream()   ← in provider_runner.py
                                 │
                         returns ProviderResponse(meta=ProviderMeta(…))
                                 │

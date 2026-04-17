@@ -107,3 +107,16 @@ Token counts are only available once the provider's final chunk arrives. With `s
   "streaming": true
 }
 ```
+
+## Writing a new provider
+
+Subclass `Provider` in `agent/providers/base.py` and implement `complete()`.
+`stream()` has a default fallback so adapters without native streaming still
+work — it calls `complete()` and replays the response as a short sequence of
+deltas: one per text chunk, one per reasoning block, one per tool call, then
+a terminal `StreamDelta(done=True, meta=response.meta)`.
+
+The fallback is faithful: text, tool calls, reasoning, and `ProviderMeta` all
+reach the stream consumer. Providers that implement `stream()` natively should
+preserve the same invariants — exactly one `done=True` delta at the end, and
+`meta` attached to that final delta so the loop can record usage.
