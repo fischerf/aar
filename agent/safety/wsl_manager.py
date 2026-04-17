@@ -87,15 +87,22 @@ def unregister_distro(name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_in_distro(name: str, command: str) -> tuple[str, str, int]:
+def run_in_distro(name: str, command: str, timeout: int = 120) -> tuple[str, str, int]:
     """Run *command* via sh inside distro *name*.
 
     Returns ``(stdout, stderr, returncode)``.  Does not raise on non-zero exit.
+
+    Args:
+        name:    WSL2 distro name.
+        command: Shell command to execute inside the distro.
+        timeout: Seconds to wait before raising ``subprocess.TimeoutExpired``.
+                 Default is 120 s — use a larger value for long-running steps
+                 such as package installation.
     """
     result = subprocess.run(
         ["wsl", "-d", name, "--", "sh", "-c", command],
         capture_output=True,
-        timeout=120,
+        timeout=timeout,
     )
     stdout = result.stdout.decode("utf-8", errors="replace")
     stderr = result.stderr.decode("utf-8", errors="replace")

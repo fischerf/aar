@@ -1165,7 +1165,7 @@ def sandbox_setup(
     if pkg_list:
         console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
         stdout, stderr, rc = wm.run_in_distro(
-            distro, f"apk add --no-cache {' '.join(pkg_list)} 2>&1"
+            distro, f"apk add --no-cache {' '.join(pkg_list)} 2>&1", timeout=600
         )
         if rc != 0:
             console.print(f"[yellow]Warning:[/] Package install returned exit code {rc}.")
