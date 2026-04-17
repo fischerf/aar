@@ -107,8 +107,42 @@ class PolicyConfig(BaseModel):
     )
 
     # Logging
-    log_all_commands: bool = True
+    # Off by default: audit logging records full command strings, which frequently
+    # contain secrets (API keys, tokens, --password=…). Users who need an audit
+    # trail can opt in; output is still redacted via _redact_secrets.
+    log_all_commands: bool = False
     log_all_file_access: bool = False
+
+
+# Patterns for values that should be masked in audit logs. Each pattern captures
+# a key/prefix in group 1 and a secret-looking value in group 2.
+_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    # key=value / key:value  (key contains token/secret/pass/api_key/auth/bearer/...)
+    re.compile(
+        r"(?i)((?:api[_-]?key|secret|token|password|passwd|bearer|auth(?:orization)?)"
+        r"\s*[=:]\s*)(\S+)"
+    ),
+    # --password VALUE  /  --token VALUE
+    re.compile(
+        r"(?i)(--(?:api[_-]?key|secret|token|password|passwd|bearer|auth)\s+)(\S+)"
+    ),
+    # Authorization: Bearer XYZ   (HTTP headers in curl -H etc.)
+    re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-]+)"),
+    # Long-ish hex/base64 blobs that look like credentials (>=24 chars of [A-Za-z0-9_-])
+    re.compile(r"\b([A-Za-z0-9_\-]{32,})\b"),
+]
+
+
+def _redact_secrets(command: str) -> str:
+    """Mask secret-looking values in *command* for safe audit logging."""
+    redacted = command
+    for i, pat in enumerate(_SECRET_PATTERNS):
+        if i < 3:
+            redacted = pat.sub(lambda m: f"{m.group(1)}***REDACTED***", redacted)
+        else:
+            # Standalone long tokens — replace the whole match
+            redacted = pat.sub("***REDACTED***", redacted)
+    return redacted
 
 
 class SafetyPolicy:
@@ -232,23 +266,31 @@ class SafetyPolicy:
     def _check_command(self, command: str) -> PolicyDecision:
         """Check a shell command against command rules."""
         if self.config.log_all_commands:
-            logger.info("Command audit: %s", command)
+            logger.info("Command audit: %s", _redact_secrets(command))
 
         # Check explicit command rules first
         for pattern, decision in self._compiled_command_rules:
             if isinstance(pattern, re.Pattern):
                 if pattern.search(command):
-                    logger.info("Policy %s (command rule): %s", decision.value, command)
+                    logger.info(
+                        "Policy %s (command rule): %s", decision.value, _redact_secrets(command)
+                    )
                     return decision
             else:
                 if pattern in command:
-                    logger.info("Policy %s (command rule): %s", decision.value, command)
+                    logger.info(
+                        "Policy %s (command rule): %s", decision.value, _redact_secrets(command)
+                    )
                     return decision
 
         # Check default denied commands
         for denied in self.config.denied_commands:
             if denied in command:
-                logger.warning("Policy DENY (denied command): %s matches %s", command, denied)
+                logger.warning(
+                    "Policy DENY (denied command): %s matches %s",
+                    _redact_secrets(command),
+                    denied,
+                )
                 return PolicyDecision.DENY
 
         return PolicyDecision.ALLOW

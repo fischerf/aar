@@ -281,7 +281,11 @@ async def _provider_request(
                 ErrorEvent(message=_friendly, recoverable=_recoverable),
             )
             raise _ProviderRequestFailed from e
-    assert response is not None
+    if response is None:
+        # Should be unreachable: either the loop broke with a response or
+        # raised _ProviderRequestFailed on final retry. Guard explicitly so
+        # this never silently becomes None under -O (assertions disabled).
+        raise RuntimeError("Provider returned no response after retries")
     return response, (time.monotonic() - t_provider) * 1000
 
 

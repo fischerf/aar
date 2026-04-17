@@ -7,7 +7,7 @@ import uuid
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Content block models (for multimodal / image input)
@@ -147,6 +147,17 @@ class ToolCall(Event):
     tool_name: str = ""
     tool_call_id: str = ""
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _ensure_tool_call_id(self) -> "ToolCall":
+        # Guarantee a stable id at construction — providers usually supply one
+        # (e.g. Anthropic block.id, OpenAI tc.id), but a missing/empty value
+        # previously caused transports to lazily assign it, which races when
+        # the ToolCall object is read concurrently (e.g. on_event vs the
+        # permission callback). Generating here removes the race.
+        if not self.tool_call_id:
+            self.tool_call_id = str(uuid.uuid4())
+        return self
 
 
 class ToolResult(Event):

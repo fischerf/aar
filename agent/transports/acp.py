@@ -45,7 +45,7 @@ from agent.core.events import (
 )
 from agent.core.session import Session
 from agent.core.state import AgentState
-from agent.memory.session_store import SessionStore
+from agent.memory.session_store import SessionStore, validate_session_id
 from agent.safety.permissions import ApprovalCallback, ApprovalResult
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
@@ -268,6 +268,7 @@ class AarAcpAgent:
         from acp import LoadSessionResponse
 
         try:
+            validate_session_id(session_id)
             session = self._store.load(session_id)
             if cwd:
                 session.metadata["cwd"] = cwd
@@ -311,6 +312,11 @@ class AarAcpAgent:
         """Clean up per-session state when Zed closes a session."""
         from acp.schema import CloseSessionResponse
 
+        try:
+            validate_session_id(session_id)
+        except ValueError:
+            logger.warning("ACP: close_session ignoring invalid session_id %r", session_id)
+            return CloseSessionResponse()
         await self._teardown_mcp(session_id)
         self._sessions.pop(session_id, None)
         self._cancel_events.pop(session_id, None)
@@ -327,6 +333,11 @@ class AarAcpAgent:
         mid-tool execution.  Per the ACP spec the ``session/prompt`` response
         MUST use ``stop_reason="cancelled"``.
         """
+        try:
+            validate_session_id(session_id)
+        except ValueError:
+            logger.warning("ACP: cancel ignoring invalid session_id %r", session_id)
+            return
         # 1. Cooperative flag — checked at the top of each loop iteration
         event = self._cancel_events.get(session_id)
         if event:
@@ -351,6 +362,7 @@ class AarAcpAgent:
         """Switch the model for an existing session (unstable protocol)."""
         from acp.schema import SetSessionModelResponse
 
+        validate_session_id(session_id)
         provider_name, model = _model_id_to_provider(model_id)
         base_cfg = self._session_configs.get(session_id, self._config)
         new_provider = base_cfg.provider.model_copy(update={"name": provider_name, "model": model})
@@ -375,6 +387,7 @@ class AarAcpAgent:
             UsageUpdate,
         )
 
+        validate_session_id(session_id)
         text = _extract_text(prompt)
 
         # Restore session — in-memory cache → disk → fresh session with given ID
@@ -449,11 +462,8 @@ class AarAcpAgent:
 
             # --- Tool call started ---
             elif isinstance(event, ToolCall):
-                # Ensure a stable toolCallId — assign once so the same id is
-                # visible to both on_event and _request_permission (they share
-                # the same ToolCall object).
-                if not event.tool_call_id:
-                    event.tool_call_id = str(uuid.uuid4())
+                # tool_call_id is guaranteed at construction (ToolCall model
+                # validator fills it with a uuid4 when providers leave it empty).
                 tc_id = event.tool_call_id
                 registry = self._session_registries.get(session_id, self._registry)
                 _spec = registry.get(event.tool_name) if registry else None
@@ -1039,7 +1049,7 @@ class AcpTransport:
             if session_id:
                 try:
                     session = self.store.load(session_id)
-                except FileNotFoundError:
+                except (FileNotFoundError, ValueError):
                     pass
 
             finished = await aar_agent.run(prompt, session, cancel_event=record.cancel_event)
@@ -1115,7 +1125,7 @@ class AcpTransport:
                 "step_count": session.step_count,
                 "event_count": len(session.events),
             }
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             return None
 
     def _make_agent(self) -> AarAgent:

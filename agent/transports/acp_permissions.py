@@ -142,15 +142,10 @@ def make_acp_approval_callback(
         ]
 
         kind = _side_effects_to_tool_kind(spec.side_effects)
-        # Re-use the tool_call_id already assigned by on_event so the ACP
-        # client can correlate the ToolCallStart (status=pending) with this
-        # permission request.
+        # tool_call_id is guaranteed non-empty at ToolCall construction (see
+        # the model validator in agent.core.events.ToolCall), so the same id
+        # is visible to both on_event (ToolCallStart) and here.
         tool_call_id = tc.tool_call_id
-        if not tool_call_id:
-            import uuid
-
-            tool_call_id = str(uuid.uuid4())
-            tc.tool_call_id = tool_call_id
 
         # Yield once so that any pending session_update tasks (e.g. the
         # ToolCallStart that on_event enqueued) can flush to the client

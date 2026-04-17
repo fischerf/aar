@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,21 @@ logger = logging.getLogger(__name__)
 # Bump this when the JSONL event format changes in a breaking way.
 SCHEMA_VERSION = 1
 
+# Session IDs are used as filenames and dict keys. Restrict to a safe charset so
+# an attacker-controlled id (e.g. via ACP load_session) cannot traverse out of
+# the session directory.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def validate_session_id(session_id: str) -> str:
+    """Return *session_id* if it is safe to use as a filename/dict key.
+
+    Raises ``ValueError`` otherwise. Accepts 1–128 chars of ``[A-Za-z0-9_-]``.
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"Invalid session_id: {session_id!r}")
+    return session_id
+
 
 class SessionStore:
     """Persists sessions as JSONL files."""
@@ -24,6 +40,7 @@ class SessionStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _session_path(self, session_id: str) -> Path:
+        validate_session_id(session_id)
         return self.base_dir / f"{session_id}.jsonl"
 
     def save(self, session: Session) -> Path:
