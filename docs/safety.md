@@ -55,6 +55,27 @@ These substring patterns block dangerous shell commands:
 
 Both lists can be extended via configuration (CLI flags, config files, or programmatic API) but not reduced below the defaults through CLI flags alone.
 
+### Command audit log
+
+`PolicyConfig.log_all_commands` (default **`false`**) controls whether every
+shell command the agent tries to run is logged to the agent audit log at INFO
+level.
+
+The default is off because agents frequently receive commands with credentials
+in them (for example `curl -H "Authorization: Bearer ..."` or
+`psql "postgres://user:pass@..."`). When enabled, the audit log passes each
+command through a best-effort secret redactor that scrubs common patterns
+before writing to disk:
+
+- `api_key=…`, `token=…`, `password=…`, `bearer=…`, `authorization=…` (any case, `=` or `:` separator)
+- `--api-key …`, `--token …`, `--password …`, `--bearer …`, `--auth …` flags
+- `Bearer <token>` headers
+- Bare 32+ character opaque tokens (heuristic — may produce false positives)
+
+Redaction is best-effort and not a substitute for not logging sensitive
+commands in the first place. Enable `log_all_commands` only when you need
+deep audit trails and have reviewed what the agent is likely to run.
+
 ## Per-transport defaults
 
 ### `aar chat` and `aar tui` (interactive)

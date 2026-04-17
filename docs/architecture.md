@@ -4,7 +4,7 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 
 ## Principles
 
-1. **Thin core loop** — the main execution path (`loop.py`) is under 80 lines. It does exactly three things: call the provider, execute tool calls, and append events to the session.
+1. **Thin core loop** — the main execution path (`loop.py`) is a single coroutine focused on control flow only. Helpers for provider requests, retries, event emission, and budget accounting live in sibling modules (`provider_runner.py`, `loop_helpers.py`). The loop does exactly three things: call the provider, execute tool calls, and append events to the session.
 2. **Typed event model** — every interaction (messages, tool calls, results, metadata) is a Pydantic model. Events are serializable, inspectable, and carry timing data.
 3. **Provider-agnostic** — the agent loop works with any provider that implements the `Provider` ABC. Swapping between Anthropic, OpenAI, Ollama, or a generic endpoint requires changing one config field.
 4. **Safe by default** — path restrictions, command deny-lists, and approval gates are built in and always active. Interactive modes enable a workspace sandbox by default.
@@ -63,7 +63,7 @@ while not done and step < max_steps:
 
 **Event emission order matters:** `ToolCall` events are emitted *before* the `AssistantMessage` in the same step. This allows `session.to_messages()` to bundle `tool_use` blocks into the assistant message for the next provider call, matching the Anthropic/OpenAI message format.
 
-**Token counts** arrive via the `ProviderMeta` event in both paths. For streaming responses, `_consume_stream()` captures the usage data from the provider's final done-chunk and attaches it to the `ProviderResponse` before the event is emitted. This means the counts are always available on the same `ProviderMeta` event regardless of whether streaming is enabled. See [Tokens, costs, and budgets](tokens.md) for the full pipeline.
+**Token counts** arrive via the `ProviderMeta` event in both paths. For streaming responses, `_consume_stream()` in `agent/core/provider_runner.py` captures the usage data from the provider's final done-chunk and attaches it to the `ProviderResponse` before the event is emitted. This means the counts are always available on the same `ProviderMeta` event regardless of whether streaming is enabled. See [Tokens, costs, and budgets](tokens.md) for the full pipeline.
 
 ### Runtime guardrails
 

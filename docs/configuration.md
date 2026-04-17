@@ -198,7 +198,7 @@ You can cap how many tokens or how much estimated cost a single agent run is all
 
 ### How token tracking works
 
-Token counts are read from the `ProviderMeta` event that fires after every provider call — for both streaming and non-streaming responses. In streaming mode the final chunk from the provider carries the usage data; `_consume_stream()` captures it and attaches it to the response before the event is emitted. See [Tokens, costs, and budgets](tokens.md) for the full pipeline, per-provider details, and how each transport displays the counts.
+Token counts are read from the `ProviderMeta` event that fires after every provider call — for both streaming and non-streaming responses. In streaming mode the final chunk from the provider carries the usage data; `_consume_stream()` (in `agent/core/provider_runner.py`) captures it and attaches it to the response before the event is emitted. See [Tokens, costs, and budgets](tokens.md) for the full pipeline, per-provider details, and how each transport displays the counts.
 
 ### How cost estimation works
 

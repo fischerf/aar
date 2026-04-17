@@ -30,7 +30,8 @@ from typing import Any
 
 from agent.core.events import ToolCall
 from agent.safety.permissions import ApprovalCallback, ApprovalResult
-from agent.tools.schema import SideEffect, ToolSpec
+from agent.tools.schema import ToolSpec
+from agent.transports.acp.common import _side_effects_to_tool_kind
 
 logger = logging.getLogger(__name__)
 
@@ -52,31 +53,6 @@ _OPTION_TO_RESULT: dict[str, ApprovalResult] = {
     "allow_always": ApprovalResult.APPROVED_ALWAYS,
     "deny": ApprovalResult.DENIED,
 }
-
-
-# ---------------------------------------------------------------------------
-# Side-effect → ACP ToolKind mapping
-# ---------------------------------------------------------------------------
-
-
-def _side_effects_to_tool_kind(side_effects: list[SideEffect]) -> str:
-    """Map Aar ``SideEffect`` list to an ACP ``ToolKind`` string.
-
-    Returns the most impactful kind so the ACP client can display the right
-    icon / risk indicator alongside the permission request.
-
-    Note: intentionally duplicated here (vs. ``acp.py``) to avoid a circular
-    import between the two transport modules.
-    """
-    if SideEffect.EXECUTE in side_effects:
-        return "execute"
-    if SideEffect.WRITE in side_effects:
-        return "edit"
-    if SideEffect.NETWORK in side_effects:
-        return "fetch"
-    if SideEffect.READ in side_effects:
-        return "read"
-    return "other"
 
 
 # ---------------------------------------------------------------------------

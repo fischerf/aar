@@ -541,6 +541,125 @@ class TestAarAcpAgentCancel:
         await agent.cancel(session_id="no-such-session")
 
 
+class TestAarAcpAgentConcurrency:
+    """C3+C4: fire-and-forget tracking and per-session serialization."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_tracks_task(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        async def _noop() -> None:
+            await asyncio.sleep(0)
+
+        task = agent._spawn(_noop(), name="unit-test-task")
+        assert task in agent._background_tasks
+        await task
+        # Done-callback runs on next tick
+        await asyncio.sleep(0)
+        assert task not in agent._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_spawn_exceptions_logged_and_cleared(self, tmp_path, caplog):
+        import logging
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        async def _boom() -> None:
+            raise RuntimeError("boom")
+
+        with caplog.at_level(logging.WARNING, logger="agent.transports.acp"):
+            task = agent._spawn(_boom(), name="boom-task")
+            # Await via gather so we don't re-raise
+            await asyncio.gather(task, return_exceptions=True)
+            # Let the done-callback fire
+            await asyncio.sleep(0)
+
+        assert task not in agent._background_tasks
+        assert any("boom" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_drains_background_tasks(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        done = asyncio.Event()
+
+        async def _slow() -> None:
+            await asyncio.sleep(0.01)
+            done.set()
+
+        agent._spawn(_slow(), name="slow-task")
+        await agent.shutdown()
+        assert done.is_set()
+        assert not agent._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_concurrent_prompt_same_session_rejected(self, tmp_path):
+        """A second prompt while the first is in flight must raise."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        # Simulate an in-flight prompt by parking a task in _run_tasks
+        gate = asyncio.Event()
+
+        async def _parked() -> None:
+            await gate.wait()
+
+        fake_task = asyncio.create_task(_parked())
+        agent._run_tasks[sid] = fake_task
+
+        with pytest.raises(RuntimeError, match="already in flight"):
+            await agent.prompt(prompt=[{"text": "hello"}], session_id=sid)
+
+        gate.set()
+        await fake_task
+
+    @pytest.mark.asyncio
+    async def test_close_session_cancels_in_flight_prompt(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        started = asyncio.Event()
+
+        async def _parked() -> None:
+            started.set()
+            await asyncio.sleep(30)
+
+        task = asyncio.create_task(_parked())
+        agent._run_tasks[sid] = task
+        agent._cancel_events[sid] = asyncio.Event()
+        await started.wait()
+
+        await agent.close_session(session_id=sid)
+
+        assert task.done()
+        assert task.cancelled() or task.exception() is not None
+        assert sid not in agent._run_tasks
+        assert sid not in agent._cancel_events
+
+    @pytest.mark.asyncio
+    async def test_session_lock_is_same_object_per_id(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        lock_a = agent._session_lock("abc123")
+        lock_b = agent._session_lock("abc123")
+        lock_c = agent._session_lock("other-sid")
+        assert lock_a is lock_b
+        assert lock_a is not lock_c
+
+
 class TestAarAcpAgentCwd:
     @pytest.mark.asyncio
     async def test_new_session_stores_cwd(self, tmp_path):

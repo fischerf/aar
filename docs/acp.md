@@ -269,3 +269,31 @@ pip install agent-client-protocol
 
 The package is listed as an optional dependency so the rest of Aar works without
 it. Only `aar acp` (stdio) and `create_acp_asgi_app` need it at runtime.
+
+---
+
+## 7. Module layout
+
+`agent/transports/acp/` is a package split by transport:
+
+| File | Purpose |
+|------|---------|
+| `__init__.py` | Re-exports the full public API (`AarAcpAgent`, `run_acp_stdio`, `AcpTransport`, `create_acp_asgi_app`, data models) so existing imports keep working |
+| `common.py` | Helpers shared by both transports: config loading, tool-kind mapping, prompt-block extraction, stop-reason mapping, MCP config translation, provider inference |
+| `stdio.py` | `AarAcpAgent` + `run_acp_stdio` — SDK-backed stdio transport (Zed, editors) |
+| `http.py` | `AcpTransport`, `create_acp_asgi_app`, and the Pydantic run/event models — HTTP + SSE transport |
+
+The sibling `agent/transports/acp_permissions.py` provides `make_acp_approval_callback`,
+which both transports use when wiring Aar's `PermissionManager` to ACP's
+`request_permission` flow.
+
+### Concurrency model (stdio)
+
+`AarAcpAgent` enforces **at most one in-flight prompt per session**:
+
+- A per-session `asyncio.Lock` guards lifecycle mutations (create/close/prompt-start/prompt-end)
+- A second prompt arriving while the first is still running is rejected with `RuntimeError`
+- `close_session` cancels the in-flight prompt (if any) and awaits it before tearing down
+- Fire-and-forget tasks (e.g. `session_update` delivery) are tracked in a strong-reference set
+  so they cannot be silently garbage-collected mid-await; exceptions are logged
+- `AarAcpAgent.shutdown()` drains outstanding background tasks and cancels unfinished prompts
