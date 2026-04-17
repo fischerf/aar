@@ -392,6 +392,12 @@ A dedicated, disposable WSL2 distro is used as the execution environment. Comman
 - No memory or process count cap
 - The agent runs as **root** inside the distro
 
+**Workspace-escape guard:** the sandbox refuses to `cd` outside the configured
+workspace before spawning the shell. A caller that passes a `cwd` which
+resolves outside — via absolute path, mixed-case drive letters, or `..`
+traversal — gets an immediate error result; the command never runs. This is a
+cheap last-line check, not a replacement for a real FS sandbox.
+
 **Use this mode for:** a clean, wipeable multi-language execution environment (install Node, Go, Rust, etc. without polluting your host). **Not suitable for:** protecting against a malicious command — use `windows` mode (or `linux` on Linux) for write isolation.
 
 **Configuration** (defaults work out of the box once `aar sandbox setup` has been run):
@@ -546,6 +552,22 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 The sandbox is applied to **all shell commands** — both the built-in `bash` tool and any commands spawned by subprocesses. The `bash` tool handler delegates execution to `sandbox.execute()`, which applies the platform-appropriate isolation before the process is spawned.
 
 This means `mode: "local"` is the only setting that provides no isolation. All other modes enforce their restrictions even for one-liner `bash` tool calls.
+
+## Path normalization
+
+`SafetyPolicy._normalize_path` is the single place where paths are made
+comparable to patterns. It handles four input shapes:
+
+| Input | Handling |
+|-------|----------|
+| Unix absolute (`/etc/shadow`) | `\` → `/`; collapse `.` / `..` segments so tricks like `/etc/../etc/passwd` still match `/etc/**` |
+| Windows drive-rooted (`C:\proj\file.py`, `C:/proj/file.py`) | Lowercase the drive letter (`C:` → `c:`) so mixed-case writes can't dodge patterns; collapse components |
+| UNC (`\\server\share\file`) | Converted to forward slashes; **not** resolved against CWD — it's already absolute |
+| Relative (`src/app.py`, `.`, `README.md`) | Resolved against the current working directory via `Path.resolve()` |
+
+Paths that look absolute are never fed through `Path.resolve()` because that
+would prepend the current drive on Windows (`/etc/shadow` → `C:/etc/shadow`),
+breaking defaults like `denied_paths=["/etc/shadow"]`.
 
 ## Architecture
 

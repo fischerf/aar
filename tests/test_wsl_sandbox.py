@@ -318,7 +318,9 @@ class TestSafetyConfigWslFields:
         from agent.core.config import SafetyConfig, SandboxConfig, WslSandboxConfig
         from agent.tools.execution import _create_sandbox
 
-        sc = SafetyConfig(sandbox=SandboxConfig(mode="wsl", wsl=WslSandboxConfig(distro="my-distro")))
+        sc = SafetyConfig(
+            sandbox=SandboxConfig(mode="wsl", wsl=WslSandboxConfig(distro="my-distro"))
+        )
         sb = _create_sandbox(sc)
         assert isinstance(sb, WslDistroSandbox)
         assert sb.distro_name == "my-distro"

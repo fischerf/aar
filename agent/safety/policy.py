@@ -123,9 +123,7 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
         r"\s*[=:]\s*)(\S+)"
     ),
     # --password VALUE  /  --token VALUE
-    re.compile(
-        r"(?i)(--(?:api[_-]?key|secret|token|password|passwd|bearer|auth)\s+)(\S+)"
-    ),
+    re.compile(r"(?i)(--(?:api[_-]?key|secret|token|password|passwd|bearer|auth)\s+)(\S+)"),
     # Authorization: Bearer XYZ   (HTTP headers in curl -H etc.)
     re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-]+)"),
     # Long-ish hex/base64 blobs that look like credentials (>=24 chars of [A-Za-z0-9_-])

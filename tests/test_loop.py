@@ -911,9 +911,7 @@ async def test_streaming_calls_stream_method(streaming_mock_provider, tool_regis
 
 
 @pytest.mark.asyncio
-async def test_streaming_emits_finished_when_no_done_delta(
-    streaming_mock_provider, tool_registry
-):
+async def test_streaming_emits_finished_when_no_done_delta(streaming_mock_provider, tool_registry):
     """A stream that ends without done=True must still emit StreamChunk(finished=True).
 
     Without this, SSE/TUI consumers would block forever waiting for the end
@@ -939,9 +937,7 @@ async def test_streaming_emits_finished_when_no_done_delta(
 
     collected: list = []
     executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
-    await run_loop(
-        session, streaming_mock_provider, executor, config, on_event=collected.append
-    )
+    await run_loop(session, streaming_mock_provider, executor, config, on_event=collected.append)
 
     finished = [e for e in collected if isinstance(e, StreamChunk) and e.finished]
     assert len(finished) >= 1, "stream must emit finished=True even without done delta"
@@ -993,5 +989,6 @@ async def test_streaming_emits_finished_on_exception(tool_registry):
 
     # And the error should surface as an ErrorEvent (not silently swallow)
     errors = [e for e in collected if isinstance(e, ErrorEvent)]
-    assert any("transport blew up" in (e.message or "") or "Provider" in (e.message or "")
-               for e in errors)
+    assert any(
+        "transport blew up" in (e.message or "") or "Provider" in (e.message or "") for e in errors
+    )

@@ -144,9 +144,7 @@ async def _consume_stream(
             if delta.done:
                 saw_done = True
                 meta = delta.meta
-                stop_reason = (
-                    StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
-                )
+                stop_reason = StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
                 break
     finally:
         # Unconditional stream-end marker. Safe to emit on exception paths too —

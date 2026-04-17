@@ -139,9 +139,7 @@ class TestPolicyNormalizePath:
         policy = SafetyPolicy()
         spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
         # /tmp/../etc/shadow resolves to /etc/shadow and must be blocked.
-        assert (
-            policy.check_tool(spec, {"path": "/tmp/../etc/shadow"}) == PolicyDecision.DENY
-        )
+        assert policy.check_tool(spec, {"path": "/tmp/../etc/shadow"}) == PolicyDecision.DENY
 
     def test_dot_components_stripped(self):
         """`.` segments should collapse so matching is stable."""
@@ -523,7 +521,9 @@ class TestWindowsSubprocessSandbox:
         import asyncio as _asyncio
 
         proc = await _asyncio.create_subprocess_exec(
-            "cmd", "/c", "echo hi",
+            "cmd",
+            "/c",
+            "echo hi",
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.PIPE,
         )
