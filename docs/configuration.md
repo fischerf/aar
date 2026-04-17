@@ -20,7 +20,7 @@ config = AgentConfig(
     ),
     tools=ToolConfig(
         enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
-        command_timeout=30,                        # seconds
+        command_timeout=30,                        # per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
     ),
     safety=SafetyConfig(
@@ -32,6 +32,7 @@ config = AgentConfig(
         sandbox=SandboxConfig(                     # see docs/safety.md for all modes and per-mode options
             mode="local",                          # "local" | "subprocess" | "workspace" | "windows" | "wsl" | "auto"
         ),
+        acp_approval_timeout=0.0,                  # seconds the ACP client has to respond to a permission request; 0.0 = wait indefinitely
     ),
     guardrails=GuardrailsConfig(
         max_tokens_recoveries=2,                   # retry after output truncation (0 = disabled)
@@ -41,7 +42,7 @@ config = AgentConfig(
     ),
     max_steps=50,
     max_retries=3,                                 # provider request retry attempts
-    timeout=300.0,                                 # seconds
+    timeout=0.0,                                   # wall-clock limit in seconds for the whole run; 0.0 = no limit
     streaming=False,                               # use token-level streaming when supported
     context_window=0,                              # model context limit in tokens; 0 = no management
     context_strategy="sliding_window",             # "sliding_window" | "none"

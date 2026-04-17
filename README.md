@@ -41,7 +41,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
 
-### Transport modes
+### Operating modes
 
 | Command | Use case | Description |
 |---------|----------|-------------|

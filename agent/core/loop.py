@@ -68,7 +68,7 @@ async def run_loop(
                 emit(session, on_event, ErrorEvent(message="Agent cancelled", recoverable=False))
                 return session
 
-            if time.monotonic() - start_time > config.timeout:
+            if config.timeout > 0.0 and time.monotonic() - start_time > config.timeout:
                 session.state = AgentState.TIMED_OUT
                 emit(
                     session,

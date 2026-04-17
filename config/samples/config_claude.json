@@ -67,7 +67,7 @@
     "reserve_cost_fraction": 0.1
   },
   "max_steps": 50,
-  "timeout": 300.0,
+  "timeout": 0.0,
   "max_retries": 3,
   "streaming": true,
   "context_window": 1000000,

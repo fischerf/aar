@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
 
@@ -219,3 +220,23 @@ class TestAgentConfigSystemPrompt:
         config = AgentConfig(system_prompt="custom prompt only")
         assert config.system_prompt == "custom prompt only"
         assert "Operating system:" not in config.system_prompt
+
+
+class TestAgentConfigTimeoutValidation:
+    def test_acp_approval_timeout_exceeds_loop_timeout_is_valid(self):
+        # No error at config level — only a warning at ACP transport startup
+        cfg = AgentConfig(timeout=10.0, safety={"acp_approval_timeout": 30.0})
+        assert cfg.safety.acp_approval_timeout == 30.0
+
+    def test_acp_approval_timeout_equals_loop_timeout_is_ok(self):
+        cfg = AgentConfig(timeout=30.0, safety={"acp_approval_timeout": 30.0})
+        assert cfg.safety.acp_approval_timeout == 30.0
+
+    def test_loop_timeout_zero_is_valid(self):
+        cfg = AgentConfig(timeout=0.0, safety={"acp_approval_timeout": 999.0})
+        assert cfg.safety.acp_approval_timeout == 999.0
+
+    def test_acp_approval_timeout_zero_is_valid(self):
+        # Default config — conflict is warned at ACP transport startup only
+        cfg = AgentConfig(timeout=5.0, safety={"acp_approval_timeout": 0.0})
+        assert cfg.timeout == 5.0

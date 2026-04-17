@@ -28,12 +28,12 @@ agent/
 
 ## Core loop
 
-The agent loop lives in `agent/core/loop.py`. It runs until the provider signals completion, a step limit is reached, a timeout fires, or cancellation is requested.
+The agent loop lives in `agent/core/loop.py`. It runs until the provider signals completion, a step limit is reached, a timeout fires, or cancellation is requested. `timeout=0.0` (the default) disables the wall-clock check.
 
 ```
 while not done and step < max_steps:
     if cancel_event.is_set(): break
-    if elapsed > timeout: break
+    if timeout > 0.0 and elapsed > timeout: break
 
     # streaming path (streaming: true)
     async for delta in provider.stream(messages, tools, system):

@@ -503,8 +503,19 @@ class AarAcpAgent:
         if self._conn is not None:
             from agent.transports.acp_permissions import make_acp_approval_callback
 
+            acp_t = self._config.safety.acp_approval_timeout
+            loop_t = self._config.timeout
+            if loop_t > 0.0 and (acp_t == 0.0 or acp_t > loop_t):
+                logger.warning(
+                    "acp_approval_timeout (%s) exceeds the agent loop timeout (%.1fs) — "
+                    "approval requests may be cut off before the user responds; set "
+                    "acp_approval_timeout <= timeout, or set timeout=0.0 for no loop limit",
+                    "indefinite" if acp_t == 0.0 else f"{acp_t:.1f}s",
+                    loop_t,
+                )
+
             _approval_cb = make_acp_approval_callback(
-                self._conn, session_id, timeout=self._config.safety.acp_approval_timeout
+                self._conn, session_id, timeout=acp_t
             )
         else:
             _approval_cb = self._default_approval
