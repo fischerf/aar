@@ -103,41 +103,69 @@ async def _consume_stream(
     session: Session,
     on_event,
 ) -> ProviderResponse:
-    """Consume a provider stream, emit StreamChunk events, return assembled response."""
+    """Consume a provider stream, emit StreamChunk events, return assembled response.
+
+    Always emits exactly one ``StreamChunk(finished=True)`` — including when the
+    stream raises mid-iteration or ends without a ``done=True`` delta — so
+    downstream consumers (SSE transports, TUI streams) never hang waiting for
+    a stream-end marker.
+    """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     stop_reason = ""
     meta: ProviderMeta | None = None
+    saw_done = False
 
-    async for delta in provider.stream(messages=messages, tools=tools, system=system):
-        if delta.text or delta.reasoning_delta:
-            emit(
-                session,
-                on_event,
-                StreamChunk(text=delta.text, reasoning_text=delta.reasoning_delta),
-            )
-
-        if delta.text:
-            content_parts.append(delta.text)
-        if delta.reasoning_delta:
-            reasoning_parts.append(delta.reasoning_delta)
-
-        if delta.tool_call_delta:
-            tc = delta.tool_call_delta
-            tool_calls.append(
-                ToolCall(
-                    tool_name=tc.get("tool_name", ""),
-                    tool_call_id=tc.get("tool_call_id", ""),
-                    arguments=tc.get("arguments", {}),
+    try:
+        async for delta in provider.stream(messages=messages, tools=tools, system=system):
+            if delta.text or delta.reasoning_delta:
+                emit(
+                    session,
+                    on_event,
+                    StreamChunk(text=delta.text, reasoning_text=delta.reasoning_delta),
                 )
-            )
 
-        if delta.done:
-            emit(session, on_event, StreamChunk(finished=True))
-            meta = delta.meta
-            stop_reason = StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
-            break
+            if delta.text:
+                content_parts.append(delta.text)
+            if delta.reasoning_delta:
+                reasoning_parts.append(delta.reasoning_delta)
+
+            if delta.tool_call_delta:
+                tc = delta.tool_call_delta
+                tool_calls.append(
+                    ToolCall(
+                        tool_name=tc.get("tool_name", ""),
+                        tool_call_id=tc.get("tool_call_id", ""),
+                        arguments=tc.get("arguments", {}),
+                    )
+                )
+
+            if delta.done:
+                saw_done = True
+                meta = delta.meta
+                stop_reason = (
+                    StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
+                )
+                break
+    finally:
+        # Unconditional stream-end marker. Safe to emit on exception paths too —
+        # it means "the stream is over", not "the run succeeded".
+        emit(session, on_event, StreamChunk(finished=True))
+
+    if not saw_done:
+        # Provider closed its stream without a terminal delta. Default to
+        # END_TURN so the loop doesn't spin, but log so we can see it.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Provider stream ended without done=True (received %d text chunks, "
+            "%d reasoning chunks, %d tool calls)",
+            len(content_parts),
+            len(reasoning_parts),
+            len(tool_calls),
+        )
+        stop_reason = StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
 
     reasoning_blocks = [ReasoningBlock(content="".join(reasoning_parts))] if reasoning_parts else []
 

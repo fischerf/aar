@@ -12,6 +12,35 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
+
+def _collapse_posix(p) -> str:
+    """Collapse ``.`` / ``..`` components in an absolute POSIX path."""
+    segments: list[str] = []
+    for part in p.parts[1:]:  # skip leading "/"
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(part)
+    return "/" + "/".join(segments) if segments else "/"
+
+
+def _collapse_windows(p) -> str:
+    """Collapse ``.`` / ``..`` components in a Windows path; returns POSIX-style trail."""
+    segments: list[str] = []
+    for part in p.parts[1:]:  # skip drive+root (e.g. "C:\\")
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(part.replace("\\", ""))
+    return "/".join(segments)
+
+
 # ---------------------------------------------------------------------------
 # Windows integrity-level helper script
 # ---------------------------------------------------------------------------
@@ -761,19 +790,36 @@ class WslDistroSandbox(Sandbox):
             "B:\\foo\\bar"  -> "/mnt/b/foo/bar"
             "C:\\Users\\x"  -> "/mnt/c/Users/x"
             "/mnt/b/foo"    -> "/mnt/b/foo"   (already a WSL path — returned as-is)
+
+        ``.`` / ``..`` components are collapsed so relative-style escapes in
+        the input (``C:/proj/../etc``) can't slip past ``_cwd_within_workspace``.
         """
-        # Already a Unix-style path — return unchanged
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        # Already a Unix-style path — collapse components and return.
         if path.startswith("/"):
-            return path
-        from pathlib import PureWindowsPath
+            return _collapse_posix(PurePosixPath(path))
 
         p = PureWindowsPath(path)
         if p.drive:
             drive_letter = p.drive[0].lower()  # "B:" -> "b"
-            # p.parts[1:] skips the drive component; join with forward slashes
-            rest = "/".join(p.parts[1:]) if len(p.parts) > 1 else ""
-            return f"/mnt/{drive_letter}/{rest}" if rest else f"/mnt/{drive_letter}"
-        return path
+            collapsed = _collapse_windows(p)
+            if collapsed:
+                return f"/mnt/{drive_letter}/{collapsed}"
+            return f"/mnt/{drive_letter}"
+        # Non-drive-rooted path — leave alone (caller already validated).
+        return path.replace("\\", "/")
+
+    def _cwd_within_workspace(self, wsl_cwd: str) -> bool:
+        """Return True if the translated WSL path is inside the workspace.
+
+        Both inputs are already absolute ``/mnt/…`` (or bare-``/``) POSIX
+        paths. We compare by lower-cased prefix so drive-letter case or
+        trailing separators don't matter.
+        """
+        workspace_wsl = self._to_wsl_path(self.workspace).rstrip("/").lower()
+        candidate = wsl_cwd.rstrip("/").lower()
+        return candidate == workspace_wsl or candidate.startswith(workspace_wsl + "/")
 
     # ------------------------------------------------------------------
     # execute
@@ -787,6 +833,24 @@ class WslDistroSandbox(Sandbox):
         env: dict[str, str] | None = None,
     ) -> SandboxResult:
         work_dir = self._to_wsl_path(cwd or self.workspace)
+
+        # Reject a cwd that escapes the workspace. The WSL sandbox does not
+        # enforce filesystem isolation on its own — the workspace convention
+        # is all we have, so anything that resolves outside it must be
+        # refused before we invoke the shell.
+        if cwd is not None and not self._cwd_within_workspace(work_dir):
+            logger.warning(
+                "WslDistroSandbox: refusing cwd outside workspace (cwd=%r, workspace=%r)",
+                cwd,
+                self.workspace,
+            )
+            return SandboxResult(
+                stderr=(
+                    f"Refused: cwd {cwd!r} resolves outside the sandbox workspace "
+                    f"{self.workspace!r}."
+                ),
+                exit_code=1,
+            )
 
         # Build optional env-var prefix: "KEY=value KEY2=value2 "
         env_prefix = ""

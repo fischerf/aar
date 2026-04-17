@@ -148,6 +148,65 @@ class TestWslDistroSandboxExecute:
         assert "wsl.exe not found" in result.stderr
 
 
+class TestWslWorkspaceEscape:
+    """H4: cwd must stay inside the workspace."""
+
+    @pytest.mark.asyncio
+    async def test_cwd_outside_workspace_rejected(self):
+        sb = WslDistroSandbox(workspace="B:/project")
+        result = await sb.execute("echo x", cwd="B:/other_project")
+        assert result.exit_code == 1
+        assert "outside the sandbox workspace" in result.stderr
+
+    @pytest.mark.asyncio
+    async def test_cwd_traversal_blocked(self):
+        """`..` traversal should be collapsed and then rejected."""
+        sb = WslDistroSandbox(workspace="B:/project")
+        result = await sb.execute("echo x", cwd="B:/project/../other")
+        assert result.exit_code == 1
+        assert "outside the sandbox workspace" in result.stderr
+
+    @pytest.mark.asyncio
+    async def test_cwd_inside_workspace_runs(self):
+        sb = WslDistroSandbox(workspace="B:/project")
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.kill = MagicMock()
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            result = await sb.execute("echo x", cwd="B:/project/sub")
+        assert result.exit_code == 0
+        assert mock_exec.called
+
+    @pytest.mark.asyncio
+    async def test_cwd_drive_letter_case_insensitive(self):
+        """Mixed-case drive letters must still count as inside."""
+        sb = WslDistroSandbox(workspace="B:/project")
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.kill = MagicMock()
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            result = await sb.execute("echo x", cwd="b:\\Project\\sub")
+        assert result.exit_code == 0
+        assert mock_exec.called
+
+    @pytest.mark.asyncio
+    async def test_cwd_none_uses_workspace(self):
+        """No cwd argument → workspace is used, always valid."""
+        sb = WslDistroSandbox(workspace="B:/project")
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.kill = MagicMock()
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            result = await sb.execute("echo x")
+        assert result.exit_code == 0
+
+
 # ---------------------------------------------------------------------------
 # wsl_manager helpers (mocked subprocess.run)
 # ---------------------------------------------------------------------------

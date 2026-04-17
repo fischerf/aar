@@ -131,6 +131,37 @@ class TestPolicyPathRestrictions:
         assert policy.check_tool(write_spec, {"path": "/etc/safe_config"}) == PolicyDecision.DENY
 
 
+class TestPolicyNormalizePath:
+    """H6: normalization collapses traversal, UNC, drive-letter case."""
+
+    def test_dotdot_traversal_still_denied(self):
+        """A `..` escape must not dodge a denied pattern."""
+        policy = SafetyPolicy()
+        spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
+        # /tmp/../etc/shadow resolves to /etc/shadow and must be blocked.
+        assert (
+            policy.check_tool(spec, {"path": "/tmp/../etc/shadow"}) == PolicyDecision.DENY
+        )
+
+    def test_dot_components_stripped(self):
+        """`.` segments should collapse so matching is stable."""
+        assert SafetyPolicy._normalize_path("/etc/./shadow") == "/etc/shadow"
+
+    def test_windows_drive_letter_lowercased(self):
+        """Mixed-case drive letters should normalize to a single form."""
+        assert SafetyPolicy._normalize_path("C:\\Proj\\file.py") == "c:/Proj/file.py"
+        assert SafetyPolicy._normalize_path("c:/Proj/file.py") == "c:/Proj/file.py"
+
+    def test_unc_path_preserved_not_resolved(self):
+        """UNC paths are absolute; don't pass them through Path.resolve()."""
+        assert SafetyPolicy._normalize_path(r"\\server\share\file") == "//server/share/file"
+
+    def test_posix_trailing_slash_and_empty(self):
+        """Empty and root-only segments collapse to the bare root."""
+        assert SafetyPolicy._normalize_path("/") == "/"
+        assert SafetyPolicy._normalize_path("/./") == "/"
+
+
 class TestPolicyModes:
     def test_read_only_blocks_writes(self):
         policy = SafetyPolicy(PolicyConfig(read_only=True))
