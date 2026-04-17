@@ -14,16 +14,72 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 
 ```
 agent/
-├── core/           # The heart: loop, agent, events, session, config, tokens, multimodal, logging, guardrails
-├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
-├── tools/          # Tool registry, schema, execution engine
-├── safety/         # Policy engine, permission manager, sandboxes
-├── memory/         # Session persistence (JSONL)
-├── extensions/     # MCP bridge, observability
-└── transports/     # CLI, TUI, web, event stream
-    ├── themes/     # Theme models, built-in themes, registry
-    ├── tui_utils/  # Shared formatting helpers for TUI transports
-    └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
+├── core/                     # The heart
+│   ├── agent.py              # Agent class — orchestrator
+│   ├── loop.py               # run_loop() — control flow only
+│   ├── provider_runner.py    # request + retry + streaming
+│   ├── loop_helpers.py       # event emit, budget accounting, parse_stop
+│   ├── guardrails.py         # LoopGuardrails, GuardrailsConfig
+│   ├── events.py             # Pydantic event models
+│   ├── session.py            # event history + to_messages()
+│   ├── config.py             # AgentConfig schema
+│   ├── state.py              # AgentState enum
+│   ├── tokens.py             # token budget + cost tracking
+│   ├── multimodal.py         # multimodal content helpers
+│   └── logging.py            # structured audit logging
+│
+├── providers/                # LLM API adapters
+│   ├── base.py               # Provider ABC + ProviderResponse
+│   ├── anthropic.py          # tools, streaming, extended thinking
+│   ├── openai.py             # tools, streaming, Azure / Together via base_url
+│   ├── ollama.py             # tools, DeepSeek-r1 reasoning extraction
+│   └── generic.py            # any OpenAI-compatible endpoint
+│
+├── tools/                    # Tool registry and execution
+│   ├── registry.py           # ToolRegistry, ToolSpec
+│   ├── execution.py          # ToolExecutor → policy → sandbox
+│   ├── schema.py             # JSON schema helpers
+│   └── builtin/
+│       ├── filesystem.py     # read_file, write_file, edit_file, list_directory
+│       └── shell.py          # bash
+│
+├── safety/                   # Policy engine, permissions, sandboxes
+│   ├── policy.py             # SafetyPolicy  ALLOW / DENY / ASK
+│   ├── permissions.py        # ApprovalCallback, APPROVED_ALWAYS cache
+│   ├── sandbox.py            # Local / Linux / Windows / WSL sandboxes
+│   └── wsl_manager.py        # WSL2 distro lifecycle management
+│
+├── memory/
+│   └── session_store.py      # JSONL event persistence + compaction
+│
+├── extensions/
+│   ├── mcp.py                # MCP bridge (stdio + HTTP transports)
+│   └── observability.py      # session_metrics() — reads event history only
+│
+└── transports/               # Thin I/O adapters — no business logic
+    ├── cli.py                # Typer CLI (chat, run, tui, serve, acp)
+    ├── tui.py                # Rich inline TUI
+    ├── tui_fixed.py          # Textual full-screen TUI
+    ├── web.py                # ASGI web server + SSE streaming
+    ├── stream.py             # EventStream — cross-request pub/sub
+    ├── keybinds.py           # keyboard shortcuts for fixed TUI
+    ├── acp_permissions.py    # ACP approval callback
+    ├── acp/                  # ACP transport package
+    │   ├── common.py         # shared types + helpers
+    │   ├── http.py           # HTTP / SSE server (REST clients)
+    │   └── stdio.py          # SDK stdio transport (Zed)
+    ├── themes/
+    │   ├── models.py         # ThemeModel, ColorScheme
+    │   └── builtin.py        # built-in themes
+    ├── tui_utils/
+    │   └── formatting.py     # shared Rich formatting helpers
+    └── tui_widgets/          # Textual widget classes
+        ├── bars.py
+        ├── blocks.py
+        ├── chat_body.py
+        ├── input.py
+        ├── log_viewer.py
+        └── thinking_panel.py
 ```
 
 ## Core loop
