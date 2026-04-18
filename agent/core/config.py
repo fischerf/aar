@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from agent.core.guardrails import GuardrailsConfig
 
 
-def _default_system_prompt() -> str:
+def _default_system_prompt(sandbox_mode: str = "", wsl_distro: str = "", rootfs_url: str = "") -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
     os_name = platform.system()  # "Windows", "Linux", "Darwin"
     cwd = str(Path.cwd())
@@ -26,13 +26,31 @@ def _default_system_prompt() -> str:
     ]
 
     if os.name == "nt":
-        lines += [
-            "",
-            "Shell: commands run via WSL (bash -c). Standard bash/Unix commands work (ls, cat, grep, find, pwd, …).",
-            "File paths: use Windows-style paths for file tools, e.g. .\\file.py or subdirectory\\file.py.",
-            f"When creating files, place them inside the working directory ({cwd}) unless told otherwise.",
-            "Do NOT use Unix-style absolute paths like /file.py — on Windows they resolve to the drive root, not the project.",
-        ]
+        if sandbox_mode == "wsl":
+            # Detect package manager from rootfs URL so the model uses the right one.
+            is_alpine = "alpine" in rootfs_url.lower() or (
+                not rootfs_url and "alpine" in wsl_distro.lower()
+            )
+            pkg_manager = "apk" if is_alpine else "apt"
+            distro_os = "Alpine Linux" if is_alpine else "Linux"
+            lines += [
+                "",
+                f"Sandbox: commands run inside a dedicated WSL2 distro ({wsl_distro!r}) running {distro_os}.",
+                f"Package manager inside the sandbox: {pkg_manager} (NOT apt)." if is_alpine else
+                f"Package manager inside the sandbox: {pkg_manager}.",
+                "Shell: sh (POSIX). Standard Unix commands work (ls, cat, grep, find, pwd, …).",
+                "File paths: use Windows-style paths for file tools, e.g. .\\file.py or subdirectory\\file.py.",
+                f"When creating files, place them inside the working directory ({cwd}) unless told otherwise.",
+                "Do NOT use Unix-style absolute paths like /file.py — on Windows they resolve to the drive root, not the project.",
+            ]
+        else:
+            lines += [
+                "",
+                "Shell: commands run via WSL (bash -c). Standard bash/Unix commands work (ls, cat, grep, find, pwd, …).",
+                "File paths: use Windows-style paths for file tools, e.g. .\\file.py or subdirectory\\file.py.",
+                f"When creating files, place them inside the working directory ({cwd}) unless told otherwise.",
+                "Do NOT use Unix-style absolute paths like /file.py — on Windows they resolve to the drive root, not the project.",
+            ]
     else:
         lines.append("Shell: /bin/sh")
 
@@ -41,6 +59,9 @@ def _default_system_prompt() -> str:
 
 def build_system_prompt(
     project_rules_dir: Path | None = None,
+    sandbox_mode: str = "",
+    wsl_distro: str = "",
+    rootfs_url: str = "",
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
@@ -51,7 +72,7 @@ def build_system_prompt(
       4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
       5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
-    sections = [_default_system_prompt()]
+    sections = [_default_system_prompt(sandbox_mode=sandbox_mode, wsl_distro=wsl_distro, rootfs_url=rootfs_url)]
 
     global_dir = Path.home() / ".aar"
 
@@ -243,8 +264,12 @@ class AgentConfig(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         """Build the system prompt from config if not explicitly provided."""
         if not self.system_prompt:
+            sb = self.safety.sandbox
             self.system_prompt = build_system_prompt(
                 project_rules_dir=self.project_rules_dir,
+                sandbox_mode=sb.mode,
+                wsl_distro=sb.wsl.distro,
+                rootfs_url=sb.wsl.rootfs_url,
             )
 
 
