@@ -166,18 +166,26 @@ def _looks_like_path(s: str) -> bool:
 
 def _make_event_handler(verbose: bool = False):
     """Return an event handler callback, optionally with richer feedback."""
-    _streaming_state = {"active": False}
+    _streaming_state = {"active": False, "thinking": False}
 
     def _handler(event: Event) -> None:
         if isinstance(event, StreamChunk):
+            if event.reasoning_text:
+                if not _streaming_state["thinking"]:
+                    _streaming_state["thinking"] = True
+                    console.print("\n[dim]▸ thinking[/]")
+                console.file.write(event.reasoning_text)
+                console.file.flush()
             if event.text:
+                if _streaming_state["thinking"]:
+                    # Separator between thinking and answer
+                    console.file.write("\n")
+                    console.file.flush()
+                    _streaming_state["thinking"] = False
                 if not _streaming_state["active"]:
                     _streaming_state["active"] = True
                     console.print()  # blank line before streamed output
                 console.file.write(event.text)
-                console.file.flush()
-            if event.reasoning_text and verbose:
-                console.file.write(event.reasoning_text)
                 console.file.flush()
             if event.finished and _streaming_state["active"]:
                 console.file.write("\n")
@@ -221,7 +229,8 @@ def _make_event_handler(verbose: bool = False):
                 Panel(output, title=f"Result: {event.tool_name}{duration}", border_style=style)
             )
         elif isinstance(event, ReasoningBlock) and event.content:
-            console.print(f"\n[dim italic]{event.content[:300]}[/]")
+            console.print("\n[dim]▸ thinking[/]")
+            console.print(f"[dim italic]{event.content}[/]")
         elif isinstance(event, ErrorEvent):
             hint = (
                 "\n[dim]You can type your message again to retry.[/]" if event.recoverable else ""

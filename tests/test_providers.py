@@ -424,7 +424,8 @@ class TestOllamaNormalization:
 
     @pytest.mark.asyncio
     async def test_think_mode_disabled(self):
-        """Without supports_reasoning, think tags should stay in content."""
+        """Think tags are always stripped from content (prevents token leakage).
+        supports_reasoning only controls whether think=true is sent in the payload."""
         provider = self._make_provider(supports_reasoning=False)
 
         mock_json = {
@@ -444,8 +445,10 @@ class TestOllamaNormalization:
         )
         result = await provider.complete([{"role": "user", "content": "x"}])
 
-        assert "<think>" in result.content
-        assert result.reasoning == []
+        # Tags are always extracted to prevent raw token leakage in ACP/TUI output
+        assert result.content == "answer"
+        assert len(result.reasoning) == 1
+        assert "thought" in result.reasoning[0].content
 
     def test_capabilities_tools_opt_out(self):
         provider = self._make_provider(supports_tools=False)
@@ -757,3 +760,212 @@ class TestProviderStreamFallback:
         assert assembled.tool_calls[0].tool_call_id == "tc_42"
         assert assembled.stop_reason == "tool_use"
         assert assembled.meta is not None and assembled.meta.provider == "fake"
+
+
+# ---------------------------------------------------------------------------
+# _thinking helpers
+# ---------------------------------------------------------------------------
+
+
+class TestExtractThinkTags:
+    def test_basic(self):
+        from agent.providers._thinking import extract_think_tags
+
+        clean, blocks = extract_think_tags("<think>reason here</think>answer")
+        assert clean == "answer"
+        assert len(blocks) == 1
+        assert blocks[0].content == "reason here"
+
+    def test_no_tags(self):
+        from agent.providers._thinking import extract_think_tags
+
+        clean, blocks = extract_think_tags("plain answer")
+        assert clean == "plain answer"
+        assert blocks == []
+
+    def test_unclosed_tag(self):
+        from agent.providers._thinking import extract_think_tags
+
+        clean, blocks = extract_think_tags("<think>unclosed reasoning")
+        assert clean == ""
+        assert len(blocks) == 1
+        assert "unclosed reasoning" in blocks[0].content
+
+    def test_multiple_blocks(self):
+        from agent.providers._thinking import extract_think_tags
+
+        clean, blocks = extract_think_tags("<think>a</think>text1<think>b</think>text2")
+        assert "text1" in clean
+        assert "text2" in clean
+        assert len(blocks) == 2
+
+    def test_empty_think_block_ignored(self):
+        from agent.providers._thinking import extract_think_tags
+
+        clean, blocks = extract_think_tags("<think></think>answer")
+        assert clean == "answer"
+        assert blocks == []
+
+
+class TestExtractChannelTokens:
+    def test_basic(self):
+        from agent.providers._thinking import extract_channel_tokens
+
+        clean, blocks = extract_channel_tokens("<|channel>thought\nsome reasoning\n<channel|>answer")
+        assert clean == "answer"
+        assert len(blocks) == 1
+        assert "some reasoning" in blocks[0].content
+
+    def test_empty_block_dropped(self):
+        from agent.providers._thinking import extract_channel_tokens
+
+        # Gemma4 with thinking disabled emits an empty block — should be silently dropped
+        clean, blocks = extract_channel_tokens("<|channel>thought\n<channel|>answer")
+        assert clean == "answer"
+        assert blocks == []
+
+    def test_unclosed_block(self):
+        from agent.providers._thinking import extract_channel_tokens
+
+        clean, blocks = extract_channel_tokens("<|channel>thought\nunclosed reasoning")
+        assert clean == ""
+        assert len(blocks) == 1
+        assert "unclosed reasoning" in blocks[0].content
+
+    def test_no_tokens(self):
+        from agent.providers._thinking import extract_channel_tokens
+
+        clean, blocks = extract_channel_tokens("plain text")
+        assert clean == "plain text"
+        assert blocks == []
+
+
+class TestExtractAll:
+    def test_channel_then_think(self):
+        from agent.providers._thinking import extract_all
+
+        content = "<|channel>thought\ngemma thought\n<channel|><think>qwen thought</think>answer"
+        clean, blocks = extract_all(content)
+        assert clean == "answer"
+        assert len(blocks) == 2
+
+    def test_passthrough(self):
+        from agent.providers._thinking import extract_all
+
+        clean, blocks = extract_all("plain")
+        assert clean == "plain"
+        assert blocks == []
+
+
+class TestExtractReasoningContent:
+    def test_reasoning_content_str(self):
+        from agent.providers._thinking import extract_reasoning_content
+
+        msg = MagicMock()
+        msg.reasoning_content = "  deep thought  "
+        del msg.reasoning_details  # ensure AttributeError → hasattr returns False
+        blocks = extract_reasoning_content(msg)
+        assert len(blocks) == 1
+        assert blocks[0].content == "deep thought"
+
+    def test_reasoning_details_list(self):
+        from agent.providers._thinking import extract_reasoning_content
+
+        item = MagicMock()
+        item.summary = "summarized thought"
+        item.text = None
+        msg = MagicMock()
+        msg.reasoning_details = [item]
+        blocks = extract_reasoning_content(msg)
+        assert len(blocks) == 1
+        assert "summarized thought" in blocks[0].content
+
+    def test_dict_reasoning_content(self):
+        from agent.providers._thinking import extract_reasoning_content
+
+        blocks = extract_reasoning_content({"reasoning_content": "dict thought"})
+        assert len(blocks) == 1
+        assert "dict thought" in blocks[0].content
+
+    def test_empty_message(self):
+        from agent.providers._thinking import extract_reasoning_content
+
+        blocks = extract_reasoning_content({})
+        assert blocks == []
+
+
+class TestStreamThinkingRouter:
+    def test_no_thinking(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        clean, reasoning = router.feed("hello world")
+        assert clean == "hello world"
+        assert reasoning == ""
+
+    def test_think_tag_in_single_chunk(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        clean, reasoning = router.feed("<think>reason</think>answer")
+        assert clean == "answer"
+        assert reasoning == "reason"
+
+    def test_think_tag_split_across_chunks(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        c1, r1 = router.feed("<thi")
+        assert c1 == "" and r1 == ""  # partial — buffered
+        c2, r2 = router.feed("nk>reason</think>answer")
+        assert c2 == "answer"
+        assert r2 == "reason"
+
+    def test_channel_token_in_single_chunk(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        clean, reasoning = router.feed("<|channel>thought\ngemma reason\n<channel|>answer")
+        assert clean == "answer"
+        assert "gemma reason" in reasoning
+
+    def test_channel_token_split_across_chunks(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        c1, r1 = router.feed("<|channel>thought\n")
+        assert c1 == "" and r1 == ""
+        c2, r2 = router.feed("thinking text<channel|>")
+        assert c2 == ""
+        assert "thinking text" in r2
+        c3, r3 = router.feed("answer")
+        assert c3 == "answer" and r3 == ""
+
+    def test_flush_unclosed_thinking(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        # Reasoning content is emitted immediately by feed(), not buffered for flush().
+        # An unclosed <think> block: content inside is returned by feed() as reasoning_delta.
+        router = StreamThinkingRouter()
+        clean, reasoning = router.feed("<think>partial content")
+        assert clean == ""
+        assert "partial content" in reasoning
+        # flush() has nothing extra to drain (no partial opener buffer)
+        clean2, reasoning2 = router.flush()
+        assert clean2 == "" and reasoning2 == ""
+
+    def test_flush_partial_opener_buffer(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        router.feed("<thi")  # buffered as potential opener
+        clean, reasoning = router.flush()
+        assert "<thi" in clean
+        assert reasoning == ""
+
+    def test_empty_chunk(self):
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter()
+        clean, reasoning = router.feed("")
+        assert clean == "" and reasoning == ""
