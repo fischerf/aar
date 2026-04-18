@@ -11,7 +11,8 @@
       "supports_reasoning": true,
       "supports_tools": true,
       "supports_vision": false,
-      "keep_alive": "10m"
+      "keep_alive": "10m",
+      "read_timeout": null
     }
   },
   "tools": {

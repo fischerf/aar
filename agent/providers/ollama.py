@@ -23,9 +23,12 @@ class OllamaProvider(Provider):
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
         self._base_url = (config.base_url or _DEFAULT_OLLAMA_URL).rstrip("/")
+        # Local models can be slow; default read timeout is None (unlimited).
+        # Set provider.extra.read_timeout in config to cap it (seconds).
+        read_timeout: float | None = config.extra.get("read_timeout", None)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(read_timeout, connect=10.0),
         )
         self._keep_alive = config.extra.get("keep_alive", "5m")
 
@@ -95,6 +98,7 @@ class OllamaProvider(Provider):
         # Extra options (skip known non-option keys)
         _SKIP = {
             "keep_alive",
+            "read_timeout",
             "supports_reasoning",
             "supports_tools",
             "supports_vision",
@@ -205,6 +209,7 @@ class OllamaProvider(Provider):
 
         _SKIP = {
             "keep_alive",
+            "read_timeout",
             "supports_reasoning",
             "supports_tools",
             "supports_vision",

@@ -26,6 +26,8 @@ class OpenAIProvider(Provider):
             kwargs["api_key"] = config.api_key
         if config.base_url:
             kwargs["base_url"] = config.base_url
+        if (timeout := config.extra.get("timeout")) is not None:
+            kwargs["timeout"] = float(timeout)
         self._client = openai.AsyncOpenAI(**kwargs)
 
     @property

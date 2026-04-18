@@ -62,6 +62,109 @@ config = AgentConfig(
 )
 ```
 
+## Timeouts
+
+Aar has several independent timeouts that operate at different layers. They interact — setting one without considering the others can cause confusing failures.
+
+### Timeout map
+
+| Setting | Layer | Provider | Default | What it controls |
+|---------|-------|----------|---------|-----------------|
+| `provider.extra.read_timeout` | HTTP read | Ollama | `null` (unlimited) | Max seconds to wait for the next byte while streaming; `null` = no cap |
+| `provider.extra.timeout` | HTTP request | Anthropic, OpenAI, Generic | SDK default / `60` s | Whole-request timeout passed to the provider SDK or httpx client |
+| `tools.command_timeout` | Tool executor | all | `30` s | Max wall-clock seconds a single shell/bash tool call may run; `0` = unlimited |
+| `safety.acp_approval_timeout` | ACP transport | all | `0.0` (unlimited) | Seconds the ACP client has to respond to a permission approval request |
+| `timeout` | Agent loop | all | `0.0` (unlimited) | Total wall-clock limit for a whole `Agent.run()` call |
+
+### Per-provider details
+
+| Provider | Knob | Default | Notes |
+|----------|------|---------|-------|
+| **Ollama** | `extra.read_timeout` | `null` | Controls the streaming read phase only. `null` is strongly recommended for local models — response generation can take many minutes. |
+| **Anthropic** | `extra.timeout` | `null` → SDK default (600 s) | Passed directly to `AsyncAnthropic(timeout=...)`. `null` uses the SDK's own default. |
+| **OpenAI** | `extra.timeout` | `null` → SDK default (600 s) | Passed directly to `AsyncOpenAI(timeout=...)`. `null` uses the SDK's own default. |
+| **Generic** | `extra.timeout` | `60.0` s | Passed to `httpx.Timeout(timeout, connect=10.0)`. Covers the full round-trip. Increase for slow proxies. |
+
+### How they interact
+
+```
+Agent.run() wall-clock limit  (timeout)
+  └─ each loop step
+       ├─ provider call  ─── provider-level timeout (read_timeout / extra.timeout)
+       └─ tool execution ─── command_timeout caps a single bash/shell invocation
+            └─ if ACP     ─── acp_approval_timeout caps the human-approval round-trip
+```
+
+Key rules:
+
+- **Provider timeout must be ≥ the longest single model response you expect.** Large local models on slow hardware can need 3–10 minutes per step. `null` (unlimited) is the safe default for Ollama and for Anthropic/OpenAI (they have their own 600 s SDK default which is usually sufficient).
+- **`command_timeout` must be ≥ the longest shell command the agent may run.** Build steps, test suites, or long compilations need a generous value (120–300 s). `0` disables it entirely.
+- **`timeout` (agent loop) is the outer bound** — set it larger than the provider timeout × expected number of steps. If it fires mid-stream the run is cancelled cleanly.
+- **`acp_approval_timeout`** only matters in ACP mode (`aar acp`). `0.0` waits indefinitely for the editor to respond, which is usually correct.
+
+### Recommended values for local Ollama
+
+```json
+{
+  "provider": {
+    "extra": {
+      "read_timeout": null
+    }
+  },
+  "tools": {
+    "command_timeout": 120
+  },
+  "timeout": 0.0
+}
+```
+
+Use `null` / `0` / `0.0` (unlimited) at every layer when running large models locally. Add explicit caps only when you want to protect against runaway steps.
+
+### Capping Ollama read timeout
+
+If you want a ceiling (e.g. to surface a hung model faster):
+
+```json
+{
+  "provider": {
+    "extra": {
+      "read_timeout": 600
+    }
+  }
+}
+```
+
+`600` means the HTTP read times out after 10 minutes of no new bytes from Ollama. The agent loop then retries up to `max_retries` times before failing the step.
+
+### Customising Anthropic / OpenAI timeout
+
+Both SDKs default to 600 s. Tighten it for enterprise proxy setups where you want faster failure:
+
+```json
+{
+  "provider": {
+    "name": "anthropic",
+    "extra": {
+      "timeout": 120
+    }
+  }
+}
+```
+
+### Customising Generic provider timeout
+
+The generic provider defaults to 60 s — suitable for fast proxies but may be too short for slow ones:
+
+```json
+{
+  "provider": {
+    "name": "generic",
+    "extra": {
+      "timeout": 300
+    }
+  }
+}
+
 ## Config loading and precedence
 
 All CLI modes and the web transport load configuration from multiple sources. The order of precedence (highest wins):

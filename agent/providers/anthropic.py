@@ -21,9 +21,11 @@ class AnthropicProvider(Provider):
             raise ImportError(
                 "The 'anthropic' package is required. Install with: pip install aar-agent[anthropic]"
             )
+        timeout: float | None = config.extra.get("timeout", None)
         self._client = anthropic.AsyncAnthropic(
             api_key=config.api_key or None,
             base_url=config.base_url or None,
+            timeout=timeout,
         )
 
     @property
