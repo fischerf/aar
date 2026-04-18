@@ -112,14 +112,7 @@ def file_to_content_block(path: Path) -> ContentBlock:
             "Video support will be added in a future release."
         )
 
-    # For text/* MIME types and unknown types, sniff for binary content
-    if is_binary_file(path):
-        raise ValueError(f"Unsupported binary file ({mime}): {path.name}")
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise ValueError(f"Could not read file: {path.name}") from exc
-    return TextBlock(text=f"[File: {path}]\n{content}")
+    raise ValueError(f"Unsupported file type ({mime}): {path.name}")
 
 
 def parse_multimodal_input(user_input: str) -> str | list[ContentBlock]:
