@@ -6,5 +6,6 @@
     "apt-get update -q"
   ],
   "packages": ["python3", "python3-pip"],
+  "package_install_command": "apt-get install -y {packages}",
   "system_prompt_hint": "Ubuntu 24.04. Package manager: apt. You CAN run 'apt-get install -y <pkg>' to install packages."
 }

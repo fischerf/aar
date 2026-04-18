@@ -62,7 +62,10 @@
     ],
     "allowed_paths": [],
     "sandbox": {
-      "mode": "local"
+      "mode": "wsl",
+      "wsl": {
+        "profile": "~/.aar/distros/alpine-base.json"
+      }
     },
     "log_all_commands": true,
     "acp_approval_timeout": 0.0

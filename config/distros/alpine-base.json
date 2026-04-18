@@ -6,5 +6,6 @@
     "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
   ],
   "packages": ["python3", "py3-pip"],
+  "package_install_command": "apk add --no-cache {packages}",
   "system_prompt_hint": "Alpine Linux. Package manager: apk (NOT apt). Community repository enabled. You CAN run 'apk add <pkg>' to install packages."
 }

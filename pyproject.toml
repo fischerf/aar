@@ -37,6 +37,9 @@ aar = "agent.transports.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"config/distros" = "agent/data/distros"
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

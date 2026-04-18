@@ -383,7 +383,7 @@ A dedicated, disposable WSL2 distro is used as the execution environment. Comman
 
 **What it isolates:**
 - Distro filesystem (`/etc`, `/usr`, `/home`, installed packages) is separate from host Windows and any other WSL2 distros
-- `apk add` / `pip install` stays inside the distro — host is untouched
+- `apk add` / `apt-get install` / `pip install` stays inside the distro — host is untouched
 - State is resettable via `aar sandbox reset`
 
 **What it does NOT isolate (important):**
@@ -432,6 +432,7 @@ You can also configure the distro inline without a profile:
           "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
         ],
         "packages": ["python3", "py3-pip", "nodejs", "npm"],
+        "package_install_command": "apk add --no-cache {packages}",
         "system_prompt_hint": "Alpine Linux. Package manager: apk (NOT apt). Community repo enabled. You CAN run 'apk add <pkg>' to install packages."
       }
     }
@@ -457,13 +458,13 @@ aar sandbox reset --yes                    # skip confirmation
 
 All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`), including any loaded profile.
 
-`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, runs any `pre_install_commands`, then installs the configured packages. It prints a config snippet at the end.
+`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, runs any `pre_install_commands`, then installs the configured packages. Run `aar sandbox status` afterwards to verify the configuration and distro state.
 
 **Reset behavior:** unregisters the distro, re-downloads rootfs, re-runs pre-install commands, reinstalls packages. Workspace files on the Windows filesystem (`/mnt/<drive>/...`) are **not affected** — only the distro's own filesystem is wiped.
 
 #### Using a non-Alpine rootfs
 
-Create a profile file (e.g. `~/.aar/distros/ubuntu.json`) and point `profile` at it. Use `pre_install_commands` to bootstrap the package manager before `packages` are installed:
+Create a profile file (e.g. `~/.aar/distros/ubuntu.json`) and point `profile` at it. Set `package_install_command` to match the distro's package manager (the `{packages}` placeholder is expanded at runtime), and use `pre_install_commands` to bootstrap the package manager before packages are installed:
 
 ```json
 {
@@ -472,6 +473,7 @@ Create a profile file (e.g. `~/.aar/distros/ubuntu.json`) and point `profile` at
   "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
   "pre_install_commands": ["apt-get update -q"],
   "packages": ["python3", "python3-pip", "nodejs", "npm"],
+  "package_install_command": "apt-get install -y {packages}",
   "system_prompt_hint": "Ubuntu 24.04. Package manager: apt. You CAN run 'apt-get install -y <pkg>' to install packages."
 }
 ```
@@ -566,7 +568,8 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 | `rootfs_url` | `str` | Alpine latest-stable | Rootfs tarball URL used by `aar sandbox setup` |
 | `pre_install_commands` | `list[str]` | `[]` | Shell commands run inside the distro before package installation (e.g. enabling extra repos) |
 | `packages` | `list[str]` | `["python3", "py3-pip"]` | Packages installed during `aar sandbox setup` |
-| `system_prompt_hint` | `str` | `""` | Overrides the auto-detected distro description injected into the model's system prompt. Set this in your profile so the model knows which package manager to use. |
+| `package_install_command` | `str` | `"apk add --no-cache {packages}"` | Command template used to install packages. `{packages}` is replaced with a space-joined package list. Override in your profile for non-Alpine distros (e.g. `"apt-get install -y {packages}"`). |
+| `system_prompt_hint` | `str` | `""` | Distro description injected into the model's system prompt (package manager, available tools, etc.). Set in your profile so the model knows which package manager to use. |
 
 ### Shell tool wiring
 

@@ -594,13 +594,43 @@ def prompt(
         "--raw",
         help="Print as plain text without Rich formatting (useful for piping / diffing)",
     ),
+    layers: bool = typer.Option(
+        False,
+        "--layers",
+        help="Show the ordered list of sources that build the prompt instead of the full text.",
+    ),
 ) -> None:
     """Print the fully assembled system prompt so you can see exactly what the agent receives."""
+    from agent.core.config import _collect_layers
+
     config = _build_config(
         model=model,
         provider=provider,
         config_file=config_file,
     )
+
+    if layers:
+        sb = config.safety.sandbox
+        layer_list = _collect_layers(
+            project_rules_dir=config.project_rules_dir,
+            sandbox_mode=sb.mode,
+            wsl_distro=sb.wsl.distro,
+            system_prompt_hint=sb.wsl.system_prompt_hint,
+        )
+        console.print("\n[bold]System prompt layers[/] (assembled in order):\n")
+        for i, layer in enumerate(layer_list, 1):
+            tag = f"[cyan]{layer.label}[/]"
+            if layer.loaded:
+                n = len(layer.text)
+                src = f"[green]{layer.source}[/]" if layer.path else f"[dim]{layer.source}[/]"
+                console.print(f"  {i:2}. {tag:30}  {src}  [dim]({n} chars)[/]")
+            else:
+                console.print(f"  {i:2}. {tag:30}  [dim]{layer.source}  (not found — skipped)[/]")
+        loaded = sum(1 for l in layer_list if l.loaded)
+        total_chars = sum(len(l.text) for l in layer_list if l.loaded)
+        console.print(f"\n  [dim]{loaded} layer(s) loaded · {total_chars} total chars[/]")
+        return
+
     system_prompt = config.system_prompt
 
     if raw:
@@ -1041,6 +1071,7 @@ def init(
             " [bold]aar sandbox setup[/]."
         )
         console.print("  7. Run [bold]aar chat[/] — no flags needed.")
+        console.print("  Tip: run [bold]aar prompt --layers[/] to inspect the system prompt sources.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
@@ -1063,18 +1094,22 @@ _DEFAULT_PACKAGES = "python3,py3-pip"
 # Built-in distro profiles — sourced from config/distros/ in the repo,
 # written to ~/.aar/distros/ by `aar init`
 # ---------------------------------------------------------------------------
+# Installed wheel: config/distros is mapped to agent/data/distros via force-include.
+# Dev/editable install: fall back to config/distros/ at the repo root.
+_WHEEL_DISTROS_DIR = Path(__file__).parent.parent / "data" / "distros"
 _REPO_DISTROS_DIR = Path(__file__).parent.parent.parent / "config" / "distros"
+_BUILTIN_DISTROS_DIR = _WHEEL_DISTROS_DIR if _WHEEL_DISTROS_DIR.is_dir() else _REPO_DISTROS_DIR
 
 
 def _load_builtin_distro_profiles() -> dict[str, dict]:
     """Return {filename: parsed_dict} for all *.json files in config/distros/."""
     import json as _json
 
-    if not _REPO_DISTROS_DIR.is_dir():
+    if not _BUILTIN_DISTROS_DIR.is_dir():
         return {}
     return {
         p.name: _json.loads(p.read_text(encoding="utf-8"))
-        for p in sorted(_REPO_DISTROS_DIR.glob("*.json"))
+        for p in sorted(_BUILTIN_DISTROS_DIR.glob("*.json"))
     }
 
 
@@ -1144,6 +1179,8 @@ def sandbox_setup(
     # Load config so flags can fall back to config values
     cfg = _build_config()
     wsl_cfg = cfg.safety.sandbox.wsl
+
+    # Resolve final values (CLI flags override config/profile)
     if distro == _DEFAULT_DISTRO and wsl_cfg.distro != _DEFAULT_DISTRO:
         distro = wsl_cfg.distro
     resolved_url = rootfs_url or wsl_cfg.rootfs_url
@@ -1193,25 +1230,32 @@ def sandbox_setup(
         tmp_path.unlink(missing_ok=True)
 
     # Run pre-install commands from config (e.g. enabling extra package repos).
-    for cmd in wsl_cfg.pre_install_commands:
-        console.print(f"  [dim]pre-install:[/] {cmd}")
+    for i, cmd in enumerate(wsl_cfg.pre_install_commands, 1):
+        console.print(f"Pre-install [{i}/{len(wsl_cfg.pre_install_commands)}]: [dim]{cmd}[/]")
         stdout, stderr, rc = wm.run_in_distro(distro, cmd, timeout=60)
+        if stdout.strip():
+            console.print(f"[dim]{stdout.strip()[:600]}[/]")
         if rc != 0:
             console.print(f"[yellow]Warning:[/] pre-install command returned exit code {rc}.")
-            if stderr:
-                console.print(f"[dim]{stderr[:400]}[/]")
+            if stderr.strip():
+                console.print(f"[red]{stderr.strip()[:600]}[/]")
+        else:
+            console.print("  [green]OK[/]")
 
     # Install packages
     pkg_list = [p.strip() for p in packages.split(",") if p.strip()]
     if pkg_list:
         console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
+        install_cmd = wsl_cfg.package_install_command.format(packages=" ".join(pkg_list))
         stdout, stderr, rc = wm.run_in_distro(
-            distro, f"apk add --no-cache {' '.join(pkg_list)} 2>&1", timeout=600
+            distro, f"{install_cmd} 2>&1", timeout=600
         )
+        if stdout.strip():
+            console.print(f"[dim]{stdout.strip()[:1200]}[/]")
         if rc != 0:
             console.print(f"[yellow]Warning:[/] Package install returned exit code {rc}.")
-            if stderr:
-                console.print(f"[dim]{stderr[:400]}[/]")
+            if stderr.strip():
+                console.print(f"[red]{stderr.strip()[:600]}[/]")
         else:
             console.print("  [green]Packages installed[/]")
 
@@ -1240,10 +1284,38 @@ def sandbox_status(
         raise typer.Exit(0)
 
     cfg = _build_config()
+    wsl_cfg = cfg.safety.sandbox.wsl
     if distro == _DEFAULT_DISTRO:
-        distro = cfg.safety.sandbox.wsl.distro
+        distro = wsl_cfg.distro
 
-    console.print(f"[bold]WSL2 sandbox status[/] — distro: [cyan]{distro}[/]\n")
+    resolved_install = _resolve_install_path(distro, wsl_cfg.install_path)
+    workspace = wsl_cfg.workspace or "[dim]cwd at runtime[/]"
+
+    # Configuration summary
+    console.print("\n[bold]Sandbox configuration[/]")
+    console.print(f"  Profile:           {wsl_cfg.profile or '[dim]none[/]'}")
+    console.print(f"  Distro:            [cyan]{distro}[/]")
+    console.print(f"  Shell:             {wsl_cfg.shell}")
+    console.print(f"  Workspace:         {workspace}")
+    console.print(f"  Install path:      {resolved_install}")
+    console.print(f"  Rootfs URL:        [dim]{wsl_cfg.rootfs_url}[/]")
+    pre_cmds = wsl_cfg.pre_install_commands
+    if pre_cmds:
+        console.print(f"  Pre-install cmds:  {len(pre_cmds)} command(s)")
+        for i, cmd in enumerate(pre_cmds, 1):
+            console.print(f"    [{i}] [dim]{cmd}[/]")
+    else:
+        console.print("  Pre-install cmds:  [dim]none[/]")
+    pkg_display = ", ".join(wsl_cfg.packages) if wsl_cfg.packages else "[dim]none[/]"
+    console.print(f"  Packages:          {pkg_display}")
+    console.print(f"  Install command:   [dim]{wsl_cfg.package_install_command}[/]")
+    hint = wsl_cfg.system_prompt_hint
+    if hint:
+        console.print(f"  Prompt hint:       [dim]{hint[:80]}{'…' if len(hint) > 80 else ''}[/]")
+    console.print()
+
+    # Live distro status
+    console.print(f"[bold]WSL2 distro status[/] — [cyan]{distro}[/]\n")
 
     wsl_ok = wm.is_wsl_available()
     console.print(f"  WSL2 available : {'[green]yes[/]' if wsl_ok else '[red]no[/]'}")

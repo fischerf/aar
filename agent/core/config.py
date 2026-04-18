@@ -16,7 +16,6 @@ from agent.core.guardrails import GuardrailsConfig
 def _default_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
-    rootfs_url: str = "",
     system_prompt_hint: str = "",
 ) -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
@@ -32,17 +31,7 @@ def _default_system_prompt(
 
     if os.name == "nt":
         if sandbox_mode == "wsl":
-            if system_prompt_hint:
-                sandbox_desc = system_prompt_hint
-            else:
-                is_alpine = "alpine" in rootfs_url.lower() or "alpine" in wsl_distro.lower()
-                pkg_manager = "apk" if is_alpine else "apt"
-                distro_os = "Alpine Linux" if is_alpine else "Linux"
-                sandbox_desc = (
-                    f"{distro_os}. Package manager: {pkg_manager}"
-                    + (" (NOT apt). You CAN run 'apk add <pkg>' to install packages." if is_alpine else
-                       ". You CAN run 'apt install <pkg>' to install packages.")
-                )
+            sandbox_desc = system_prompt_hint if system_prompt_hint else "Linux sandbox."
             lines += [
                 "",
                 f"Sandbox: commands run inside a dedicated WSL2 distro ({wsl_distro!r}).",
@@ -66,11 +55,73 @@ def _default_system_prompt(
     return "\n".join(lines)
 
 
+class PromptLayer:
+    """One contributing layer of the assembled system prompt."""
+
+    __slots__ = ("label", "source", "path", "text", "loaded")
+
+    def __init__(self, label: str, source: str, path: Path | None, text: str, loaded: bool) -> None:
+        self.label = label    # short tag, e.g. "aar-system", "global", "project-d"
+        self.source = source  # human description, e.g. "~/.aar/rules.md"
+        self.path = path      # absolute Path or None for built-in
+        self.text = text      # actual content (empty string if not loaded)
+        self.loaded = loaded  # False when file was missing / skipped
+
+
+def _collect_layers(
+    project_rules_dir: Path | None = None,
+    sandbox_mode: str = "",
+    wsl_distro: str = "",
+    system_prompt_hint: str = "",
+) -> list[PromptLayer]:
+    """Return all prompt layers in assembly order, including missing ones."""
+    layers: list[PromptLayer] = []
+
+    base_text = _default_system_prompt(
+        sandbox_mode=sandbox_mode,
+        wsl_distro=wsl_distro,
+        system_prompt_hint=system_prompt_hint,
+    )
+    layers.append(PromptLayer("aar-system", "[built-in]", None, base_text, True))
+
+    global_dir = Path.home() / ".aar"
+
+    global_rules = global_dir / "rules.md"
+    layers.append(PromptLayer(
+        "global", str(global_rules), global_rules,
+        global_rules.read_text(encoding="utf-8").strip() if global_rules.is_file() else "",
+        global_rules.is_file(),
+    ))
+
+    for extra in sorted((global_dir / "rules.d").glob("*.md")):
+        layers.append(PromptLayer(
+            "global-d", str(extra), extra,
+            extra.read_text(encoding="utf-8").strip(), True,
+        ))
+
+    rules_dir = project_rules_dir if project_rules_dir is not None else Path(".agent")
+    base = Path.cwd() / rules_dir
+
+    project_rules = base / "rules.md"
+    layers.append(PromptLayer(
+        "project", str(project_rules), project_rules,
+        project_rules.read_text(encoding="utf-8").strip() if project_rules.is_file() else "",
+        project_rules.is_file(),
+    ))
+
+    for extra in sorted((base / "rules.d").glob("*.md")):
+        layers.append(PromptLayer(
+            "project-d", str(extra), extra,
+            extra.read_text(encoding="utf-8").strip(), True,
+        ))
+
+    return layers
+
+
 def build_system_prompt(
     project_rules_dir: Path | None = None,
     sandbox_mode: str = "",
     wsl_distro: str = "",
-    rootfs_url: str = "",
     system_prompt_hint: str = "",
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
@@ -82,33 +133,13 @@ def build_system_prompt(
       4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
       5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
-    sections = [_default_system_prompt(
+    layers = _collect_layers(
+        project_rules_dir=project_rules_dir,
         sandbox_mode=sandbox_mode,
         wsl_distro=wsl_distro,
-        rootfs_url=rootfs_url,
         system_prompt_hint=system_prompt_hint,
-    )]
-
-    global_dir = Path.home() / ".aar"
-
-    global_rules = global_dir / "rules.md"
-    if global_rules.is_file():
-        sections.append(global_rules.read_text(encoding="utf-8").strip())
-
-    for extra in sorted((global_dir / "rules.d").glob("*.md")):
-        sections.append(extra.read_text(encoding="utf-8").strip())
-
-    rules_dir = project_rules_dir if project_rules_dir is not None else Path(".agent")
-    base = Path.cwd() / rules_dir
-
-    project_rules = base / "rules.md"
-    if project_rules.is_file():
-        sections.append(project_rules.read_text(encoding="utf-8").strip())
-
-    for extra in sorted((base / "rules.d").glob("*.md")):
-        sections.append(extra.read_text(encoding="utf-8").strip())
-
-    return "\n---\n".join(sections)
+    )
+    return "\n---\n".join(layer.text for layer in layers if layer.loaded)
 
 
 class ProviderConfig(BaseModel):
@@ -182,6 +213,8 @@ class WslSandboxConfig(BaseModel):
     # Commands run inside the distro before package installation (e.g. enabling extra repos).
     pre_install_commands: list[str] = Field(default_factory=list)
     packages: list[str] = Field(default_factory=lambda: ["python3", "py3-pip"])
+    # Template for the package install command; {packages} is replaced with a space-joined list.
+    package_install_command: str = "apk add --no-cache {packages}"
     # Overrides auto-detected sandbox description in the system prompt.
     system_prompt_hint: str = ""
 
@@ -313,7 +346,6 @@ class AgentConfig(BaseModel):
                 project_rules_dir=self.project_rules_dir,
                 sandbox_mode=sb.mode,
                 wsl_distro=sb.wsl.distro,
-                rootfs_url=sb.wsl.rootfs_url,
                 system_prompt_hint=sb.wsl.system_prompt_hint,
             )
 
