@@ -1,0 +1,10 @@
+{
+  "distro": "aar-ubuntu",
+  "shell": "bash",
+  "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+  "pre_install_commands": [
+    "apt-get update -q"
+  ],
+  "packages": ["python3", "python3-pip"],
+  "system_prompt_hint": "Ubuntu 24.04. Package manager: apt. You CAN run 'apt-get install -y <pkg>' to install packages."
+}

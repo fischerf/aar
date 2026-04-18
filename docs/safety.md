@@ -408,17 +408,36 @@ cheap last-line check, not a replacement for a real FS sandbox.
     "sandbox": {
       "mode": "wsl",
       "wsl": {
-        "distro": "aar-sandbox",
-        "shell": "sh",
-        "packages": ["python3", "py3-pip", "nodejs", "npm"],
-        "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.21.0-x86_64.tar.gz"
+        "profile": "~/.aar/distros/alpine-base.json"
       }
     }
   }
 }
 ```
 
-All `wsl` sub-fields are optional. Defaults use Alpine Linux with Python 3 and pip.
+`aar init` writes built-in profiles to `~/.aar/distros/`. Point `profile` at one and `aar sandbox setup` picks up everything — rootfs URL, packages, pre-install commands, and the system-prompt description the model sees. All `wsl` fields set alongside `profile` override the profile value for that key.
+
+You can also configure the distro inline without a profile:
+
+```json
+{
+  "safety": {
+    "sandbox": {
+      "mode": "wsl",
+      "wsl": {
+        "distro": "aar-sandbox",
+        "shell": "sh",
+        "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.21.0-x86_64.tar.gz",
+        "pre_install_commands": [
+          "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
+        ],
+        "packages": ["python3", "py3-pip", "nodejs", "npm"],
+        "system_prompt_hint": "Alpine Linux. Package manager: apk (NOT apt). Community repo enabled. You CAN run 'apk add <pkg>' to install packages."
+      }
+    }
+  }
+}
+```
 
 #### Managing the distro — `aar sandbox`
 
@@ -436,32 +455,31 @@ aar sandbox reset                          # unregister + recreate, prompts for 
 aar sandbox reset --yes                    # skip confirmation
 ```
 
-All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`).
+All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`), including any loaded profile.
 
-`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, and installs the configured packages. It prints a config snippet at the end.
+`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, runs any `pre_install_commands`, then installs the configured packages. It prints a config snippet at the end.
 
-**Reset behavior:** unregisters the distro, re-downloads rootfs, reinstalls packages. Workspace files on the Windows filesystem (`/mnt/<drive>/...`) are **not affected** — only the distro's own filesystem is wiped.
+**Reset behavior:** unregisters the distro, re-downloads rootfs, re-runs pre-install commands, reinstalls packages. Workspace files on the Windows filesystem (`/mnt/<drive>/...`) are **not affected** — only the distro's own filesystem is wiped.
 
 #### Using a non-Alpine rootfs
 
-Point `wsl.rootfs_url` at any `.tar.gz` rootfs (Ubuntu, Debian, etc.) and update `wsl.packages` to use that distro's package manager:
+Create a profile file (e.g. `~/.aar/distros/ubuntu.json`) and point `profile` at it. Use `pre_install_commands` to bootstrap the package manager before `packages` are installed:
 
 ```json
 {
-  "safety": {
-    "sandbox": {
-      "mode": "wsl",
-      "wsl": {
-        "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
-        "packages": ["python3", "python3-pip", "nodejs", "npm"]
-      }
-    }
-  }
+  "distro": "aar-ubuntu",
+  "shell": "bash",
+  "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+  "pre_install_commands": ["apt-get update -q"],
+  "packages": ["python3", "python3-pip", "nodejs", "npm"],
+  "system_prompt_hint": "Ubuntu 24.04. Package manager: apt. You CAN run 'apt-get install -y <pkg>' to install packages."
 }
 ```
 
-> **Note:** The `apk add` command in `setup` is Alpine-specific. For other distros, install packages manually after import:
-> `wsl -d my-sandbox -- apt-get install -y python3 python3-pip`
+Then in `~/.aar/config.json`:
+```json
+{ "safety": { "sandbox": { "mode": "wsl", "wsl": { "profile": "~/.aar/distros/ubuntu.json" } } } }
+```
 
 #### Windows program execution through the `wsl` sandbox
 
@@ -540,12 +558,15 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `profile` | `str \| None` | `None` | Path to a distro profile JSON (`~`-expanded). Profile values are base defaults; inline fields override. |
 | `distro` | `str` | `"aar-sandbox"` | WSL2 distro name |
 | `shell` | `str` | `"sh"` | Shell binary inside the distro (`sh` works on minimal Alpine) |
 | `workspace` | `str \| None` | `None` (→ cwd) | Windows path — auto-translated to `/mnt/…` |
 | `install_path` | `str \| None` | `None` | Where to store distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
 | `rootfs_url` | `str` | Alpine latest-stable | Rootfs tarball URL used by `aar sandbox setup` |
+| `pre_install_commands` | `list[str]` | `[]` | Shell commands run inside the distro before package installation (e.g. enabling extra repos) |
 | `packages` | `list[str]` | `["python3", "py3-pip"]` | Packages installed during `aar sandbox setup` |
+| `system_prompt_hint` | `str` | `""` | Overrides the auto-detected distro description injected into the model's system prompt. Set this in your profile so the model knows which package manager to use. |
 
 ### Shell tool wiring
 

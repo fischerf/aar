@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field, model_validator
 from agent.core.guardrails import GuardrailsConfig
 
 
-def _default_system_prompt(sandbox_mode: str = "", wsl_distro: str = "", rootfs_url: str = "") -> str:
+def _default_system_prompt(
+    sandbox_mode: str = "",
+    wsl_distro: str = "",
+    rootfs_url: str = "",
+    system_prompt_hint: str = "",
+) -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
     os_name = platform.system()  # "Windows", "Linux", "Darwin"
     cwd = str(Path.cwd())
@@ -27,17 +32,21 @@ def _default_system_prompt(sandbox_mode: str = "", wsl_distro: str = "", rootfs_
 
     if os.name == "nt":
         if sandbox_mode == "wsl":
-            # Detect package manager from rootfs URL so the model uses the right one.
-            is_alpine = "alpine" in rootfs_url.lower() or (
-                not rootfs_url and "alpine" in wsl_distro.lower()
-            )
-            pkg_manager = "apk" if is_alpine else "apt"
-            distro_os = "Alpine Linux" if is_alpine else "Linux"
+            if system_prompt_hint:
+                sandbox_desc = system_prompt_hint
+            else:
+                is_alpine = "alpine" in rootfs_url.lower() or "alpine" in wsl_distro.lower()
+                pkg_manager = "apk" if is_alpine else "apt"
+                distro_os = "Alpine Linux" if is_alpine else "Linux"
+                sandbox_desc = (
+                    f"{distro_os}. Package manager: {pkg_manager}"
+                    + (" (NOT apt). You CAN run 'apk add <pkg>' to install packages." if is_alpine else
+                       ". You CAN run 'apt install <pkg>' to install packages.")
+                )
             lines += [
                 "",
-                f"Sandbox: commands run inside a dedicated WSL2 distro ({wsl_distro!r}) running {distro_os}.",
-                f"Package manager inside the sandbox: {pkg_manager} (NOT apt)." if is_alpine else
-                f"Package manager inside the sandbox: {pkg_manager}.",
+                f"Sandbox: commands run inside a dedicated WSL2 distro ({wsl_distro!r}).",
+                sandbox_desc,
                 "Shell: sh (POSIX). Standard Unix commands work (ls, cat, grep, find, pwd, …).",
                 "File paths: use Windows-style paths for file tools, e.g. .\\file.py or subdirectory\\file.py.",
                 f"When creating files, place them inside the working directory ({cwd}) unless told otherwise.",
@@ -62,6 +71,7 @@ def build_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     rootfs_url: str = "",
+    system_prompt_hint: str = "",
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
@@ -72,7 +82,12 @@ def build_system_prompt(
       4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
       5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
-    sections = [_default_system_prompt(sandbox_mode=sandbox_mode, wsl_distro=wsl_distro, rootfs_url=rootfs_url)]
+    sections = [_default_system_prompt(
+        sandbox_mode=sandbox_mode,
+        wsl_distro=wsl_distro,
+        rootfs_url=rootfs_url,
+        system_prompt_hint=system_prompt_hint,
+    )]
 
     global_dir = Path.home() / ".aar"
 
@@ -146,7 +161,14 @@ class WindowsSandboxConfig(BaseModel):
 
 
 class WslSandboxConfig(BaseModel):
-    """Dedicated WSL2 distro sandbox. Commands run via wsl -d <distro> -- <shell> -c <cmd>."""
+    """Dedicated WSL2 distro sandbox. Commands run via wsl -d <distro> -- <shell> -c <cmd>.
+
+    ``profile`` may point to a JSON file (absolute path or ``~``-expanded) that
+    supplies default values for all other fields.  Any field set explicitly in
+    the config that references this model overrides the profile value.
+    """
+
+    profile: str | None = None   # path to a distro-profile JSON (merged as base defaults)
 
     distro: str = "aar-sandbox"
     shell: str = "sh"            # shell binary inside the distro
@@ -157,7 +179,29 @@ class WslSandboxConfig(BaseModel):
         "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/"
         "alpine-minirootfs-3.21.0-x86_64.tar.gz"
     )
+    # Commands run inside the distro before package installation (e.g. enabling extra repos).
+    pre_install_commands: list[str] = Field(default_factory=list)
     packages: list[str] = Field(default_factory=lambda: ["python3", "py3-pip"])
+    # Overrides auto-detected sandbox description in the system prompt.
+    system_prompt_hint: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_profile(cls, data: Any) -> Any:
+        """Merge a distro profile file as base defaults before applying inline values."""
+        if not isinstance(data, dict):
+            return data
+        profile_path = data.get("profile")
+        if not profile_path:
+            return data
+        path = Path(profile_path).expanduser()
+        if not path.is_file():
+            raise ValueError(f"WslSandboxConfig: profile not found: {path}")
+        profile_data: dict = json.loads(path.read_text(encoding="utf-8"))
+        profile_data.pop("profile", None)  # don't let the profile reference itself
+        merged = {**profile_data, **{k: v for k, v in data.items() if k != "profile" and v is not None}}
+        merged["profile"] = str(path)
+        return merged
 
 
 class SandboxConfig(BaseModel):
@@ -270,6 +314,7 @@ class AgentConfig(BaseModel):
                 sandbox_mode=sb.mode,
                 wsl_distro=sb.wsl.distro,
                 rootfs_url=sb.wsl.rootfs_url,
+                system_prompt_hint=sb.wsl.system_prompt_hint,
             )
 
 

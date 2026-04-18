@@ -183,9 +183,14 @@ For strong process isolation, use the built-in `wsl` sandbox mode — it routes 
 commands through a dedicated, disposable Alpine distro instead of your main WSL environment:
 
 ```bash
-aar sandbox setup   # one-time setup (reads ~/.aar/config.json for distro name and packages)
+aar init            # creates ~/.aar/distros/ with built-in Alpine profiles
+aar sandbox setup   # one-time setup (reads profile + packages from ~/.aar/config.json)
 aar sandbox status  # verify
 ```
+
+Point `safety.sandbox.wsl.profile` in `~/.aar/config.json` at one of the profiles in `~/.aar/distros/`
+to pre-configure the rootfs URL, packages, repo setup commands, and the system-prompt hint the model sees.
+Switch distros by changing the `profile` path and running `aar sandbox reset`.
 
 See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) for full details.
 

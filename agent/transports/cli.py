@@ -967,6 +967,10 @@ def init(
             "_usage": "Copy this file to pricing.json to activate custom prices.",
         }
 
+    # Distro profiles directory and built-in templates
+    _USER_DISTROS_DIR = _USER_DIR / "distros"
+    _USER_DISTROS_DIR.mkdir(parents=True, exist_ok=True)
+
     # Theme directory and files
     _USER_THEMES_DIR = _USER_DIR / "themes"
     _USER_THEMES_DIR.mkdir(parents=True, exist_ok=True)
@@ -989,6 +993,10 @@ def init(
     created: list[str] = []
     skipped: list[str] = []
 
+    distro_profile_items = [
+        (_USER_DISTROS_DIR / name, data) for name, data in _load_builtin_distro_profiles().items()
+    ]
+
     for path, data in [
         (_USER_CONFIG, default_config),
         (_USER_MCP_CONFIG, default_mcp),
@@ -996,6 +1004,7 @@ def init(
         (_USER_PRICING_TEMPLATE, _pricing_raw),
         (_USER_THEME_EXAMPLE, example_theme),
         (_USER_THEME_SCHEMA, theme_schema),
+        *distro_profile_items,
     ]:
         if path.is_file() and not force:
             console.print(
@@ -1026,7 +1035,12 @@ def init(
             f"  5. Create custom themes in [bold]{_USER_THEMES_DIR}[/]"
             f" — see [bold]{_USER_THEME_EXAMPLE}[/] for a template."
         )
-        console.print("  6. Run [bold]aar chat[/] — no flags needed.")
+        console.print(
+            f"  6. (Windows) WSL2 sandbox distro profiles are in [bold]{_USER_DISTROS_DIR}[/]."
+            " Set [bold]safety.sandbox.wsl.profile[/] in config.json to point at one, then run"
+            " [bold]aar sandbox setup[/]."
+        )
+        console.print("  7. Run [bold]aar chat[/] — no flags needed.")
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
@@ -1044,6 +1058,24 @@ app.add_typer(_sandbox_app, name="sandbox")
 
 _DEFAULT_DISTRO = "aar-sandbox"
 _DEFAULT_PACKAGES = "python3,py3-pip"
+
+# ---------------------------------------------------------------------------
+# Built-in distro profiles — sourced from config/distros/ in the repo,
+# written to ~/.aar/distros/ by `aar init`
+# ---------------------------------------------------------------------------
+_REPO_DISTROS_DIR = Path(__file__).parent.parent.parent / "config" / "distros"
+
+
+def _load_builtin_distro_profiles() -> dict[str, dict]:
+    """Return {filename: parsed_dict} for all *.json files in config/distros/."""
+    import json as _json
+
+    if not _REPO_DISTROS_DIR.is_dir():
+        return {}
+    return {
+        p.name: _json.loads(p.read_text(encoding="utf-8"))
+        for p in sorted(_REPO_DISTROS_DIR.glob("*.json"))
+    }
 
 
 def _resolve_install_path(distro: str, install_path: Optional[str]) -> "Path":
@@ -1159,6 +1191,15 @@ def sandbox_setup(
 
     finally:
         tmp_path.unlink(missing_ok=True)
+
+    # Run pre-install commands from config (e.g. enabling extra package repos).
+    for cmd in wsl_cfg.pre_install_commands:
+        console.print(f"  [dim]pre-install:[/] {cmd}")
+        stdout, stderr, rc = wm.run_in_distro(distro, cmd, timeout=60)
+        if rc != 0:
+            console.print(f"[yellow]Warning:[/] pre-install command returned exit code {rc}.")
+            if stderr:
+                console.print(f"[dim]{stderr[:400]}[/]")
 
     # Install packages
     pkg_list = [p.strip() for p in packages.split(",") if p.strip()]
