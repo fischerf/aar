@@ -230,7 +230,6 @@ class TestInitConfigMatchesDefaults:
         assert loaded.provider.temperature == canonical.provider.temperature
         assert loaded.provider.extra == canonical.provider.extra
         assert loaded.tools.enabled_builtins == canonical.tools.enabled_builtins
-        assert loaded.tools.allowed_paths == canonical.tools.allowed_paths
         assert loaded.tools.command_timeout == canonical.tools.command_timeout
         assert loaded.tools.max_output_chars == canonical.tools.max_output_chars
         assert loaded.safety.read_only == canonical.safety.read_only

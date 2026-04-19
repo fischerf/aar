@@ -12,16 +12,19 @@ Tool call → SafetyPolicy.check_tool() → ALLOW / DENY / ASK
                                         if ASK → ApprovalCallback → APPROVED / DENIED
 ```
 
-The policy evaluates rules in this order:
+The policy evaluates rules in this order — **hard gates first, soft approval last**:
 
-1. **Read-only mode** — if enabled, all write and execute side-effects are denied immediately
-2. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK
-3. **Path rules** — explicit `PathRule` entries (first match wins)
-4. **Denied paths** — glob patterns that block file access
-5. **Allowed paths** — if set, only matching paths are permitted (whitelist)
-6. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins)
-7. **Denied commands** — substring patterns that block dangerous shell commands
-8. If nothing matches, the tool call is **ALLOWED**
+1. **Read-only mode** — if enabled, all writes and executes are denied immediately (hard)
+2. **Path rules** — explicit `PathRule` entries (first match wins) (hard)
+3. **Denied paths** — glob patterns that block file access (hard)
+4. **Allowed paths** — if set, only matching paths are permitted; anything outside is denied (hard)
+5. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins) (hard)
+6. **Denied commands** — substring patterns that block dangerous shell commands (hard)
+7. **Bash forced approval** — if `allowed_paths` is set and the sandbox provides no OS-level write isolation (`local`, `wsl`), bash is forced to ASK so the user can verify the command (soft)
+8. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK (soft)
+9. If nothing matches, the tool call is **ALLOWED**
+
+Steps 1–6 are hard **DENY** — they cannot be bypassed by approval. This means `allowed_paths` acts as a true sandbox boundary: a write or read that falls outside it is denied outright, not merely queued for human review.
 
 ## Built-in defaults
 
@@ -76,41 +79,60 @@ Redaction is best-effort and not a substitute for not logging sensitive
 commands in the first place. Enable `log_all_commands` only when you need
 deep audit trails and have reviewed what the agent is likely to run.
 
+## `allowed_paths` and bash
+
+`allowed_paths` is a hard path boundary for file tools (`read_file`, `write_file`, `edit_file`, `list_directory`). Any access outside the whitelist is **denied**, regardless of approval settings.
+
+**Bash is different.** A shell command can access any path; there is no reliable way to inspect what paths an arbitrary command will touch before running it. Aar handles this by mode:
+
+| Sandbox mode | Bash behaviour when `allowed_paths` is set |
+|---|---|
+| `local` | Forced **ASK** — user must approve every bash command |
+| `wsl` | Forced **ASK** — Windows filesystem is fully mounted inside WSL, no write restriction |
+| `linux` | **No forced ASK** — Landlock enforces write restrictions at kernel level |
+| `windows` | **No forced ASK** — Low Integrity level enforces write restrictions at OS level |
+
+For `linux` and `windows` modes, `require_approval_for_execute` still applies as normal. The forced-ASK only kicks in when the sandbox cannot actually enforce the boundary.
+
+The `<cwd>/**` sentinel in `allowed_paths` is expanded to the working directory path at startup — so `aar init` writes `["<cwd>/**"]` to the config and it resolves correctly regardless of where `aar` is launched.
+
 ## Per-transport defaults
 
 ### `aar chat` and `aar tui` (interactive)
 
-**Workspace sandbox ON by default:**
+**Cwd-restricted by default** (from `~/.aar/config.json` written by `aar init`):
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `--require-approval` | **on** | Prompts before every write or shell command |
-| `--restrict-to-cwd` | **on** | File tools can only access `cwd/**` |
+| `safety.require_approval_for_writes` | **true** | Prompts before every write |
+| `safety.require_approval_for_execute` | **true** | Prompts before every shell command |
+| `safety.allowed_paths` | `["<cwd>/**"]` | File tools restricted to current directory |
 
-This creates a two-layer defense:
-- **File tools** are restricted to the current directory by `allowed_paths`
-- **Bash** bypasses `allowed_paths` (it runs arbitrary commands), so it requires human approval instead
+With `local` sandbox (the default), bash is additionally forced to ASK because `allowed_paths` is set and local mode cannot enforce the boundary.
 
-Disable the sandbox for trusted workflows:
+Widen access for trusted workflows:
 
 ```bash
+# Remove path restriction entirely
+aar chat --no-restrict-to-cwd
+
+# Remove all approval prompts too
 aar chat --no-require-approval --no-restrict-to-cwd
+```
+
+Or add additional paths in `config.json`:
+
+```json
+{
+  "safety": {
+    "allowed_paths": ["<cwd>/**", "/home/user/shared/**"]
+  }
+}
 ```
 
 ### `aar run` (automation)
 
-**Permissive by default:**
-
-| Setting | Default | Effect |
-|---------|---------|--------|
-| `--require-approval` | **off** | No approval prompts |
-| `--restrict-to-cwd` | **off** | File tools can access any non-denied path |
-
-Opt in to the sandbox for untrusted tasks:
-
-```bash
-aar run "task" --require-approval --restrict-to-cwd
-```
+Same defaults as `aar chat` — `allowed_paths: ["<cwd>/**"]` applies. The difference is that `run` is non-interactive, so any ASK that cannot be answered will be auto-denied unless you pre-configure approvals.
 
 ### `aar serve` (web API)
 
@@ -249,12 +271,12 @@ macOS                        →  local    (no OS-level sandbox available)
 
 ### What each mode actually restricts
 
-| Mode | Writes blocked outside workspace? | Reads blocked? | Resource caps | Network isolation |
-|------|----------------------------------|----------------|---------------|-------------------|
-| `local` | no | no | none | no |
-| `linux` | **yes** — kernel-enforced via Landlock (Linux ≥ 5.13) | no (Landlock v1 doesn't restrict reads) | `ulimit -v` memory cap | no |
-| `windows` | **mostly** — Low IL blocks writes to user profile, Program Files, HKCU; workspace stamped Low-writable | no — Low IL is write-side only | Job Object memory + process count | no |
-| `wsl` | **no** — entire Windows filesystem auto-mounted at `/mnt/<drive>/` | no | none | no |
+| Mode | Writes blocked outside workspace? | Reads blocked? | Resource caps | Network isolation | Bash forced-ASK when `allowed_paths` set? |
+|------|----------------------------------|----------------|---------------|-------------------|----|
+| `local` | no | no | none | no | **yes** |
+| `linux` | **yes** — kernel-enforced via Landlock (Linux ≥ 5.13) | no (Landlock v1 doesn't restrict reads) | `ulimit -v` memory cap | no | no |
+| `windows` | **mostly** — Low IL blocks writes to user profile, Program Files, HKCU; workspace stamped Low-writable | no — Low IL is write-side only | Job Object memory + process count | no | no |
+| `wsl` | **no** — entire Windows filesystem auto-mounted at `/mnt/<drive>/` | no | none | no | **yes** |
 
 **No sandbox mode restricts outbound network access.** None of the current modes restrict outbound network; consider running the agent inside an isolated VM or container outside of Aar if network egress control is required.
 

@@ -158,7 +158,6 @@ class ToolConfig(BaseModel):
     enabled_builtins: list[str] = Field(
         default_factory=lambda: ["read_file", "write_file", "edit_file", "list_directory", "bash"]
     )
-    allowed_paths: list[str] = Field(default_factory=list)
     # Default timeout (seconds) for bash commands when the model omits the timeout argument.
     # Set higher for long-running tasks (package installs, builds, docker pulls, etc.).
     bash_default_timeout: int = 120
@@ -310,7 +309,7 @@ class SafetyConfig(BaseModel):
             "**/.pypirc",
         ]
     )
-    allowed_paths: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=lambda: ["<cwd>/**"])
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     log_all_commands: bool = True
     acp_approval_timeout: float = 0.0  # seconds the ACP client has to respond; 0 = wait indefinitely

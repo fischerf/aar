@@ -40,12 +40,23 @@ class ToolExecutor:
 
         # Build safety policy from config
         sc = safety_config or SafetyConfig()
+        # Resolve "auto" to the actual platform mode so the policy can make
+        # accurate decisions (e.g. forced bash approval on non-isolating modes).
+        _raw_mode = sc.sandbox.mode
+        if _raw_mode == "auto":
+            if os.name == "nt":
+                _raw_mode = "windows"
+            elif sys.platform.startswith("linux"):
+                _raw_mode = "linux"
+            else:
+                _raw_mode = "local"
         policy_cfg = PolicyConfig(
             read_only=sc.read_only,
             require_approval_for_writes=sc.require_approval_for_writes,
             require_approval_for_execute=sc.require_approval_for_execute,
             denied_paths=sc.denied_paths,
             allowed_paths=sc.allowed_paths,
+            sandbox_mode=_raw_mode,
             log_all_commands=sc.log_all_commands,
         )
         self.policy = SafetyPolicy(policy_cfg)

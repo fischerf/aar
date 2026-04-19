@@ -23,7 +23,6 @@
       "list_directory",
       "bash"
     ],
-    "allowed_paths": [],
     "bash_default_timeout": 120,
     "command_timeout": 300,
     "max_output_chars": 50000
@@ -59,7 +58,7 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": [],
+    "allowed_paths": ["<cwd>/**"],
     "sandbox": {
       "mode": "local"
     },

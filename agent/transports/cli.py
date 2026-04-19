@@ -107,6 +107,11 @@ def _build_config(
         cfg.safety.allowed_paths = [p.strip() for p in allowed_paths.split(",") if p.strip()]
     elif restrict_to_cwd is not None and restrict_to_cwd:
         cfg.safety.allowed_paths = [str(Path.cwd()) + "/**"]
+    elif restrict_to_cwd is not None and not restrict_to_cwd:
+        cfg.safety.allowed_paths = []
+    # Expand <cwd> sentinel written by `aar init` (and in sample configs)
+    _cwd = str(Path.cwd()).replace("\\", "/")
+    cfg.safety.allowed_paths = [p.replace("<cwd>", _cwd) for p in cfg.safety.allowed_paths]
 
     # Log level — CLI flag overrides config file value
     if log_level is not None:

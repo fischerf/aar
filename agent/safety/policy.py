@@ -106,6 +106,12 @@ class PolicyConfig(BaseModel):
         ]
     )
 
+    # Sandbox mode — used to decide whether bash needs forced approval when
+    # allowed_paths is active. "local" means no OS-level isolation so the
+    # shell can reach any path; real sandboxes (wsl, linux, windows) enforce
+    # the boundary at the OS level, making forced-ASK redundant.
+    sandbox_mode: str = "local"
+
     # Logging
     # Off by default: audit logging records full command strings, which frequently
     # contain secrets (API keys, tokens, --password=…). Users who need an audit
@@ -191,20 +197,26 @@ class SafetyPolicy:
         """Check whether a tool call is allowed.
 
         Returns ALLOW, DENY, or ASK.
+
+        Evaluation order (hard gates first, soft approval last):
+        1. read_only  → DENY writes/execute unconditionally
+        2. path check → DENY if outside denied_paths or allowed_paths whitelist
+        3. command check → DENY if matches a denied command pattern
+        4. approval   → ASK if require_approval_for_writes/execute is set
+        5.            → ALLOW
+
+        Steps 2–3 are hard DENY that cannot be bypassed by approval. This
+        means allowed_paths acts as a true sandbox boundary: a write or shell
+        command that falls outside it is denied outright, not merely queued
+        for human review.
         """
-        # Read-only mode blocks all writes and executions
+        # 1. Read-only mode — hard deny all mutations
         if self.config.read_only:
             if SideEffect.WRITE in spec.side_effects or SideEffect.EXECUTE in spec.side_effects:
                 logger.info("Policy DENY (read-only mode): %s", spec.name)
                 return PolicyDecision.DENY
 
-        # Check side-effect-based approval requirements
-        if SideEffect.WRITE in spec.side_effects and self.config.require_approval_for_writes:
-            return PolicyDecision.ASK
-        if SideEffect.EXECUTE in spec.side_effects and self.config.require_approval_for_execute:
-            return PolicyDecision.ASK
-
-        # Path checks for file tools
+        # 2. Path checks — hard deny for both reads and writes
         if SideEffect.READ in spec.side_effects or SideEffect.WRITE in spec.side_effects:
             path = arguments.get("path", "")
             if path:
@@ -212,13 +224,33 @@ class SafetyPolicy:
                 if decision != PolicyDecision.ALLOW:
                     return decision
 
-        # Command checks for shell tools
+        # 3. Command checks — hard deny for blocked patterns
         if SideEffect.EXECUTE in spec.side_effects:
             command = arguments.get("command", "")
             if command:
                 decision = self._check_command(command)
                 if decision != PolicyDecision.ALLOW:
                     return decision
+
+        # 4. Approval gates — soft ask (only reached when path/command passed)
+        if SideEffect.WRITE in spec.side_effects and self.config.require_approval_for_writes:
+            return PolicyDecision.ASK
+        if SideEffect.EXECUTE in spec.side_effects:
+            if self.config.require_approval_for_execute:
+                return PolicyDecision.ASK
+            # When allowed_paths is active and the sandbox provides no OS-level
+            # write isolation, we cannot verify which paths a shell command will
+            # touch. Force ASK so the user can review the command before it runs.
+            # Only "linux" (Landlock) and "windows" (Low Integrity) actually
+            # enforce write restrictions at the kernel/OS level; "local", "wsl",
+            # and any unrecognised mode do not.
+            _ISOLATED_MODES = {"linux", "windows"}
+            if self.config.allowed_paths and self.config.sandbox_mode not in _ISOLATED_MODES:
+                logger.info(
+                    "Policy ASK (bash unverifiable under allowed_paths with local sandbox): %s",
+                    spec.name,
+                )
+                return PolicyDecision.ASK
 
         return PolicyDecision.ALLOW
 

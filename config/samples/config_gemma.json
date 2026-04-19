@@ -3,7 +3,7 @@
     "name": "ollama",
     "model": "gemma4:e4b",
     "base_url": "http://localhost:11434",
-    "temperature": 1.0,
+    "temperature": 0.6,
     "max_tokens": 8192,
     "extra": {
       "num_ctx": 32768,
@@ -25,7 +25,6 @@
       "list_directory",
       "bash"
     ],
-    "allowed_paths": [],
     "bash_default_timeout": 120,
     "command_timeout": 300,
     "max_output_chars": 50000
@@ -61,7 +60,7 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": [],
+    "allowed_paths": ["<cwd>/**"],
     "sandbox": {
       "mode": "local"
     },

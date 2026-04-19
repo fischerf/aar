@@ -25,12 +25,13 @@ config = AgentConfig(
     ),
     safety=SafetyConfig(
         read_only=False,                           # block all writes
-        require_approval_for_writes=False,         # ask before every write
-        require_approval_for_execute=False,        # ask before every shell command
+        require_approval_for_writes=True,          # ask before every write
+        require_approval_for_execute=True,         # ask before every shell command
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
-        allowed_paths=[],                          # whitelist (empty = allow all non-denied)
+        allowed_paths=["<cwd>/**"],                # hard path boundary; <cwd> expands to Path.cwd() at startup
+                                                   # empty list = allow all non-denied paths
         sandbox=SandboxConfig(                     # see docs/safety.md for all modes and per-mode options
-            mode="local",                          # "local" | "subprocess" | "workspace" | "windows" | "wsl" | "auto"
+            mode="local",                          # "local" | "linux" | "windows" | "wsl" | "auto"
         ),
         acp_approval_timeout=0.0,                  # seconds the ACP client has to respond to a permission request; 0.0 = wait indefinitely
     ),
