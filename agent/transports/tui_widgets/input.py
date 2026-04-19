@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|[^\[])")
+
 try:
     from textual.message import Message
     from textual.widgets import Input, TextArea
@@ -192,3 +196,15 @@ class HistoryTextArea(TextArea):
                 event.prevent_default()  # type: ignore[union-attr]
             if hasattr(event, "stop"):
                 event.stop()  # type: ignore[union-attr]
+
+    def on_paste(self, event: object) -> None:
+        """Strip ANSI escape sequences that arrive via paste (e.g. mouse/focus tracking on Windows)."""
+        text = getattr(event, "text", None)
+        if text is None:
+            return
+        clean = _ANSI_ESCAPE_RE.sub("", text)
+        if clean == text:
+            return
+        if hasattr(event, "prevent_default"):
+            event.prevent_default()  # type: ignore[union-attr]
+        self.insert(clean)
