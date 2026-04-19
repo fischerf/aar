@@ -166,10 +166,11 @@ class TestFileToContentBlock:
             file_to_content_block(vid)
 
     def test_unsupported_file_raises(self, tmp_path: Path):
-        txt = tmp_path / "test.txt"
-        txt.write_text("hello")
+        # Binary file with an unknown extension should raise, not be read as text
+        f = tmp_path / "test.xyz"
+        f.write_bytes(b"\x00\x01\x02\x03" * 100)
         with pytest.raises(ValueError, match="Unsupported file type"):
-            file_to_content_block(txt)
+            file_to_content_block(f)
 
     def test_missing_file_raises(self, tmp_path: Path):
         with pytest.raises(FileNotFoundError):

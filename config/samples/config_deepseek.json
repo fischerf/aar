@@ -25,7 +25,8 @@
       "bash"
     ],
     "allowed_paths": [],
-    "command_timeout": 80,
+    "bash_default_timeout": 120,
+    "command_timeout": 300,
     "max_output_chars": 50000
   },
   "safety": {

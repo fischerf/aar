@@ -159,7 +159,12 @@ class ToolConfig(BaseModel):
         default_factory=lambda: ["read_file", "write_file", "edit_file", "list_directory", "bash"]
     )
     allowed_paths: list[str] = Field(default_factory=list)
-    command_timeout: int = 30
+    # Default timeout (seconds) for bash commands when the model omits the timeout argument.
+    # Set higher for long-running tasks (package installs, builds, docker pulls, etc.).
+    bash_default_timeout: int = 120
+    # Hard outer timeout (seconds) applied by the executor regardless of what the model requests.
+    # Should be >= bash_default_timeout; 0 disables the outer guard.
+    command_timeout: int = 300
     max_output_chars: int = 50_000
 
 
