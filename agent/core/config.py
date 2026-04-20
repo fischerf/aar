@@ -211,8 +211,8 @@ class WslSandboxConfig(BaseModel):
     # Provisioning fields (used by aar sandbox setup / reset)
     install_path: str | None = None  # None → %LOCALAPPDATA%\aar\wsl-distros\<distro>
     rootfs_url: str = (
-        "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/"
-        "alpine-minirootfs-3.21.0-x86_64.tar.gz"
+        "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/"
+        "alpine-minirootfs-3.23.0-x86_64.tar.gz"
     )
     # Commands run inside the distro before package installation (e.g. enabling extra repos).
     pre_install_commands: list[str] = Field(default_factory=list)

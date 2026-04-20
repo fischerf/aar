@@ -1,7 +1,7 @@
 {
   "distro": "aar-sandbox",
   "shell": "sh",
-  "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+  "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
   "pre_install_commands": [
     "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
   ],
