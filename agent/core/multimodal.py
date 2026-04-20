@@ -44,6 +44,15 @@ _EXT_TO_MIME: dict[str, str] = {
 _ATTACHMENT_RE = re.compile(r"@((?:[A-Za-z]:)?[\\/]?[^\s@]+\.[a-zA-Z0-9]+)")
 
 
+def is_binary_file(path: Path, sample: int = 8192) -> bool:
+    """Return True if the file looks binary (contains null bytes in the first *sample* bytes)."""
+    try:
+        chunk = path.read_bytes()[:sample]
+    except OSError:
+        return True
+    return b"\x00" in chunk
+
+
 def detect_mime(path: Path) -> str:
     """Return the MIME type for a file path, using extension-based lookup."""
     mime = _EXT_TO_MIME.get(path.suffix.lower())
@@ -103,7 +112,13 @@ def file_to_content_block(path: Path) -> ContentBlock:
             "Video support will be added in a future release."
         )
 
-    raise ValueError(f"Unsupported file type ({mime}): {path.name}")
+    if is_binary_file(path):
+        raise ValueError(f"Unsupported file type ({mime}): {path.name}")
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ValueError(f"Could not read file: {path.name}") from exc
+    return TextBlock(text=f"[File: {path}]\n{content}")
 
 
 def parse_multimodal_input(user_input: str) -> str | list[ContentBlock]:

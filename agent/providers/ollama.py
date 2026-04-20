@@ -23,9 +23,12 @@ class OllamaProvider(Provider):
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
         self._base_url = (config.base_url or _DEFAULT_OLLAMA_URL).rstrip("/")
+        # Local models can be slow; default read timeout is None (unlimited).
+        # Set provider.extra.read_timeout in config to cap it (seconds).
+        read_timeout: float | None = config.extra.get("read_timeout", None)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(read_timeout, connect=10.0),
         )
         self._keep_alive = config.extra.get("keep_alive", "5m")
 
@@ -95,6 +98,7 @@ class OllamaProvider(Provider):
         # Extra options (skip known non-option keys)
         _SKIP = {
             "keep_alive",
+            "read_timeout",
             "supports_reasoning",
             "supports_tools",
             "supports_vision",
@@ -128,17 +132,19 @@ class OllamaProvider(Provider):
         done_reason = data.get("done_reason", "")
         stop_reason = _map_stop_reason(done_reason, bool(tool_calls))
 
-        # Handle think mode — Ollama 0.20+ returns thinking in message.thinking
+        # Handle think mode — Ollama 0.20+ returns thinking in message.thinking.
+        # Always clean raw thinking tokens from content regardless of supports_reasoning,
+        # because models like Gemma4 emit them unconditionally (even when thinking is off).
         reasoning_blocks = []
-        if self.supports_reasoning:
-            thinking_text = message.get("thinking", "")
-            if thinking_text:
-                from agent.core.events import ReasoningBlock
+        thinking_text = message.get("thinking", "")
+        if thinking_text:
+            from agent.core.events import ReasoningBlock
 
-                reasoning_blocks = [ReasoningBlock(content=thinking_text.strip())]
-            elif "<think>" in content:
-                # Fallback for older Ollama versions that embed tags in content
-                content, reasoning_blocks = _extract_thinking(content)
+            reasoning_blocks = [ReasoningBlock(content=thinking_text.strip())]
+        else:
+            from agent.providers._thinking import extract_all
+
+            content, reasoning_blocks = extract_all(content)
 
         # Usage metadata
         usage: dict[str, int] = {}
@@ -205,6 +211,7 @@ class OllamaProvider(Provider):
 
         _SKIP = {
             "keep_alive",
+            "read_timeout",
             "supports_reasoning",
             "supports_tools",
             "supports_vision",
@@ -216,6 +223,12 @@ class OllamaProvider(Provider):
 
         # Accumulators for tool calls (streamed models may return them in the final chunk)
         tool_acc: list[dict[str, Any]] = []
+
+        from agent.providers._thinking import StreamThinkingRouter
+
+        # Always route thinking tokens — models like Gemma4 emit channel tokens
+        # unconditionally even when thinking is disabled.
+        router = StreamThinkingRouter()
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
             resp.raise_for_status()
@@ -232,8 +245,12 @@ class OllamaProvider(Provider):
                 # Text content delta
                 text = message.get("content", "")
 
-                # Reasoning delta (think mode)
+                # Reasoning delta — Ollama 0.20+ extracts this natively
                 reasoning = message.get("thinking", "")
+
+                # Fallback: route raw thinking tokens embedded in content
+                if text and not reasoning:
+                    text, reasoning = router.feed(text)
 
                 # Tool calls (usually only in the final chunk)
                 raw_tcs = message.get("tool_calls", [])
@@ -247,6 +264,12 @@ class OllamaProvider(Provider):
                         text=text,
                         reasoning_delta=reasoning,
                     )
+
+                if is_done:
+                    # Flush any partial-opener buffer
+                    clean, leftover_reasoning = router.flush()
+                    if clean or leftover_reasoning:
+                        yield StreamDelta(text=clean, reasoning_delta=leftover_reasoning)
 
                 if is_done:
                     # Emit accumulated tool calls
@@ -401,22 +424,3 @@ def _map_stop_reason(done_reason: str, has_tool_calls: bool) -> str:
     return StopReason.END_TURN.value
 
 
-def _extract_thinking(content: str) -> tuple[str, list]:
-    """Extract <think>...</think> blocks from content."""
-    from agent.core.events import ReasoningBlock
-
-    reasoning = []
-    clean = content
-    while "<think>" in clean:
-        start = clean.index("<think>")
-        end = clean.find("</think>")
-        if end == -1:
-            # Unclosed think tag — treat rest as reasoning
-            reasoning.append(ReasoningBlock(content=clean[start + 7 :].strip()))
-            clean = clean[:start].strip()
-            break
-        thinking_text = clean[start + 7 : end].strip()
-        if thinking_text:
-            reasoning.append(ReasoningBlock(content=thinking_text))
-        clean = (clean[:start] + clean[end + 8 :]).strip()
-    return clean, reasoning

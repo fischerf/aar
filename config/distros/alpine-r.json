@@ -1,0 +1,11 @@
+{
+  "distro": "aar-sandbox",
+  "shell": "sh",
+  "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+  "pre_install_commands": [
+    "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
+  ],
+  "packages": ["python3", "py3-pip", "R"],
+  "package_install_command": "apk add --no-cache {packages}",
+  "system_prompt_hint": "Alpine Linux with R pre-installed. Package manager: apk (NOT apt). Community repository enabled. You CAN run 'apk add <pkg>' to install packages. R is available — use 'Rscript <file>' to run R scripts."
+}

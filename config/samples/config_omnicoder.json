@@ -11,7 +11,8 @@
       "supports_reasoning": true,
       "supports_tools": true,
       "supports_vision": false,
-      "keep_alive": "10m"
+      "keep_alive": "10m",
+      "read_timeout": null
     }
   },
   "tools": {
@@ -22,8 +23,8 @@
       "list_directory",
       "bash"
     ],
-    "allowed_paths": [],
-    "command_timeout": 80,
+    "bash_default_timeout": 120,
+    "command_timeout": 300,
     "max_output_chars": 50000
   },
   "safety": {
@@ -57,7 +58,7 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": [],
+    "allowed_paths": ["<cwd>/**"],
     "sandbox": {
       "mode": "local"
     },

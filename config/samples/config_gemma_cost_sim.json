@@ -3,7 +3,7 @@
     "name": "ollama",
     "model": "gemma4:e4b",
     "base_url": "http://localhost:11434",
-    "temperature": 1.0,
+    "temperature": 0.6,
     "max_tokens": 8192,
     "extra": {
       "num_ctx": 32768,
@@ -13,7 +13,8 @@
       "supports_reasoning": true,
       "supports_tools": true,
       "supports_vision": true,
-      "keep_alive": "10m"
+      "keep_alive": "10m",
+      "read_timeout": null
     }
   },
   "tools": {
@@ -24,8 +25,8 @@
       "list_directory",
       "bash"
     ],
-    "allowed_paths": [],
-    "command_timeout": 80,
+    "bash_default_timeout": 120,
+    "command_timeout": 300,
     "max_output_chars": 50000
   },
   "safety": {
@@ -59,9 +60,12 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": [],
+    "allowed_paths": ["<cwd>/**"],
     "sandbox": {
-      "mode": "local"
+      "mode": "wsl",
+      "wsl": {
+        "profile": "~/.aar/distros/alpine-base.json"
+      }
     },
     "log_all_commands": true,
     "acp_approval_timeout": 0.0

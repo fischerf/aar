@@ -12,16 +12,19 @@ Tool call → SafetyPolicy.check_tool() → ALLOW / DENY / ASK
                                         if ASK → ApprovalCallback → APPROVED / DENIED
 ```
 
-The policy evaluates rules in this order:
+The policy evaluates rules in this order — **hard gates first, soft approval last**:
 
-1. **Read-only mode** — if enabled, all write and execute side-effects are denied immediately
-2. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK
-3. **Path rules** — explicit `PathRule` entries (first match wins)
-4. **Denied paths** — glob patterns that block file access
-5. **Allowed paths** — if set, only matching paths are permitted (whitelist)
-6. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins)
-7. **Denied commands** — substring patterns that block dangerous shell commands
-8. If nothing matches, the tool call is **ALLOWED**
+1. **Read-only mode** — if enabled, all writes and executes are denied immediately (hard)
+2. **Path rules** — explicit `PathRule` entries (first match wins) (hard)
+3. **Denied paths** — glob patterns that block file access (hard)
+4. **Allowed paths** — if set, only matching paths are permitted; anything outside is denied (hard)
+5. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins) (hard)
+6. **Denied commands** — substring patterns that block dangerous shell commands (hard)
+7. **Bash forced approval** — if `allowed_paths` is set and the sandbox provides no OS-level write isolation (`local`, `wsl`), bash is forced to ASK so the user can verify the command (soft)
+8. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK (soft)
+9. If nothing matches, the tool call is **ALLOWED**
+
+Steps 1–6 are hard **DENY** — they cannot be bypassed by approval. This means `allowed_paths` acts as a true sandbox boundary: a write or read that falls outside it is denied outright, not merely queued for human review.
 
 ## Built-in defaults
 
@@ -76,41 +79,60 @@ Redaction is best-effort and not a substitute for not logging sensitive
 commands in the first place. Enable `log_all_commands` only when you need
 deep audit trails and have reviewed what the agent is likely to run.
 
+## `allowed_paths` and bash
+
+`allowed_paths` is a hard path boundary for file tools (`read_file`, `write_file`, `edit_file`, `list_directory`). Any access outside the whitelist is **denied**, regardless of approval settings.
+
+**Bash is different.** A shell command can access any path; there is no reliable way to inspect what paths an arbitrary command will touch before running it. Aar handles this by mode:
+
+| Sandbox mode | Bash behaviour when `allowed_paths` is set |
+|---|---|
+| `local` | Forced **ASK** — user must approve every bash command |
+| `wsl` | Forced **ASK** — Windows filesystem is fully mounted inside WSL, no write restriction |
+| `linux` | **No forced ASK** — Landlock enforces write restrictions at kernel level |
+| `windows` | **No forced ASK** — Low Integrity level enforces write restrictions at OS level |
+
+For `linux` and `windows` modes, `require_approval_for_execute` still applies as normal. The forced-ASK only kicks in when the sandbox cannot actually enforce the boundary.
+
+The `<cwd>/**` sentinel in `allowed_paths` is expanded to the working directory path at startup — so `aar init` writes `["<cwd>/**"]` to the config and it resolves correctly regardless of where `aar` is launched.
+
 ## Per-transport defaults
 
 ### `aar chat` and `aar tui` (interactive)
 
-**Workspace sandbox ON by default:**
+**Cwd-restricted by default** (from `~/.aar/config.json` written by `aar init`):
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `--require-approval` | **on** | Prompts before every write or shell command |
-| `--restrict-to-cwd` | **on** | File tools can only access `cwd/**` |
+| `safety.require_approval_for_writes` | **true** | Prompts before every write |
+| `safety.require_approval_for_execute` | **true** | Prompts before every shell command |
+| `safety.allowed_paths` | `["<cwd>/**"]` | File tools restricted to current directory |
 
-This creates a two-layer defense:
-- **File tools** are restricted to the current directory by `allowed_paths`
-- **Bash** bypasses `allowed_paths` (it runs arbitrary commands), so it requires human approval instead
+With `local` sandbox (the default), bash is additionally forced to ASK because `allowed_paths` is set and local mode cannot enforce the boundary.
 
-Disable the sandbox for trusted workflows:
+Widen access for trusted workflows:
 
 ```bash
+# Remove path restriction entirely
+aar chat --no-restrict-to-cwd
+
+# Remove all approval prompts too
 aar chat --no-require-approval --no-restrict-to-cwd
+```
+
+Or add additional paths in `config.json`:
+
+```json
+{
+  "safety": {
+    "allowed_paths": ["<cwd>/**", "/home/user/shared/**"]
+  }
+}
 ```
 
 ### `aar run` (automation)
 
-**Permissive by default:**
-
-| Setting | Default | Effect |
-|---------|---------|--------|
-| `--require-approval` | **off** | No approval prompts |
-| `--restrict-to-cwd` | **off** | File tools can access any non-denied path |
-
-Opt in to the sandbox for untrusted tasks:
-
-```bash
-aar run "task" --require-approval --restrict-to-cwd
-```
+Same defaults as `aar chat` — `allowed_paths: ["<cwd>/**"]` applies. The difference is that `run` is non-interactive, so any ASK that cannot be answered will be auto-denied unless you pre-configure approvals.
 
 ### `aar serve` (web API)
 
@@ -249,12 +271,12 @@ macOS                        →  local    (no OS-level sandbox available)
 
 ### What each mode actually restricts
 
-| Mode | Writes blocked outside workspace? | Reads blocked? | Resource caps | Network isolation |
-|------|----------------------------------|----------------|---------------|-------------------|
-| `local` | no | no | none | no |
-| `linux` | **yes** — kernel-enforced via Landlock (Linux ≥ 5.13) | no (Landlock v1 doesn't restrict reads) | `ulimit -v` memory cap | no |
-| `windows` | **mostly** — Low IL blocks writes to user profile, Program Files, HKCU; workspace stamped Low-writable | no — Low IL is write-side only | Job Object memory + process count | no |
-| `wsl` | **no** — entire Windows filesystem auto-mounted at `/mnt/<drive>/` | no | none | no |
+| Mode | Writes blocked outside workspace? | Reads blocked? | Resource caps | Network isolation | Bash forced-ASK when `allowed_paths` set? |
+|------|----------------------------------|----------------|---------------|-------------------|----|
+| `local` | no | no | none | no | **yes** |
+| `linux` | **yes** — kernel-enforced via Landlock (Linux ≥ 5.13) | no (Landlock v1 doesn't restrict reads) | `ulimit -v` memory cap | no | no |
+| `windows` | **mostly** — Low IL blocks writes to user profile, Program Files, HKCU; workspace stamped Low-writable | no — Low IL is write-side only | Job Object memory + process count | no | no |
+| `wsl` | **no** — entire Windows filesystem auto-mounted at `/mnt/<drive>/` | no | none | no | **yes** |
 
 **No sandbox mode restricts outbound network access.** None of the current modes restrict outbound network; consider running the agent inside an isolated VM or container outside of Aar if network egress control is required.
 
@@ -383,7 +405,7 @@ A dedicated, disposable WSL2 distro is used as the execution environment. Comman
 
 **What it isolates:**
 - Distro filesystem (`/etc`, `/usr`, `/home`, installed packages) is separate from host Windows and any other WSL2 distros
-- `apk add` / `pip install` stays inside the distro — host is untouched
+- `apk add` / `apt-get install` / `pip install` stays inside the distro — host is untouched
 - State is resettable via `aar sandbox reset`
 
 **What it does NOT isolate (important):**
@@ -408,17 +430,37 @@ cheap last-line check, not a replacement for a real FS sandbox.
     "sandbox": {
       "mode": "wsl",
       "wsl": {
-        "distro": "aar-sandbox",
-        "shell": "sh",
-        "packages": ["python3", "py3-pip", "nodejs", "npm"],
-        "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.21.0-x86_64.tar.gz"
+        "profile": "~/.aar/distros/alpine-base.json"
       }
     }
   }
 }
 ```
 
-All `wsl` sub-fields are optional. Defaults use Alpine Linux with Python 3 and pip.
+`aar init` writes built-in profiles to `~/.aar/distros/`. Point `profile` at one and `aar sandbox setup` picks up everything — rootfs URL, packages, pre-install commands, and the system-prompt description the model sees. All `wsl` fields set alongside `profile` override the profile value for that key.
+
+You can also configure the distro inline without a profile:
+
+```json
+{
+  "safety": {
+    "sandbox": {
+      "mode": "wsl",
+      "wsl": {
+        "distro": "aar-sandbox",
+        "shell": "sh",
+        "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+        "pre_install_commands": [
+          "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
+        ],
+        "packages": ["python3", "py3-pip", "nodejs", "npm"],
+        "package_install_command": "apk add --no-cache {packages}",
+        "system_prompt_hint": "Alpine Linux. Package manager: apk (NOT apt). Community repo enabled. You CAN run 'apk add <pkg>' to install packages."
+      }
+    }
+  }
+}
+```
 
 #### Managing the distro — `aar sandbox`
 
@@ -436,32 +478,32 @@ aar sandbox reset                          # unregister + recreate, prompts for 
 aar sandbox reset --yes                    # skip confirmation
 ```
 
-All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`).
+All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`), including any loaded profile.
 
-`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, and installs the configured packages. It prints a config snippet at the end.
+`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, runs any `pre_install_commands`, then installs the configured packages. Run `aar sandbox status` afterwards to verify the configuration and distro state.
 
-**Reset behavior:** unregisters the distro, re-downloads rootfs, reinstalls packages. Workspace files on the Windows filesystem (`/mnt/<drive>/...`) are **not affected** — only the distro's own filesystem is wiped.
+**Reset behavior:** unregisters the distro, re-downloads rootfs, re-runs pre-install commands, reinstalls packages. Workspace files on the Windows filesystem (`/mnt/<drive>/...`) are **not affected** — only the distro's own filesystem is wiped.
 
 #### Using a non-Alpine rootfs
 
-Point `wsl.rootfs_url` at any `.tar.gz` rootfs (Ubuntu, Debian, etc.) and update `wsl.packages` to use that distro's package manager:
+Create a profile file (e.g. `~/.aar/distros/ubuntu.json`) and point `profile` at it. Set `package_install_command` to match the distro's package manager (the `{packages}` placeholder is expanded at runtime), and use `pre_install_commands` to bootstrap the package manager before packages are installed:
 
 ```json
 {
-  "safety": {
-    "sandbox": {
-      "mode": "wsl",
-      "wsl": {
-        "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
-        "packages": ["python3", "python3-pip", "nodejs", "npm"]
-      }
-    }
-  }
+  "distro": "aar-ubuntu",
+  "shell": "bash",
+  "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+  "pre_install_commands": ["apt-get update -q"],
+  "packages": ["python3", "python3-pip", "nodejs", "npm"],
+  "package_install_command": "apt-get install -y {packages}",
+  "system_prompt_hint": "Ubuntu 24.04. Package manager: apt. You CAN run 'apt-get install -y <pkg>' to install packages."
 }
 ```
 
-> **Note:** The `apk add` command in `setup` is Alpine-specific. For other distros, install packages manually after import:
-> `wsl -d my-sandbox -- apt-get install -y python3 python3-pip`
+Then in `~/.aar/config.json`:
+```json
+{ "safety": { "sandbox": { "mode": "wsl", "wsl": { "profile": "~/.aar/distros/ubuntu.json" } } } }
+```
 
 #### Windows program execution through the `wsl` sandbox
 
@@ -540,12 +582,16 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `profile` | `str \| None` | `None` | Path to a distro profile JSON (`~`-expanded). Profile values are base defaults; inline fields override. |
 | `distro` | `str` | `"aar-sandbox"` | WSL2 distro name |
 | `shell` | `str` | `"sh"` | Shell binary inside the distro (`sh` works on minimal Alpine) |
 | `workspace` | `str \| None` | `None` (→ cwd) | Windows path — auto-translated to `/mnt/…` |
 | `install_path` | `str \| None` | `None` | Where to store distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
 | `rootfs_url` | `str` | Alpine latest-stable | Rootfs tarball URL used by `aar sandbox setup` |
+| `pre_install_commands` | `list[str]` | `[]` | Shell commands run inside the distro before package installation (e.g. enabling extra repos) |
 | `packages` | `list[str]` | `["python3", "py3-pip"]` | Packages installed during `aar sandbox setup` |
+| `package_install_command` | `str` | `"apk add --no-cache {packages}"` | Command template used to install packages. `{packages}` is replaced with a space-joined package list. Override in your profile for non-Alpine distros (e.g. `"apt-get install -y {packages}"`). |
+| `system_prompt_hint` | `str` | `""` | Distro description injected into the model's system prompt (package manager, available tools, etc.). Set in your profile so the model knows which package manager to use. |
 
 ### Shell tool wiring
 

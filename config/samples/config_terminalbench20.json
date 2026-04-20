@@ -25,14 +25,14 @@
       "list_directory",
       "bash"
     ],
-    "bash_default_timeout": 120,
-    "command_timeout": 300,
+    "bash_default_timeout": 300,
+    "command_timeout": 360,
     "max_output_chars": 50000
   },
   "safety": {
     "read_only": false,
-    "require_approval_for_writes": true,
-    "require_approval_for_execute": true,
+    "require_approval_for_writes": false,
+    "require_approval_for_execute": false,
     "denied_paths": [
       "/etc/shadow",
       "/etc/passwd",
@@ -60,18 +60,35 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": ["<cwd>/**"],
+    "allowed_paths": [],
     "sandbox": {
-      "mode": "local"
+      "mode": "wsl",
+      "local": {},
+      "linux": {
+        "workspace": null,
+        "max_memory_mb": 512
+      },
+      "windows": {
+        "workspace": null,
+        "max_memory_mb": 512,
+        "max_processes": 10,
+        "use_low_integrity": true
+      },
+      "wsl": {
+        "profile": "~/.aar/distros/ubuntu.json",
+        "distro": "aar-ubuntu",
+        "workspace": null,
+        "install_path": null
+      }
     },
     "log_all_commands": true,
     "acp_approval_timeout": 0.0
   },
   "tui": {
-    "theme": "",
+    "theme": "default",
     "layout": {
       "reasoning": {
-        "visible": false
+        "visible": true
       },
       "token_usage": {
         "visible": true
@@ -107,5 +124,6 @@
   "cost_warning_threshold": 0.8,
   "session_dir": ".agent/sessions",
   "project_rules_dir": ".agent",
-  "log_level": "WARNING"
+  "log_level": "DEBUG",
+  "log_file": "aar.log"
 }

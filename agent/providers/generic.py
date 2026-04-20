@@ -155,6 +155,12 @@ class GenericProvider(Provider):
     # ------------------------------------------------------------------
 
     @property
+    def supports_reasoning(self) -> bool:
+        # Enable for any OpenAI-compat model that emits <think> tags or channel tokens
+        # (e.g. Qwen3-direct, OpenRouter thinking models) via extra={"supports_reasoning": true}
+        return bool(self.config.extra.get("supports_reasoning", False))
+
+    @property
     def supports_vision(self) -> bool:
         # Override via extra={"supports_vision": True/False}.
         if "supports_vision" in self.config.extra:
@@ -215,7 +221,33 @@ class GenericProvider(Provider):
                 f"Generic provider returned a non-JSON body: {http_resp.text[:200]}"
             ) from exc
 
-        return _parse_response(data, self.config.model)
+        resp = _parse_response(data, self.config.model)
+
+        if self.supports_reasoning and not resp.reasoning:
+            from agent.providers._thinking import extract_all, extract_reasoning_content
+
+            first_choice = data.get("choices", [{}])[0]
+            message = first_choice.get("message", {})
+            reasoning_blocks = extract_reasoning_content(message)
+            if not reasoning_blocks:
+                content, reasoning_blocks = extract_all(resp.content)
+                resp = ProviderResponse(
+                    content=content,
+                    tool_calls=resp.tool_calls,
+                    stop_reason=resp.stop_reason,
+                    reasoning=reasoning_blocks,
+                    meta=resp.meta,
+                )
+            else:
+                resp = ProviderResponse(
+                    content=resp.content,
+                    tool_calls=resp.tool_calls,
+                    stop_reason=resp.stop_reason,
+                    reasoning=reasoning_blocks,
+                    meta=resp.meta,
+                )
+
+        return resp
 
     async def stream(
         self,
@@ -245,6 +277,10 @@ class GenericProvider(Provider):
         tool_acc: dict[int, dict[str, str]] = {}
         stream_usage: dict[str, int] = {}
         stream_model: str = self.config.model
+
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter() if self.supports_reasoning else None
 
         try:
             async with self._client.stream(
@@ -289,8 +325,11 @@ class GenericProvider(Provider):
 
                     # ── Text delta ────────────────────────────────────────────
                     text_piece: str = delta.get("content") or ""
-                    if text_piece:
-                        yield StreamDelta(text=text_piece)
+                    reasoning_piece: str = ""
+                    if text_piece and router:
+                        text_piece, reasoning_piece = router.feed(text_piece)
+                    if text_piece or reasoning_piece:
+                        yield StreamDelta(text=text_piece, reasoning_delta=reasoning_piece)
 
                     # ── Tool-call argument fragments ──────────────────────────
                     for tc_delta in delta.get("tool_calls", []):
@@ -309,6 +348,10 @@ class GenericProvider(Provider):
 
                     # ── Done ─────────────────────────────────────────────────
                     if finish_reason:
+                        if router:
+                            clean, leftover = router.flush()
+                            if clean or leftover:
+                                yield StreamDelta(text=clean, reasoning_delta=leftover)
                         # Emit fully-assembled tool calls at stream end
                         for acc in tool_acc.values():
                             try:

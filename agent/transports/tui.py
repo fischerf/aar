@@ -106,14 +106,21 @@ class TUIRenderer:
         t = self.theme
 
         if isinstance(event, StreamChunk):
+            if event.reasoning_text:
+                if not getattr(self, "_thinking_active", False):
+                    self._thinking_active = True
+                    self.console.print("\n[dim]▸ thinking[/]")
+                self.console.file.write(event.reasoning_text)
+                self.console.file.flush()
             if event.text:
+                if getattr(self, "_thinking_active", False):
+                    self.console.file.write("\n")
+                    self.console.file.flush()
+                    self._thinking_active = False
                 if not self._streaming_active:
                     self._streaming_active = True
                     self.console.print()  # blank line before streamed output
                 self.console.file.write(event.text)
-                self.console.file.flush()
-            if event.reasoning_text and self._verbose:
-                self.console.file.write(event.reasoning_text)
                 self.console.file.flush()
             if event.finished and self._streaming_active:
                 self.console.file.write("\n")
@@ -187,12 +194,9 @@ class TUIRenderer:
         elif isinstance(event, ReasoningBlock) and event.content:
             if not self.layout.reasoning.visible:
                 return
-            text = event.content
-            if len(text) > 500:
-                text = text[:500] + "..."
             self.console.print(
                 Panel(
-                    Text(text, style=f"italic {t.reasoning.border_style}"),
+                    Text(event.content, style=f"italic {t.reasoning.border_style}"),
                     title=f"[{t.reasoning.title_style}]Thinking[/]",
                     border_style=t.reasoning.border_style,
                     padding=t.reasoning.padding,
@@ -309,7 +313,7 @@ class TUIRenderer:
             "require_approval_for_execute",
             "[yellow]yes[/]" if sc.require_approval_for_execute else "[green]no[/]",
         )
-        t.add_row("sandbox", sc.sandbox)
+        t.add_row("sandbox", sc.sandbox.mode)
         t.add_row("log_all_commands", "yes" if sc.log_all_commands else "no")
         allowed = ", ".join(sc.allowed_paths) if sc.allowed_paths else "[dim]all (no whitelist)[/]"
         t.add_row("allowed_paths", allowed)

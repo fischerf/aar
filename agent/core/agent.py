@@ -83,6 +83,7 @@ class Agent:
             register_shell_tools(
                 self.registry,
                 sandbox=self.executor.sandbox,
+                default_timeout=self.config.tools.bash_default_timeout,
             )
 
         # Only prune builtins we just added that weren't explicitly enabled

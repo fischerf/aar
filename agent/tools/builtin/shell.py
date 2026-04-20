@@ -13,15 +13,20 @@ from agent.tools.schema import SideEffect, ToolSpec
 def register_shell_tools(
     registry: ToolRegistry,
     sandbox: Sandbox | None = None,
+    default_timeout: int = 120,
 ) -> None:
     """Register the bash tool into the given registry.
 
     When *sandbox* is provided, all commands are executed through it (applying
     whatever isolation the sandbox implements).  Falls back to direct subprocess
     creation when *sandbox* is None, preserving backwards compatibility.
+
+    *default_timeout* is the timeout (seconds) used when the model omits the
+    ``timeout`` argument.  Pass ``config.tools.bash_default_timeout`` here so
+    the config drives the behaviour instead of a hardcoded value.
     """
 
-    async def bash(command: str, timeout: int = 30) -> str:
+    async def bash(command: str, timeout: int = default_timeout) -> str:
         """Execute a shell command and return stdout + stderr."""
         if sandbox is not None:
             result = await sandbox.execute(command, timeout=timeout)
@@ -68,7 +73,9 @@ def register_shell_tools(
                 "Execute a shell command. Returns stdout, stderr, and exit code. "
                 "On Windows commands run via WSL (bash -c). Standard Unix/bash "
                 "syntax works (ls, cat, grep, find, …). Use Windows-style paths for "
-                "file tools, but bash syntax for shell commands."
+                "file tools, but bash syntax for shell commands. "
+                f"Pass a larger timeout for slow commands (package installs, builds, "
+                f"docker pulls); the default is {default_timeout}s."
             ),
             input_schema={
                 "type": "object",
@@ -76,7 +83,7 @@ def register_shell_tools(
                     "command": {"type": "string", "description": "The shell command to execute"},
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default: 30)",
+                        "description": f"Timeout in seconds (default: {default_timeout}). Increase for slow commands.",
                     },
                 },
                 "required": ["command"],

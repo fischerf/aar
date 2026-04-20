@@ -195,6 +195,122 @@ class TestPolicyModes:
         assert policy.check_tool(spec, {"message": "hi"}) == PolicyDecision.ALLOW
 
 
+class TestPolicyOrdering:
+    """Path checks are hard gates that run before approval checks."""
+
+    def test_write_outside_allowed_paths_denied_even_when_approval_required(self):
+        """allowed_paths is a hard DENY — require_approval_for_writes cannot promote it to ASK."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_writes=True,
+            )
+        )
+        write_spec = ToolSpec(name="write_file", description="", side_effects=[SideEffect.WRITE])
+
+        # Outside allowed_paths → DENY (not ASK)
+        assert policy.check_tool(write_spec, {"path": "/unsafe/secret.txt"}) == PolicyDecision.DENY
+        # Inside allowed_paths → ASK (approval gate still applies)
+        assert policy.check_tool(write_spec, {"path": "/safe/output.txt"}) == PolicyDecision.ASK
+
+    def test_read_outside_allowed_paths_denied_even_when_approval_required(self):
+        """Read side of the same guarantee: allowed_paths is a hard boundary for reads too."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_writes=True,
+            )
+        )
+        read_spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
+
+        assert policy.check_tool(read_spec, {"path": "/unsafe/file.txt"}) == PolicyDecision.DENY
+        assert policy.check_tool(read_spec, {"path": "/safe/file.txt"}) == PolicyDecision.ALLOW
+
+    def test_denied_path_wins_over_require_approval(self):
+        """denied_paths is also a hard gate — overrides require_approval_for_writes."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                require_approval_for_writes=True,
+                # /etc/shadow is in the default denied_paths list
+            )
+        )
+        write_spec = ToolSpec(name="write_file", description="", side_effects=[SideEffect.WRITE])
+
+        assert policy.check_tool(write_spec, {"path": "/etc/shadow"}) == PolicyDecision.DENY
+
+
+class TestBashAllowedPathsRestriction:
+    """Bash is forced to ASK when allowed_paths is active and sandbox has no OS-level isolation."""
+
+    def _bash_spec(self) -> ToolSpec:
+        return ToolSpec(name="bash", description="", side_effects=[SideEffect.EXECUTE])
+
+    def test_bash_forced_ask_with_local_sandbox(self):
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=False,
+                sandbox_mode="local",
+            )
+        )
+        assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ASK
+
+    def test_bash_forced_ask_with_wsl_sandbox(self):
+        """WSL mounts the full Windows filesystem — no write isolation — same as local."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=False,
+                sandbox_mode="wsl",
+            )
+        )
+        assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ASK
+
+    def test_bash_not_forced_ask_with_linux_sandbox(self):
+        """Linux Landlock enforces write restrictions at kernel level — no forced ASK needed."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=False,
+                sandbox_mode="linux",
+            )
+        )
+        assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ALLOW
+
+    def test_bash_not_forced_ask_with_windows_sandbox(self):
+        """Windows Low Integrity enforces write restrictions — no forced ASK needed."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=False,
+                sandbox_mode="windows",
+            )
+        )
+        assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ALLOW
+
+    def test_bash_no_forced_ask_without_allowed_paths(self):
+        """When allowed_paths is empty, no forced-ASK — existing require_approval_for_execute governs."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=[],
+                require_approval_for_execute=False,
+                sandbox_mode="local",
+            )
+        )
+        assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ALLOW
+
+    def test_bash_require_approval_still_applies_on_isolated_sandbox(self):
+        """Even on linux/windows sandbox, require_approval_for_execute=True means ASK."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=True,
+                sandbox_mode="linux",
+            )
+        )
+        assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ASK
+
+
 # ===========================================================================
 # Permission tests
 # ===========================================================================

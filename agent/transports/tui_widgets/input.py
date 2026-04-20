@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|[^\[])")
+
 try:
     from textual.message import Message
     from textual.widgets import Input, TextArea
@@ -100,6 +104,13 @@ class HistoryTextArea(TextArea):
             self.textarea = textarea
             self.value = value
 
+    class AtTriggered(Message):
+        """Posted when the user types '@' — signals the app to open the file picker."""
+
+        def __init__(self, textarea: "HistoryTextArea") -> None:
+            super().__init__()
+            self.textarea = textarea
+
     def __init__(
         self,
         *args,
@@ -145,9 +156,15 @@ class HistoryTextArea(TextArea):
         self._draft = ""
 
     async def _on_key(self, event: object) -> None:
-        """Handle send key and history navigation."""
+        """Handle send key, @ file picker trigger, and history navigation."""
         key = getattr(event, "key", "")
-        if key == self._send_key:
+        if getattr(event, "character", None) == "@":
+            self.post_message(self.AtTriggered(self))
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()  # type: ignore[union-attr]
+            if hasattr(event, "stop"):
+                event.stop()  # type: ignore[union-attr]
+        elif key == self._send_key:
             self.action_submit_message()
             if hasattr(event, "prevent_default"):
                 event.prevent_default()  # type: ignore[union-attr]
@@ -179,3 +196,15 @@ class HistoryTextArea(TextArea):
                 event.prevent_default()  # type: ignore[union-attr]
             if hasattr(event, "stop"):
                 event.stop()  # type: ignore[union-attr]
+
+    def on_paste(self, event: object) -> None:
+        """Strip ANSI escape sequences that arrive via paste (e.g. mouse/focus tracking on Windows)."""
+        text = getattr(event, "text", None)
+        if text is None:
+            return
+        clean = _ANSI_ESCAPE_RE.sub("", text)
+        if clean == text:
+            return
+        if hasattr(event, "prevent_default"):
+            event.prevent_default()  # type: ignore[union-attr]
+        self.insert(clean)

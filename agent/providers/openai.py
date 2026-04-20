@@ -26,6 +26,8 @@ class OpenAIProvider(Provider):
             kwargs["api_key"] = config.api_key
         if config.base_url:
             kwargs["base_url"] = config.base_url
+        if (timeout := config.extra.get("timeout")) is not None:
+            kwargs["timeout"] = float(timeout)
         self._client = openai.AsyncOpenAI(**kwargs)
 
     @property
@@ -34,9 +36,12 @@ class OpenAIProvider(Provider):
 
     @property
     def supports_reasoning(self) -> bool:
-        # o1/o3 models support reasoning, but it's surfaced differently
-        model = self.config.model.lower()
-        return model.startswith(("o1", "o3"))
+        # o1/o3/o4 models: reasoning tokens are encrypted and never exposed — skip extraction.
+        # For OpenAI-compat endpoints (Qwen3-direct, OpenRouter, etc.) set
+        # extra={"supports_reasoning": true} to enable tag/field extraction.
+        if "supports_reasoning" in self.config.extra:
+            return bool(self.config.extra["supports_reasoning"])
+        return False
 
     @property
     def supports_structured_output(self) -> bool:
@@ -131,10 +136,22 @@ class OpenAIProvider(Provider):
             request_id=response.id or "",
         )
 
+        content = message.content or ""
+        reasoning_blocks: list = []
+        if self.supports_reasoning:
+            from agent.providers._thinking import extract_all, extract_reasoning_content
+
+            # Check OpenRouter/OpenAI-compat structured fields first
+            reasoning_blocks = extract_reasoning_content(message)
+            if not reasoning_blocks:
+                # Fall back to extracting raw think tags / channel tokens from content
+                content, reasoning_blocks = extract_all(content)
+
         return ProviderResponse(
-            content=message.content or "",
+            content=content,
             tool_calls=tool_calls,
             stop_reason=stop_reason,
+            reasoning=reasoning_blocks,
             meta=meta,
         )
 
@@ -177,6 +194,10 @@ class OpenAIProvider(Provider):
         tool_acc: dict[int, dict[str, str]] = {}
         stream_usage: dict[str, int] = {}
 
+        from agent.providers._thinking import StreamThinkingRouter
+
+        router = StreamThinkingRouter() if self.supports_reasoning else None
+
         stream_resp = await self._client.chat.completions.create(**kwargs)
 
         async for chunk in stream_resp:
@@ -194,10 +215,13 @@ class OpenAIProvider(Provider):
             choice = chunk.choices[0]
             delta = choice.delta
 
-            # Text delta
+            # Text delta — route through thinking router when enabled
             text = delta.content or "" if delta else ""
-            if text:
-                yield StreamDelta(text=text)
+            reasoning_delta = ""
+            if text and router:
+                text, reasoning_delta = router.feed(text)
+            if text or reasoning_delta:
+                yield StreamDelta(text=text, reasoning_delta=reasoning_delta)
 
             # Tool call argument fragments
             if delta and delta.tool_calls:
@@ -214,6 +238,10 @@ class OpenAIProvider(Provider):
 
             # Finish
             if choice.finish_reason:
+                if router:
+                    clean, leftover = router.flush()
+                    if clean or leftover:
+                        yield StreamDelta(text=clean, reasoning_delta=leftover)
                 for acc in tool_acc.values():
                     try:
                         parsed_args = json.loads(acc["arguments"] or "{}")

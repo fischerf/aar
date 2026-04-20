@@ -96,6 +96,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
+from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
 from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
@@ -931,6 +932,19 @@ class AarFixedApp(App):
                 return
         await self.push_screen(LogViewerModal())
 
+    def on_history_text_area_at_triggered(
+        self, _event: "HistoryTextArea.AtTriggered"
+    ) -> None:
+        """Open the file picker when the user types '@' in the input."""
+        inp = self.query_one("#user-input", HistoryTextArea)
+
+        def _on_picked(result: str | None) -> None:
+            if result:
+                inp.insert(f"@{result} ")
+            inp.focus()
+
+        self.push_screen(FilePickerModal(Path.cwd()), _on_picked)
+
     # ------------------------------------------------------------------
     # Input handling
     # ------------------------------------------------------------------
@@ -999,7 +1013,7 @@ class AarFixedApp(App):
                 "require_approval_for_execute",
                 "[yellow]yes[/]" if sc.require_approval_for_execute else "[green]no[/]",
             )
-            tbl.add_row("sandbox", sc.sandbox)
+            tbl.add_row("sandbox", sc.sandbox.mode)
             tbl.add_row("log_all_commands", "yes" if sc.log_all_commands else "no")
             allowed = (
                 ", ".join(sc.allowed_paths) if sc.allowed_paths else "[dim]all (no whitelist)[/]"
