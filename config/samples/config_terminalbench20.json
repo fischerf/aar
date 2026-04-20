@@ -1,0 +1,129 @@
+{
+  "provider": {
+    "name": "ollama",
+    "model": "gemma4:e4b",
+    "base_url": "http://localhost:11434",
+    "temperature": 0.6,
+    "max_tokens": 8192,
+    "extra": {
+      "num_ctx": 32768,
+      "top_p": 0.95,
+      "top_k": 64,
+      "min_p": 0.0,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_vision": true,
+      "keep_alive": "10m",
+      "read_timeout": null
+    }
+  },
+  "tools": {
+    "enabled_builtins": [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "list_directory",
+      "bash"
+    ],
+    "bash_default_timeout": 300,
+    "command_timeout": 360,
+    "max_output_chars": 50000
+  },
+  "safety": {
+    "read_only": false,
+    "require_approval_for_writes": false,
+    "require_approval_for_execute": false,
+    "denied_paths": [
+      "/etc/shadow",
+      "/etc/passwd",
+      "/etc/sudoers",
+      "/etc/sudoers.d/**",
+      "**/.env",
+      "**/.env.*",
+      "**/credentials",
+      "**/credentials.*",
+      "**/secrets",
+      "**/secrets.*",
+      "**/*.pem",
+      "**/*.key",
+      "**/*.p12",
+      "**/*.pfx",
+      "**/.ssh/**",
+      "**/id_rsa",
+      "**/id_dsa",
+      "**/id_ecdsa",
+      "**/id_ed25519",
+      "**/.aws/**",
+      "**/.azure/**",
+      "**/.config/gcloud/**",
+      "**/.netrc",
+      "**/.npmrc",
+      "**/.pypirc"
+    ],
+    "allowed_paths": [],
+    "sandbox": {
+      "mode": "wsl",
+      "local": {},
+      "linux": {
+        "workspace": null,
+        "max_memory_mb": 512
+      },
+      "windows": {
+        "workspace": null,
+        "max_memory_mb": 512,
+        "max_processes": 10,
+        "use_low_integrity": true
+      },
+      "wsl": {
+        "profile": "~/.aar/distros/ubuntu.json",
+        "distro": "aar-ubuntu",
+        "workspace": null,
+        "install_path": null
+      }
+    },
+    "log_all_commands": true,
+    "acp_approval_timeout": 0.0
+  },
+  "tui": {
+    "theme": "default",
+    "layout": {
+      "reasoning": {
+        "visible": true
+      },
+      "token_usage": {
+        "visible": true
+      },
+      "welcome": {
+        "visible": true
+      },
+      "extensions": {
+        "metrics": {
+          "visible": true
+        },
+        "custom_panel": {
+          "visible": false
+        }
+      }
+    }
+  },
+  "guardrails": {
+    "max_tokens_recoveries": 2,
+    "max_repeated_tool_steps": 3,
+    "reserve_tokens": 512,
+    "reserve_cost_fraction": 0.1
+  },
+  "max_steps": 150,
+  "timeout": 0.0,
+  "max_retries": 3,
+  "streaming": true,
+  "context_window": 32768,
+  "context_strategy": "sliding_window",
+  "token_budget": 0,
+  "cost_limit": 0.0,
+  "token_warning_threshold": 0.8,
+  "cost_warning_threshold": 0.8,
+  "session_dir": ".agent/sessions",
+  "project_rules_dir": ".agent",
+  "log_level": "DEBUG",
+  "log_file": "aar.log"
+}
