@@ -184,6 +184,16 @@ class TestAarAcpAgentInitialize:
         resp = await agent.initialize(protocol_version=42)
         assert resp.protocol_version == PROTOCOL_VERSION
 
+    @pytest.mark.asyncio
+    async def test_declares_mcp_capabilities(self):
+        """ACP clients only forward HTTP/SSE MCP servers when the agent
+        advertises support via ``mcp_capabilities``. Stdio is always sent."""
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=1)
+        caps = resp.agent_capabilities.mcp_capabilities
+        assert caps is not None
+        assert caps.http is True
+
 
 class TestAarAcpAgentNewSession:
     @pytest.mark.asyncio
@@ -748,6 +758,61 @@ class TestAarAcpAgentMcpConversion:
         result = _acp_server_to_mcp_config({})
         assert result is None
 
+    def test_sdk_stdio_with_env_list(self):
+        """Real ``McpServerStdio`` ships ``env`` as ``list[EnvVariable]`` — must
+        be coerced to ``dict``, not blindly passed to ``dict(...)``."""
+        from acp.schema import EnvVariable, McpServerStdio
+
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = McpServerStdio(
+            name="filesystem",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            env=[
+                EnvVariable(name="FOO", value="bar"),
+                EnvVariable(name="TOKEN", value="secret"),
+            ],
+        )
+        result = _acp_server_to_mcp_config(srv)
+        assert result is not None
+        assert result.transport == "stdio"
+        assert result.command == "npx"
+        assert result.env == {"FOO": "bar", "TOKEN": "secret"}
+
+    def test_sdk_http_with_headers_list(self):
+        """Real ``HttpMcpServer`` ships ``headers`` as ``list[HttpHeader]``."""
+        from acp.schema import HttpHeader, HttpMcpServer
+
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = HttpMcpServer(
+            name="remote",
+            url="https://mcp.example.com/api",
+            headers=[HttpHeader(name="Authorization", value="Bearer sk-...")],
+            type="http",
+        )
+        result = _acp_server_to_mcp_config(srv)
+        assert result is not None
+        assert result.transport == "http"
+        assert result.url == "https://mcp.example.com/api"
+        assert result.headers == {"Authorization": "Bearer sk-..."}
+
+    def test_sdk_sse_is_skipped(self, caplog):
+        """Aar's bridge cannot speak SSE framing — SSE servers must be dropped
+        (not silently routed to the http code path)."""
+        import logging
+
+        from acp.schema import SseMcpServer
+
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = SseMcpServer(name="sse-remote", url="https://x/sse", headers=[], type="sse")
+        with caplog.at_level(logging.WARNING, logger="agent.transports.acp.common"):
+            result = _acp_server_to_mcp_config(srv)
+        assert result is None
+        assert any("SSE" in rec.message for rec in caplog.records)
+
 
 class TestModelIdToProvider:
     def test_claude_maps_to_anthropic(self):
@@ -993,6 +1058,43 @@ class TestSlashCommandHandler:
         reply = agent._handle_slash_command("/tools", "x", session)
         assert "read_file" in reply
         assert "Available tools" in reply
+
+    def test_tools_includes_builtins_when_mcp_registry_present(self, tmp_path):
+        """When an MCP session registry exists, /tools must still list built-in
+        tools — they are not stored in the session registry but are registered
+        by AarAgent._register_builtins() at prompt time."""
+        from agent.core.config import ToolConfig
+        from agent.core.session import Session
+        from agent.tools.registry import ToolRegistry
+        from agent.tools.schema import SideEffect, ToolSpec
+
+        config = _make_config()
+        config = config.model_copy(
+            update={"tools": ToolConfig(enabled_builtins=["read_file", "write_file"])}
+        )
+        agent = AarAcpAgent(config=config)
+
+        # Simulate what _setup_mcp does: a registry with only MCP tools
+        mcp_only_registry = ToolRegistry()
+        mcp_only_registry.add(
+            ToolSpec(
+                name="fetch",
+                description="Fetch a web page",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[SideEffect.NETWORK],
+            )
+        )
+        session_id = "mcp-session"
+        agent._session_registries[session_id] = mcp_only_registry
+
+        session = Session(session_id=session_id)
+        reply = agent._handle_slash_command("/tools", session_id, session)
+
+        # MCP tool must appear
+        assert "fetch" in reply
+        # Built-in tools must also appear (the bug was they were missing)
+        assert "read_file" in reply
+        assert "write_file" in reply
 
     def test_policy_contains_approval_fields(self, tmp_path):
         from agent.core.session import Session

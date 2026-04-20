@@ -102,37 +102,100 @@ def _map_stop_reason(state: AgentState) -> str:
     return "end_turn"
 
 
+def _kv_list_to_dict(value: Any) -> dict[str, str]:
+    """Coerce ACP name/value pair lists (``env``, ``headers``) to a ``dict``.
+
+    ACP ships both fields as ``list[{name, value}]`` rather than ``dict``.
+    Also accepts a dict for convenience (tests, dict-form server specs).
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items()}
+    result: dict[str, str] = {}
+    for item in value:
+        if isinstance(item, dict):
+            name = item.get("name")
+            val = item.get("value")
+        else:
+            name = getattr(item, "name", None)
+            val = getattr(item, "value", None)
+        if name is not None and val is not None:
+            result[str(name)] = str(val)
+    return result
+
+
 def _acp_server_to_mcp_config(srv: Any) -> Any:
-    """Convert an ACP SDK MCP server object to an Aar MCPServerConfig, or None."""
+    """Convert an ACP SDK MCP server object to an Aar MCPServerConfig, or None.
+
+    Handles all three ACP server shapes:
+
+    * ``McpServerStdio`` — required fields ``name, command, args, env``; ``env``
+      is a ``list[EnvVariable]`` of ``{name, value}`` pairs.
+    * ``HttpMcpServer`` — ``type == "http"``, ``url``, and
+      ``headers: list[HttpHeader]``.
+    * ``SseMcpServer`` — ``type == "sse"``. Aar's MCP bridge does not speak
+      SSE framing; logs a warning and returns ``None`` so the server is
+      skipped rather than silently mis-routed.
+
+    Also accepts plain dicts for programmatic callers.
+    """
     try:
         from agent.extensions.mcp import MCPServerConfig
     except ImportError:
         return None
 
     if isinstance(srv, dict):
-        name = srv.get("name") or srv.get("command") or "mcp"
-        if "url" in srv:
-            return MCPServerConfig(name=name, transport="http", url=srv["url"])
+        srv_type = srv.get("type")
+        name = srv.get("name") or srv.get("command") or srv.get("url") or "mcp"
+        if srv_type == "sse":
+            logger.warning(
+                "ACP: MCP server %r uses SSE transport which is not supported; skipping",
+                name,
+            )
+            return None
+        if srv_type == "http" or "url" in srv:
+            return MCPServerConfig(
+                name=str(name),
+                transport="http",
+                url=str(srv.get("url", "")),
+                headers=_kv_list_to_dict(srv.get("headers")),
+            )
         if "command" in srv:
             return MCPServerConfig(
-                name=name,
+                name=str(name),
                 transport="stdio",
-                command=srv.get("command", ""),
-                args=srv.get("args", []),
-                env=srv.get("env", {}),
+                command=str(srv.get("command", "")),
+                args=list(srv.get("args", []) or []),
+                env=_kv_list_to_dict(srv.get("env")),
             )
         return None
 
+    srv_type = getattr(srv, "type", None)
     url = getattr(srv, "url", None)
     command = getattr(srv, "command", None)
     name = getattr(srv, "name", None) or (command or url or "mcp")
-    if url:
-        return MCPServerConfig(name=str(name), transport="http", url=str(url))
-    if command:
-        args = list(getattr(srv, "args", []) or [])
-        env = dict(getattr(srv, "env", {}) or {})
+
+    if srv_type == "sse":
+        logger.warning(
+            "ACP: MCP server %r uses SSE transport which is not supported; skipping",
+            name,
+        )
+        return None
+    if srv_type == "http" or (url and not command):
         return MCPServerConfig(
-            name=str(name), transport="stdio", command=str(command), args=args, env=env
+            name=str(name),
+            transport="http",
+            url=str(url or ""),
+            headers=_kv_list_to_dict(getattr(srv, "headers", None)),
+        )
+    if command:
+        return MCPServerConfig(
+            name=str(name),
+            transport="stdio",
+            command=str(command),
+            args=list(getattr(srv, "args", []) or []),
+            env=_kv_list_to_dict(getattr(srv, "env", None)),
         )
     return None
 

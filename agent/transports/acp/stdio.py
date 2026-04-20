@@ -162,6 +162,7 @@ class AarAcpAgent:
         from acp.schema import (
             AgentCapabilities,
             Implementation,
+            McpCapabilities,
             PromptCapabilities,
             SessionCapabilities,
             SessionCloseCapabilities,
@@ -172,6 +173,7 @@ class AarAcpAgent:
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
                 load_session=True,
+                mcp_capabilities=McpCapabilities(http=True, sse=False),
                 prompt_capabilities=PromptCapabilities(embedded_context=True),
                 session_capabilities=SessionCapabilities(
                     list=SessionListCapabilities(),
@@ -514,9 +516,7 @@ class AarAcpAgent:
                     loop_t,
                 )
 
-            _approval_cb = make_acp_approval_callback(
-                self._conn, session_id, timeout=acp_t
-            )
+            _approval_cb = make_acp_approval_callback(self._conn, session_id, timeout=acp_t)
         else:
             _approval_cb = self._default_approval
 
@@ -580,26 +580,34 @@ class AarAcpAgent:
             return "\n".join(lines)
 
         if cmd == "/tools":
-            tools = registry.list_tools() if registry else []
-            if not tools:
-                try:
-                    from agent.tools.registry import ToolRegistry as TR
+            # Start with whatever the session registry has (MCP tools, or empty).
+            tools: list = registry.list_tools() if registry else []
+            tool_names = {t.name for t in tools}
 
-                    tmp_reg = TR()
-                    from agent.tools.builtin.filesystem import register_filesystem_tools
-                    from agent.tools.builtin.shell import register_shell_tools
+            # Always add built-in tools from config — they are registered by
+            # AarAgent._register_builtins() at prompt time but not present in
+            # the session registry that _setup_mcp creates.
+            try:
+                from agent.tools.builtin.filesystem import register_filesystem_tools
+                from agent.tools.builtin.shell import register_shell_tools
+                from agent.tools.registry import ToolRegistry as TR
 
-                    enabled = set(cfg.tools.enabled_builtins)
-                    if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
-                        register_filesystem_tools(tmp_reg)
-                    if "bash" in enabled:
-                        register_shell_tools(tmp_reg)
-                    for name in list(tmp_reg._tools):
-                        if name not in enabled:
-                            del tmp_reg._tools[name]
-                    tools = tmp_reg.list_tools()
-                except Exception:
-                    pass
+                tmp_reg = TR()
+                enabled = set(cfg.tools.enabled_builtins)
+                if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
+                    register_filesystem_tools(tmp_reg)
+                if "bash" in enabled:
+                    register_shell_tools(tmp_reg)
+                for name in list(tmp_reg._tools):
+                    if name not in enabled:
+                        del tmp_reg._tools[name]
+                # Merge — skip any built-in whose name already exists in MCP registry
+                for t in tmp_reg.list_tools():
+                    if t.name not in tool_names:
+                        tools.append(t)
+            except Exception:
+                pass
+
             if not tools:
                 return "No tools registered."
             lines = ["**Available tools:**", ""]
@@ -642,9 +650,33 @@ class AarAcpAgent:
             count = await bridge.register_all(registry)
             self._mcp_bridges[session_id] = bridge
             self._session_registries[session_id] = registry
-            logger.info("ACP: registered %d MCP tool(s) for session %s", count, session_id)
+            logger.info(
+                "ACP: registered %d MCP tool(s) from %d server(s) for session %s",
+                count,
+                len(configs),
+                session_id,
+            )
         except Exception as exc:
-            logger.warning("ACP: MCP setup failed for session %s: %s", session_id, exc)
+            logger.error("ACP: MCP setup failed for session %s: %s", session_id, exc, exc_info=True)
+            self._notify_mcp_failure(session_id, exc)
+
+    def _notify_mcp_failure(self, session_id: str, exc: BaseException) -> None:
+        """Push a visible error to the client so the user sees MCP setup failed."""
+        if self._conn is None:
+            return
+        try:
+            from acp import text_block, update_agent_message
+        except ImportError:
+            return
+        msg = f"MCP setup failed for this session: {exc}"
+        self._spawn(
+            self._conn.session_update(
+                session_id=session_id,
+                update=update_agent_message(text_block(msg)),
+                source=self._agent_name,
+            ),
+            name=f"mcp-failure-{session_id}",
+        )
 
     async def _teardown_mcp(self, session_id: str) -> None:
         bridge = self._mcp_bridges.pop(session_id, None)

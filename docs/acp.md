@@ -17,6 +17,8 @@ On connection, Aar reports the following capabilities to the editor:
 | `session.list` | supported | Editor can show Aar session history in its sidebar |
 | `session.close` | supported | Editor notifies Aar when a session tab is closed |
 | `prompt.embedded_context` | `true` | `@`-mentions embed file contents that Aar reads |
+| `mcp_capabilities.http` | `true` | Editor forwards HTTP MCP servers to Aar |
+| `mcp_capabilities.sse` | `false` | SSE transport not supported (servers skipped with warning) |
 
 ---
 
@@ -200,15 +202,75 @@ fast at wire-up time rather than silently denying every request later.
 
 When an editor passes MCP server configurations in `session/new` or `session/load`, Aar starts those
 MCP bridges and registers their tools for the lifetime of that session.
-Both HTTP and stdio MCP transports are supported:
-
-```json
-// Passed by editor in session/new mcp_servers
-{"command": "npx", "args": ["@modelcontextprotocol/server-filesystem", "/my/project"], "name": "fs"}
-{"url": "http://localhost:3000/mcp", "name": "remote-mcp"}
-```
+Both HTTP and stdio MCP transports are supported. SSE transport is not supported — SSE servers are
+skipped with a warning.
 
 The bridges are shut down automatically when `session/close` is received.
+
+#### Configuring MCP servers in Zed
+
+In Zed, MCP servers are declared under `"context_servers"` in `~/.config/zed/settings.json`.
+Zed forwards these to Aar automatically when it creates or loads a session.
+
+**Schema:**
+
+```json
+{
+  "context_servers": {
+    "<server-name>": {
+      "command": "<executable>",
+      "args": ["<arg1>", "..."],
+      "env": {}
+    }
+  }
+}
+```
+
+#### Bundled MCP tools — Zed config
+
+The `tools/` directory in the Aar repo contains ready-to-use MCP servers.
+Use absolute paths because Zed does not run from the repo root.
+
+Replace `/path/to/aar` with your actual clone path.
+
+```json
+{
+  "context_servers": {
+    "aar-web": {
+      "command": "python",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, '/path/to/aar/tools'); from web_mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
+      "env": {}
+    },
+    "aar-gitlab": {
+      "command": "python",
+      "args": ["/path/to/aar/tools/gitlab_mcp/server.py"],
+      "env": {}
+    },
+    "aar-signal": {
+      "command": "python",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, '/path/to/aar/tools'); from signal_mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
+      "env": {}
+    },
+    "aar-chrome": {
+      "command": "npx",
+      "args": ["chrome-devtools-mcp@latest", "--no-usage-statistics"],
+      "env": {}
+    }
+  }
+}
+```
+
+> **Tip:** You can also load any of the bundled servers directly from the Aar CLI using the `--mcp`
+> flag instead of wiring them through Zed:
+> ```bash
+> aar chat --mcp tools/mcp_web.json
+> ```
 
 ### Model selection
 
