@@ -11,6 +11,7 @@ dependencies = [
     "rich>=14.3.4",
     "textual>=8.2.3",
 	"textual-speedups==0.2.1",
+    "jsonschema>=4.0.0",
 ]
 
 [build-system]
