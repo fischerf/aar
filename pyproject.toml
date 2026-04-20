@@ -23,6 +23,7 @@ anthropic = ["anthropic>=0.94.0"]
 openai = ["openai>=2.31.0"]
 ollama = ["httpx>=0.28.1"]
 generic = ["httpx>=0.28.1"]
+gemini = ["google-genai>=1.0.0", "httpx>=0.28.1"]
 mcp = ["mcp>=1.27.0"]
 acp = ["agent-client-protocol>=0.9.0"]
 dev = [
@@ -30,7 +31,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.10",
 ]
-all = ["anthropic>=0.94.0", "openai>=2.31.0", "httpx>=0.28.1", "mcp>=1.27.0", "agent-client-protocol>=0.9.0"]
+all = ["anthropic>=0.94.0", "openai>=2.31.0", "httpx>=0.28.1", "google-genai>=1.0.0", "mcp>=1.27.0", "agent-client-protocol>=0.9.0"]
 
 [project.scripts]
 aar = "agent.transports.cli:app"
