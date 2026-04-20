@@ -80,11 +80,13 @@ class AarInstalledAgent(BaseInstalledAgent):
 
         # Install the wheel globally (as root → /usr/local/bin/aar always on PATH)
         # then add the provider extras as separate packages.
+        # --ignore-installed avoids failures when system packages (e.g. typing_extensions
+        # installed by apt/apk) have no RECORD file and cannot be uninstalled by pip.
         await self.exec_as_root(
             environment,
             command=(
-                f"pip install --quiet --break-system-packages {remote_wheel} && "
-                "pip install --quiet --break-system-packages anthropic openai ollama"
+                f"pip install --quiet --break-system-packages --ignore-installed {remote_wheel} && "
+                "pip install --quiet --break-system-packages --ignore-installed anthropic openai ollama"
             ),
         )
 
