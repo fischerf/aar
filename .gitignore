@@ -6,3 +6,10 @@ agent/transports/.web_mcp_cache/
 .web_mcp_cache/
 tools/mcp_game.json
 jobs/
+start_live_agent_test.bat
+start_notlive_agent_test.bat
+CLAUDE.md
+.zed/
+tools/webclient/
+tools/sqllite_mcp/
+tools/mcp_chrome.json
