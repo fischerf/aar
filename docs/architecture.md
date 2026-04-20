@@ -33,6 +33,7 @@ agent/
 │   ├── anthropic.py          # tools, streaming, extended thinking
 │   ├── openai.py             # tools, streaming, Azure / Together via base_url
 │   ├── ollama.py             # tools, DeepSeek-r1 reasoning extraction
+│   ├── gemini.py             # tools, streaming, thinking; SDK + HTTP modes
 │   └── generic.py            # any OpenAI-compatible endpoint
 │
 ├── tools/                    # Tool registry and execution
@@ -171,6 +172,7 @@ class Provider(ABC):
 | Anthropic | `anthropic.py` | `anthropic` | Tools, streaming, extended thinking |
 | OpenAI | `openai.py` | `openai` | Tools, streaming, Azure/Together via `base_url` |
 | Ollama | `ollama.py` | `httpx` | Tools, reasoning extraction (`deepseek-r1`) |
+| Gemini | `gemini.py` | `google-genai` / `httpx` | Tools, streaming, thinking; SDK mode (standard API) + HTTP mode (custom endpoints) |
 | Generic | `generic.py` | `httpx` | Tools, streaming, any OpenAI-compatible endpoint |
 
 Provider selection is config-driven:

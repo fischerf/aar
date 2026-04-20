@@ -33,7 +33,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 - **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
-- **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint without changing agent code
+- **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint without changing agent code
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable
@@ -79,7 +79,7 @@ The `-e` flag creates a live link — editing files under `agent/` is reflected 
 
 ## Quick start
 
-Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama instance.
+Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or point `base_url` at a local Ollama instance.
 
 ## Usage
 
@@ -147,7 +147,7 @@ See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint referen
 ```
 agent/
 ├── core/           # Loop, agent, events, session, config
-├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
+├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic)
 ├── tools/          # Tool registry, schema, execution engine
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
@@ -201,7 +201,8 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Configuration](docs/configuration.md) | `AgentConfig` reference, config precedence, approval modes, logging, system prompt, shell, project rules |
 | [Tokens & Cost](docs/tokens.md) | Token tracking pipeline, budget enforcement, cost estimation, pricing tables, TUI display |
 | [ACP](docs/acp.md) | ACP stdio setup for Zed and other editors, HTTP/SSE mode, programmatic embedding, endpoint reference |
-| [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Generic setup and options |
+| [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Gemini, Generic setup and options |
+| [Gemini provider](docs/providers_gemini.md) | Gemini SDK mode, HTTP mode, thinking/reasoning, `extra` key reference |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
