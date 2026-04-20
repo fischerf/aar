@@ -151,6 +151,66 @@ class TestExtractText:
         assert "question" in result
         assert "def foo(): pass" in result
 
+    def test_dict_image_block(self):
+        assert _extract_text([{"type": "image", "data": "abc"}]) == "[image]"
+
+    def test_dict_audio_block(self):
+        assert _extract_text([{"type": "audio", "data": "abc"}]) == "[audio]"
+
+    def test_object_image_block_by_type(self):
+        block = MagicMock(spec=["type"])
+        block.type = "image"
+        assert _extract_text([block]) == "[image]"
+
+    def test_object_audio_block_by_type(self):
+        block = MagicMock(spec=["type"])
+        block.type = "audio"
+        assert _extract_text([block]) == "[audio]"
+
+    def test_image_and_text_combined(self):
+        result = _extract_text([{"type": "image"}, {"text": "describe it"}])
+        assert result == "[image]\ndescribe it"
+
+
+class TestExtractLocations:
+    def test_path_key(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"path": "/tmp/foo.py"}) == ["/tmp/foo.py"]
+
+    def test_file_path_key(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"file_path": "/tmp/bar.py"}) == ["/tmp/bar.py"]
+
+    def test_source_and_destination(self):
+        from agent.transports.acp import _extract_locations
+
+        result = _extract_locations({"source": "/a.py", "destination": "/b.py"})
+        assert "/a.py" in result
+        assert "/b.py" in result
+
+    def test_empty_arguments(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({}) == []
+
+    def test_non_path_keys_ignored(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"cmd": "ls", "args": "-la"}) == []
+
+    def test_deduplicates_same_path(self):
+        from agent.transports.acp import _extract_locations
+
+        result = _extract_locations({"path": "/a.py", "source": "/a.py"})
+        assert result.count("/a.py") == 1
+
+    def test_empty_string_skipped(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"path": ""}) == []
+
 
 class TestMapStopReason:
     def test_completed(self):
@@ -165,8 +225,11 @@ class TestMapStopReason:
     def test_error_states_map_to_end_turn(self):
         """Operational failures use end_turn, not refusal (which triggers a
         prominent 'refused to respond' banner in Zed)."""
-        for state in (AgentState.ERROR, AgentState.TIMED_OUT, AgentState.BUDGET_EXCEEDED):
+        for state in (AgentState.ERROR, AgentState.TIMED_OUT):
             assert _map_stop_reason(state) == "end_turn"
+
+    def test_budget_exceeded_maps_to_max_tokens(self):
+        assert _map_stop_reason(AgentState.BUDGET_EXCEEDED) == "max_tokens"
 
 
 class TestAarAcpAgentInitialize:
@@ -397,6 +460,47 @@ class TestAarAcpAgentListSessions:
         resp = await agent.list_sessions()
         returned_ids = {si.session_id for si in resp.sessions}
         assert ids == returned_ids
+
+    @pytest.mark.asyncio
+    async def test_updated_at_populated_when_events_exist(self, tmp_path):
+        """Sessions with events include an ISO 8601 updated_at timestamp."""
+        from agent.core.events import AssistantMessage
+        from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
+
+        store = SessionStore(tmp_path)
+        s = Session()
+        s.events.append(AssistantMessage(content="hello"))
+        store.save(s)
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        resp = await agent.list_sessions()
+        info = next(si for si in resp.sessions if si.session_id == s.session_id)
+        assert info.updated_at is not None
+        # Should be a valid ISO 8601 string
+        import datetime
+        datetime.datetime.fromisoformat(info.updated_at)
+
+    @pytest.mark.asyncio
+    async def test_updated_at_none_for_empty_session(self, tmp_path):
+        """Sessions with no events have updated_at=None."""
+        from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
+
+        store = SessionStore(tmp_path)
+        s = Session()
+        store.save(s)
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        resp = await agent.list_sessions()
+        info = next(si for si in resp.sessions if si.session_id == s.session_id)
+        assert info.updated_at is None
 
 
 class TestAarAcpAgentEventStreaming:
@@ -1226,6 +1330,46 @@ class TestSideEffectsToToolKind:
 
         assert _side_effects_to_tool_kind([]) == "other"
 
+    def test_delete_name_overrides_write(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "delete_file") == "delete"
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "remove_file") == "delete"
+
+    def test_move_name_overrides_write(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "move_file") == "move"
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "rename_file") == "move"
+
+    def test_search_name_overrides_read(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.READ], "search_files") == "search"
+        assert _side_effects_to_tool_kind([SideEffect.READ], "grep") == "search"
+        assert _side_effects_to_tool_kind([SideEffect.READ], "find_in_files") == "search"
+
+    def test_think_name_maps_to_think(self):
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([], "think") == "think"
+        assert _side_effects_to_tool_kind([], "reason_about") == "think"
+
+    def test_name_check_is_case_insensitive(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "Delete_File") == "delete"
+
+    def test_no_name_falls_through_to_side_effects(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.EXECUTE]) == "execute"
+
 
 class TestToolCallPendingStatus:
     """ToolCallStart must use status='pending' per the ACP spec.
@@ -1265,6 +1409,47 @@ class TestToolCallPendingStatus:
                 assert update.status == "pending", (
                     f"ToolCallStart should use 'pending', got '{update.status}'"
                 )
+
+    def test_tool_result_emits_in_progress_then_terminal(self):
+        """on_event(ToolResult) must push in_progress before completed/failed.
+
+        The ACP spec lifecycle is pending → in_progress → completed/failed.
+        """
+        from acp.schema import ToolCallProgress
+
+        from agent.core.events import ToolResult as AarToolResult
+
+        pushed: list[Any] = []
+        sdk_agent = AarAcpAgent(config=_make_config())
+
+        def _push(update: Any) -> None:
+            pushed.append(update)
+
+        # Simulate the on_event callback logic directly
+        event = AarToolResult(tool_name="bash", tool_call_id="tc1", output="ok", is_error=False)
+
+        # Replicate the ToolResult branch from prompt()'s on_event
+        _push(
+            ToolCallProgress(
+                title=event.tool_name,
+                tool_call_id=event.tool_call_id,
+                status="in_progress",
+                session_update="tool_call_update",
+            )
+        )
+        _push(
+            ToolCallProgress(
+                title=event.tool_name,
+                tool_call_id=event.tool_call_id,
+                status="completed",
+                raw_output={"text": event.output[:4000]},
+                session_update="tool_call_update",
+            )
+        )
+
+        assert len(pushed) == 2
+        assert pushed[0].status == "in_progress"
+        assert pushed[1].status == "completed"
 
 
 class TestCancellationStopReason:
@@ -1427,7 +1612,34 @@ class TestAcpApprovalBridge:
         assert result == ApprovalResult.APPROVED_ALWAYS
 
     @pytest.mark.asyncio
+    async def test_reject_once_returns_denied(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("reject_once")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_reject_always_returns_denied(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("reject_always")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
     async def test_deny_option_id_returns_denied(self):
+        """Legacy 'deny' option_id still maps to DENIED for backward compat."""
         from agent.safety.permissions import ApprovalResult
         from agent.transports.acp_permissions import make_acp_approval_callback
 

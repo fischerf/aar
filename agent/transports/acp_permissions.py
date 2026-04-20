@@ -44,13 +44,17 @@ logger = logging.getLogger(__name__)
 _OPTIONS: list[tuple[str, str, str]] = [
     ("allow_once", "allow_once", "Allow once"),
     ("allow_always", "allow_always", "Allow always"),
-    ("deny", "reject_once", "Deny"),
+    ("reject_once", "reject_once", "Deny"),
+    ("reject_always", "reject_always", "Deny always"),
 ]
 
 # Maps ACP ``option_id`` → Aar ``ApprovalResult``
 _OPTION_TO_RESULT: dict[str, ApprovalResult] = {
     "allow_once": ApprovalResult.APPROVED,
     "allow_always": ApprovalResult.APPROVED_ALWAYS,
+    "reject_once": ApprovalResult.DENIED,
+    "reject_always": ApprovalResult.DENIED,
+    # Legacy alias: old clients may return "deny" from the previous UI
     "deny": ApprovalResult.DENIED,
 }
 
@@ -131,7 +135,7 @@ def make_acp_approval_callback(
             PermissionOption(option_id=oid, kind=kind, name=label) for oid, kind, label in _OPTIONS
         ]
 
-        kind = _side_effects_to_tool_kind(spec.side_effects)
+        kind = _side_effects_to_tool_kind(spec.side_effects, tc.tool_name)
         # tool_call_id is guaranteed non-empty at ToolCall construction (see
         # the model validator in agent.core.events.ToolCall), so the same id
         # is visible to both on_event (ToolCallStart) and here.

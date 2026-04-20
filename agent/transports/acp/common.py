@@ -31,11 +31,22 @@ async def _auto_approve(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
     return ApprovalResult.APPROVED
 
 
-def _side_effects_to_tool_kind(side_effects: list[SideEffect]) -> str:
+def _side_effects_to_tool_kind(side_effects: list[SideEffect], tool_name: str = "") -> str:
     """Map Aar ``SideEffect`` list to an ACP ``ToolKind`` string.
 
     Returns the most "impactful" kind so Zed can pick the right icon.
+    Name-based detection runs first to cover kinds (delete, move, search,
+    think) that have no dedicated ``SideEffect`` value.
     """
+    name = tool_name.lower()
+    if any(kw in name for kw in ("delete", "remove", "unlink")):
+        return "delete"
+    if any(kw in name for kw in ("move", "rename")):
+        return "move"
+    if any(kw in name for kw in ("search", "grep", "find", "glob")):
+        return "search"
+    if any(kw in name for kw in ("think", "reason", "reflect")):
+        return "think"
     if SideEffect.EXECUTE in side_effects:
         return "execute"
     if SideEffect.WRITE in side_effects:
@@ -47,11 +58,31 @@ def _side_effects_to_tool_kind(side_effects: list[SideEffect]) -> str:
     return "other"
 
 
+_PATH_KEYS = ("path", "file_path", "filepath", "source", "destination", "target", "filename")
+
+
+def _extract_locations(arguments: dict[str, Any]) -> list[str]:
+    """Extract file-path strings from tool call arguments.
+
+    Checks well-known parameter names and returns any non-empty string
+    values found, preserving insertion order and skipping duplicates.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for key in _PATH_KEYS:
+        val = arguments.get(key)
+        if isinstance(val, str) and val and val not in seen:
+            seen.add(val)
+            result.append(val)
+    return result
+
+
 def _extract_text(prompt_blocks: list) -> str:
     """Pull plain text out of ACP SDK prompt content blocks.
 
-    Handles TextContentBlock, ResourceContentBlock (URI links), and
-    EmbeddedResourceContentBlock (@ file context with embedded content).
+    Handles TextContentBlock, ResourceContentBlock (URI links),
+    EmbeddedResourceContentBlock (@ file context with embedded content),
+    and image/audio blocks (replaced with a short placeholder).
     """
     parts: list[str] = []
     for block in prompt_blocks:
@@ -60,6 +91,10 @@ def _extract_text(prompt_blocks: list) -> str:
             text = block.get("text", "")
             if text:
                 parts.append(text)
+            elif btype == "image":
+                parts.append("[image]")
+            elif btype == "audio":
+                parts.append("[audio]")
             elif btype == "resource":
                 uri = block.get("uri", "")
                 if uri:
@@ -68,6 +103,15 @@ def _extract_text(prompt_blocks: list) -> str:
             text = getattr(block, "text", None)
             if text:
                 parts.append(text)
+                continue
+            btype = getattr(block, "type", "") or ""
+            if btype == "image" or (
+                not btype and hasattr(block, "data") and hasattr(block, "mime_type")
+            ):
+                parts.append("[image]")
+                continue
+            if btype == "audio":
+                parts.append("[audio]")
                 continue
             uri = getattr(block, "uri", None)
             if uri:
@@ -97,6 +141,8 @@ def _map_stop_reason(state: AgentState) -> str:
     """
     if state == AgentState.MAX_STEPS:
         return "max_turn_requests"
+    if state == AgentState.BUDGET_EXCEEDED:
+        return "max_tokens"
     if state == AgentState.CANCELLED:
         return "cancelled"
     return "end_turn"

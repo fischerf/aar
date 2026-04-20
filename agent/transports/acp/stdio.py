@@ -33,6 +33,7 @@ from .common import (
     _acp_server_to_mcp_config,
     _auto_approve,
     _available_commands,
+    _extract_locations,
     _extract_text,
     _load_default_config,
     _map_stop_reason,
@@ -243,6 +244,8 @@ class AarAcpAgent:
         **kwargs: Any,
     ) -> Any:
         """Return all persisted sessions so Zed can show session history."""
+        import datetime
+
         from acp.schema import ListSessionsResponse, SessionInfo
 
         session_infos: list[SessionInfo] = []
@@ -258,7 +261,22 @@ class AarAcpAgent:
                     sid[:12],
                 )
                 session_cwd = s.metadata.get("cwd", "") if s.metadata else ""
-                session_infos.append(SessionInfo(session_id=sid, cwd=session_cwd, title=title))
+                last_ts = s.events[-1].timestamp if s.events else None
+                updated_at = (
+                    datetime.datetime.fromtimestamp(
+                        last_ts, tz=datetime.timezone.utc
+                    ).isoformat()
+                    if last_ts is not None
+                    else None
+                )
+                session_infos.append(
+                    SessionInfo(
+                        session_id=sid,
+                        cwd=session_cwd,
+                        title=title,
+                        updated_at=updated_at,
+                    )
+                )
             except Exception:
                 session_infos.append(SessionInfo(session_id=sid, cwd="", title=sid[:12]))
         return ListSessionsResponse(sessions=session_infos)
@@ -354,6 +372,7 @@ class AarAcpAgent:
             Cost,
             SessionInfoUpdate,
             TextContentBlock,
+            ToolCallLocation,
             ToolCallProgress,
             ToolCallStart,
             UsageUpdate,
@@ -449,7 +468,13 @@ class AarAcpAgent:
                 tc_id = event.tool_call_id
                 registry = self._session_registries.get(session_id, self._registry)
                 _spec = registry.get(event.tool_name) if registry else None
-                _kind = _side_effects_to_tool_kind(_spec.side_effects) if _spec else "other"
+                _kind = _side_effects_to_tool_kind(
+                    _spec.side_effects if _spec else [], event.tool_name
+                )
+                _loc_paths = _extract_locations(event.arguments)
+                _locations = (
+                    [ToolCallLocation(path=p) for p in _loc_paths] if _loc_paths else None
+                )
                 # Status MUST be "pending" — the tool hasn't started yet and
                 # may be awaiting approval. Zed only shows permission buttons
                 # for tool calls that are still in "pending" status.
@@ -460,12 +485,23 @@ class AarAcpAgent:
                         kind=_kind,
                         status="pending",
                         raw_input=event.arguments,
+                        locations=_locations,
                         session_update="tool_call",
                     )
                 )
 
             elif isinstance(event, ToolResult):
                 tc_id = event.tool_call_id
+                # Emit in_progress before the terminal status so clients see
+                # the full pending → in_progress → completed/failed lifecycle.
+                _push(
+                    ToolCallProgress(
+                        title=event.tool_name,
+                        tool_call_id=tc_id,
+                        status="in_progress",
+                        session_update="tool_call_update",
+                    )
+                )
                 _push(
                     ToolCallProgress(
                         title=event.tool_name,
