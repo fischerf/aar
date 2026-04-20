@@ -13,3 +13,4 @@ CLAUDE.md
 tools/webclient/
 tools/sqllite_mcp/
 tools/mcp_chrome.json
+docs/agent_loop.md
