@@ -29,12 +29,16 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 <table width="100%">
   <tr>
     <td width="50%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — TUI" width="100%" />
-      <br/><sub><b>AAR Agent with Textual interface (TUI)</b></sub>
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — with CLI/TUI" width="100%" />
+      <br/><sub><b>AAR Agent — with CLI/TUI</b></sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="Zed Editor — running AAR Agent via ACP" width="100%" />
-      <br/><sub><b>Zed Editor — running AAR Agent via ACP</b></sub>
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="AAR Agent in Zed code editor" width="100%" />
+      <br/><sub><b>AAR Agent in Zed code editor</b></sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="https://github.com/fischerf/fischerf.github.io/blob/55ef639b72de95e4fb5ba4678016261428cc2ab2/aar/aar_acp_vscode.png" alt="AAR Agent in VSCode" width="100%" />
+      <br/><sub><b>AAR Agent in VSCode</b></sub>
     </td>
   </tr>
 </table>
