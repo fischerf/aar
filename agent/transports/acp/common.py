@@ -355,7 +355,6 @@ def _build_config_options(
     separate ``modes`` field (which is kept only for older client compatibility).
     """
     from acp.schema import (
-        SessionConfigOptionBoolean,
         SessionConfigOptionSelect,
         SessionConfigSelectOption,
     )
@@ -415,31 +414,6 @@ def _build_config_options(
             ],
         )
     )
-
-    # 3-5. Fine-grain boolean toggles.
-    opts += [
-        SessionConfigOptionBoolean(
-            id="auto_approve_writes",
-            name="Auto-approve writes",
-            type="boolean",
-            description="Skip approval prompts for write/edit tools.",
-            current_value=not getattr(safety_cfg, "require_approval_for_writes", True),
-        ),
-        SessionConfigOptionBoolean(
-            id="auto_approve_execute",
-            name="Auto-approve shell commands",
-            type="boolean",
-            description="Skip approval prompts for shell/execute tools.",
-            current_value=not getattr(safety_cfg, "require_approval_for_execute", True),
-        ),
-        SessionConfigOptionBoolean(
-            id="read_only",
-            name="Read-only mode",
-            type="boolean",
-            description="Deny writes and shell commands entirely.",
-            current_value=bool(getattr(safety_cfg, "read_only", False)),
-        ),
-    ]
 
     logger.debug(
         "ACP: config_options built: %s",

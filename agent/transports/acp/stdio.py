@@ -555,11 +555,8 @@ class AarAcpAgent:
 
         Supported options:
 
-        * ``model``                 (select)  — switch the active model
-        * ``mode``                  (select)  — ``auto`` / ``review`` / ``read-only``
-        * ``auto_approve_writes``   (boolean) — inverse of ``require_approval_for_writes``
-        * ``auto_approve_execute``  (boolean) — inverse of ``require_approval_for_execute``
-        * ``read_only``             (boolean) — sandbox to read-only tools
+        * ``model`` (select) — switch the active model
+        * ``mode``  (select) — ``auto`` / ``review`` / ``read-only``
 
         Always returns the **complete** updated ``configOptions`` list as
         required by the ACP spec.
@@ -617,21 +614,6 @@ class AarAcpAgent:
             self._session_modes[session_id] = mode_id
             safety = new_safety
             logger.info("ACP: session %s mode → %s (via set_config_option)", session_id, mode_id)
-        elif config_id == "auto_approve_writes":
-            new_safety = safety.model_copy(update={"require_approval_for_writes": not bool(value)})
-            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
-            safety = new_safety
-            logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
-        elif config_id == "auto_approve_execute":
-            new_safety = safety.model_copy(update={"require_approval_for_execute": not bool(value)})
-            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
-            safety = new_safety
-            logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
-        elif config_id == "read_only":
-            new_safety = safety.model_copy(update={"read_only": bool(value)})
-            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
-            safety = new_safety
-            logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
         else:
             raise ValueError(f"Unknown config option: {config_id!r}")
 

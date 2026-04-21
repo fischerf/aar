@@ -44,7 +44,6 @@ from acp.schema import (  # noqa: E402
     WriteTextFileResponse,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -664,9 +663,10 @@ class TestWireSessionDiscovery:
 
             assert resp.config_options is not None
             option_ids = {o.id for o in resp.config_options}
-            assert {"auto_approve_writes", "auto_approve_execute", "read_only"}.issubset(
-                option_ids
-            )
+            assert {"model", "mode"}.issubset(option_ids)
+            assert "auto_approve_writes" not in option_ids
+            assert "auto_approve_execute" not in option_ids
+            assert "read_only" not in option_ids
 
     @pytest.mark.asyncio
     async def test_load_session_advertises_current_mode(self, tmp_path):
@@ -758,7 +758,8 @@ class TestWireSetSessionMode:
 
 class TestWireSetConfigOption:
     @pytest.mark.asyncio
-    async def test_set_auto_approve_writes_flips_flag(self, tmp_path):
+    async def test_set_mode_via_config_option(self, tmp_path):
+        """set_config_option with id="mode" mirrors set_session_mode behaviour."""
         agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
         client = _CaptureClient()
 
@@ -767,18 +768,27 @@ class TestWireSetConfigOption:
             sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
             sid = sess.session_id
 
-            await client_side.set_config_option(
-                config_id="auto_approve_writes", session_id=sid, value=True
-            )
-            assert agent._session_configs[sid].safety.require_approval_for_writes is False
+            await client_side.set_config_option(config_id="mode", session_id=sid, value="auto")
+            safety = agent._session_configs[sid].safety
+            assert safety.require_approval_for_writes is False
+            assert safety.require_approval_for_execute is False
+            assert agent._session_modes[sid] == "auto"
 
-            await client_side.set_config_option(
-                config_id="auto_approve_writes", session_id=sid, value=False
-            )
-            assert agent._session_configs[sid].safety.require_approval_for_writes is True
+            await client_side.set_config_option(config_id="mode", session_id=sid, value="review")
+            safety = agent._session_configs[sid].safety
+            assert safety.require_approval_for_writes is True
+            assert safety.require_approval_for_execute is True
+            assert safety.read_only is False
+            assert agent._session_modes[sid] == "review"
+
+            await client_side.set_config_option(config_id="mode", session_id=sid, value="read-only")
+            safety = agent._session_configs[sid].safety
+            assert safety.read_only is True
+            assert agent._session_modes[sid] == "read-only"
 
     @pytest.mark.asyncio
-    async def test_set_read_only_toggles_sandbox_mode(self, tmp_path):
+    async def test_set_config_option_returns_full_options(self, tmp_path):
+        """Response always contains the complete configOptions list."""
         agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
         client = _CaptureClient()
 
@@ -787,8 +797,14 @@ class TestWireSetConfigOption:
             sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
             sid = sess.session_id
 
-            await client_side.set_config_option(config_id="read_only", session_id=sid, value=True)
-            assert agent._session_configs[sid].safety.read_only is True
+            resp = await client_side.set_config_option(
+                config_id="mode", session_id=sid, value="auto"
+            )
+            assert resp.config_options is not None
+            ids = {o.id for o in resp.config_options}
+            assert {"model", "mode"}.issubset(ids)
+            mode_opt = next(o for o in resp.config_options if o.id == "mode")
+            assert mode_opt.current_value == "auto"
 
 
 class TestWireForkSession:
@@ -1023,9 +1039,7 @@ class TestWireAcpTerminalTool:
             assert resp.stop_reason == "end_turn"
 
             # Wait for the full terminal lifecycle to have been observed.
-            await _wait_for(
-                lambda: "release" in [k for k, _ in client.terminal_calls]
-            )
+            await _wait_for(lambda: "release" in [k for k, _ in client.terminal_calls])
 
             kinds = [k for k, _ in client.terminal_calls]
             # Full lifecycle in order: create first, release last.
@@ -1047,20 +1061,12 @@ class TestWireAcpTerminalTool:
                 for _, u in client.notifications
                 if getattr(u, "session_update", None) in ("tool_call", "tool_call_update")
             ]
-            start_updates = [
-                u for u in tool_updates if u.session_update == "tool_call"
-            ]
-            progress_updates = [
-                u for u in tool_updates if u.session_update == "tool_call_update"
-            ]
+            start_updates = [u for u in tool_updates if u.session_update == "tool_call"]
+            progress_updates = [u for u in tool_updates if u.session_update == "tool_call_update"]
             assert start_updates, "expected at least one tool_call (ToolCallStart) update"
             assert progress_updates, "expected at least one tool_call_update (ToolCallProgress)"
 
             # The start update must name the acp_terminal tool call.
-            assert any(
-                getattr(u, "tool_call_id", None) == "tc_term_1" for u in start_updates
-            )
+            assert any(getattr(u, "tool_call_id", None) == "tc_term_1" for u in start_updates)
             # And a terminal progress update must report completion.
-            assert any(
-                getattr(u, "status", None) == "completed" for u in progress_updates
-            )
+            assert any(getattr(u, "status", None) == "completed" for u in progress_updates)
