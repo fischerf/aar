@@ -36,6 +36,7 @@ from .common import (
     _available_commands,
     _build_config_options,
     _build_mode_state,
+    _build_model_state,
     _build_tool_result_content,
     _extract_locations,
     _extract_text,
@@ -233,6 +234,7 @@ class AarAcpAgent:
             session_id=sid,
             modes=_build_mode_state(cfg.safety, self._session_modes.get(sid)),
             config_options=_build_config_options(cfg.safety),
+            models=_build_model_state(cfg.provider),
         )
 
     async def load_session(
@@ -300,6 +302,7 @@ class AarAcpAgent:
             return LoadSessionResponse(
                 modes=_build_mode_state(cfg.safety, self._session_modes.get(session_id)),
                 config_options=_build_config_options(cfg.safety),
+                models=_build_model_state(cfg.provider),
             )
         except (FileNotFoundError, ValueError) as exc:
             logger.info("ACP: session %s not found (%s)", session_id, exc)

@@ -352,6 +352,59 @@ def _build_config_options(safety_cfg: Any) -> list[Any]:
     ]
 
 
+# Built-in model catalogue surfaced in the editor's model picker. Ordered from
+# most-capable default first so Zed shows a sensible current selection when the
+# loaded config references a model outside the list.
+_BUILTIN_MODELS: list[tuple[str, str, str]] = [
+    # (model_id, display name, description)
+    ("claude-opus-4-7", "Claude Opus 4.7", "Anthropic — flagship reasoning model"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6", "Anthropic — balanced quality / speed"),
+    ("claude-haiku-4-5", "Claude Haiku 4.5", "Anthropic — fast, cheap"),
+    ("gpt-5", "GPT-5", "OpenAI — flagship"),
+    ("gpt-4o", "GPT-4o", "OpenAI — vision-capable"),
+    ("o3", "o3", "OpenAI — reasoning"),
+    ("gemini-2.5-pro", "Gemini 2.5 Pro", "Google — long-context reasoning"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash", "Google — fast"),
+]
+
+
+def _build_model_state(provider_cfg: Any) -> Any:
+    """Return a ``SessionModelState`` for the editor's model picker.
+
+    Always lists the built-in catalogue plus the currently-loaded model (so the
+    picker can show *something* for locally-configured Ollama models, custom
+    gateway models, etc. that aren't in the catalogue).
+
+    ``current_model_id`` is taken from ``provider_cfg.model`` so the editor
+    opens with the same model that ``config.json`` has wired up.
+    """
+    from acp.schema import ModelInfo, SessionModelState
+
+    current_id = str(getattr(provider_cfg, "model", "") or "aar")
+    current_provider = str(getattr(provider_cfg, "name", "") or "")
+
+    seen: set[str] = set()
+    available: list[Any] = []
+    for model_id, name, desc in _BUILTIN_MODELS:
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        available.append(ModelInfo(model_id=model_id, name=name, description=desc))
+
+    if current_id and current_id not in seen:
+        # Pin the config's model to the front so the picker defaults to it.
+        available.insert(
+            0,
+            ModelInfo(
+                model_id=current_id,
+                name=current_id,
+                description=f"Loaded from config ({current_provider})" if current_provider else None,
+            ),
+        )
+
+    return SessionModelState(available_models=available, current_model_id=current_id)
+
+
 def _strip_line_numbers(text: str) -> str:
     """Remove the ``read_file`` line-number prefix from numbered output.
 
