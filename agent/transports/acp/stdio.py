@@ -80,6 +80,8 @@ class AarAcpAgent:
         self._session_configs: dict[str, AgentConfig] = {}
         # Sessions that have already received AvailableCommandsUpdate
         self._commands_pushed: set[str] = set()
+        # Per-session current mode id (from set_session_mode)
+        self._session_modes: dict[str, str] = {}
         self._conn: Any = None  # acp.interfaces.Client, set in on_connect
         # Per-session async locks — serialize lifecycle mutations
         # (new/load/close/prompt-setup) so two ACP requests for the same
@@ -169,6 +171,7 @@ class AarAcpAgent:
             PromptCapabilities,
             SessionCapabilities,
             SessionCloseCapabilities,
+            SessionForkCapabilities,
             SessionListCapabilities,
             SessionResumeCapabilities,
         )
@@ -182,6 +185,7 @@ class AarAcpAgent:
                 session_capabilities=SessionCapabilities(
                     list=SessionListCapabilities(),
                     close=SessionCloseCapabilities(),
+                    fork=SessionForkCapabilities(),
                     resume=SessionResumeCapabilities(),
                 ),
             ),
@@ -355,6 +359,7 @@ class AarAcpAgent:
             self._cancel_events.pop(session_id, None)
             self._run_tasks.pop(session_id, None)
             self._session_configs.pop(session_id, None)
+            self._session_modes.pop(session_id, None)
             self._commands_pushed.discard(session_id)
         self._session_locks.pop(session_id, None)
         logger.info("ACP: closed session %s", session_id)
@@ -402,6 +407,205 @@ class AarAcpAgent:
         self._session_configs[session_id] = base_cfg.model_copy(update={"provider": new_provider})
         logger.info("ACP: session %s model → %s/%s", session_id, provider_name, model)
         return SetSessionModelResponse()
+
+    async def authenticate(self, method_id: str, **kwargs: Any) -> Any:
+        """Handle ``authenticate`` — Aar has no auth methods, so this is a no-op.
+
+        Providers are configured via env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)
+        loaded by ``_load_default_config``. We still return a valid
+        ``AuthenticateResponse`` so clients that probe the method succeed.
+        """
+        from acp.schema import AuthenticateResponse
+
+        logger.info("ACP: authenticate requested (method_id=%r) — no-op", method_id)
+        return AuthenticateResponse()
+
+    async def set_session_mode(
+        self,
+        mode_id: str,
+        session_id: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Switch the Agent's mode for *session_id*.
+
+        Aar exposes three modes that map onto the existing ``SafetyConfig``:
+
+        * ``auto``       — no approval required (writes + execute auto-allowed)
+        * ``review``     — approvals required for writes and execute (default)
+        * ``read-only``  — only read-only operations; writes/execute disabled
+
+        Pushes a ``CurrentModeUpdate`` so the client UI tracks the change.
+        """
+        from acp.schema import CurrentModeUpdate, SetSessionModeResponse
+
+        validate_session_id(session_id)
+        base_cfg = self._session_configs.get(session_id, self._config)
+        safety = base_cfg.safety
+
+        if mode_id == "auto":
+            new_safety = safety.model_copy(
+                update={
+                    "require_approval_for_writes": False,
+                    "require_approval_for_execute": False,
+                    "read_only": False,
+                }
+            )
+        elif mode_id == "review":
+            new_safety = safety.model_copy(
+                update={
+                    "require_approval_for_writes": True,
+                    "require_approval_for_execute": True,
+                    "read_only": False,
+                }
+            )
+        elif mode_id == "read-only":
+            new_safety = safety.model_copy(
+                update={
+                    "require_approval_for_writes": True,
+                    "require_approval_for_execute": True,
+                    "read_only": True,
+                }
+            )
+        else:
+            raise ValueError(f"Unknown session mode: {mode_id!r}")
+
+        self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
+        self._session_modes[session_id] = mode_id
+
+        if self._conn is not None:
+            self._spawn(
+                self._conn.session_update(
+                    session_id=session_id,
+                    update=CurrentModeUpdate(
+                        session_update="current_mode_update",
+                        current_mode_id=mode_id,
+                    ),
+                    source=self._agent_name,
+                ),
+                name=f"mode-update-{session_id}",
+            )
+
+        logger.info("ACP: session %s mode → %s", session_id, mode_id)
+        return SetSessionModeResponse()
+
+    async def set_config_option(
+        self,
+        config_id: str,
+        session_id: str,
+        value: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Update a per-session configuration option (unstable protocol).
+
+        Supported options:
+
+        * ``auto_approve_writes``   (boolean) — inverse of ``require_approval_for_writes``
+        * ``auto_approve_execute``  (boolean) — inverse of ``require_approval_for_execute``
+        * ``read_only``             (boolean) — sandbox to read-only tools
+        """
+        from acp.schema import SetSessionConfigOptionResponse
+
+        validate_session_id(session_id)
+        base_cfg = self._session_configs.get(session_id, self._config)
+        safety = base_cfg.safety
+
+        if config_id == "auto_approve_writes":
+            new_safety = safety.model_copy(update={"require_approval_for_writes": not bool(value)})
+        elif config_id == "auto_approve_execute":
+            new_safety = safety.model_copy(update={"require_approval_for_execute": not bool(value)})
+        elif config_id == "read_only":
+            new_safety = safety.model_copy(update={"read_only": bool(value)})
+        else:
+            raise ValueError(f"Unknown config option: {config_id!r}")
+
+        self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
+        logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
+        return SetSessionConfigOptionResponse(config_options=[])
+
+    async def fork_session(
+        self,
+        cwd: str = "",
+        session_id: str = "",
+        mcp_servers: list | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Create a new session that starts with a deep copy of *session_id*'s events.
+
+        Per the ACP spec, forking lets the client branch a conversation —
+        the new session has an independent ID and event stream but carries
+        over the full history. MCP servers are re-negotiated for the new
+        session id.
+        """
+        from acp.schema import ForkSessionResponse
+
+        validate_session_id(session_id)
+
+        source = self._sessions.get(session_id)
+        if source is None:
+            try:
+                source = self._store.load(session_id)
+            except (FileNotFoundError, ValueError) as exc:
+                raise ValueError(f"Cannot fork: session {session_id!r} not found") from exc
+
+        forked = Session(
+            events=[e.model_copy(deep=True) for e in source.events],
+            metadata={**source.metadata, "forked_from": session_id},
+        )
+        if cwd:
+            forked.metadata["cwd"] = cwd
+
+        new_sid = forked.session_id
+        async with self._session_lock(new_sid):
+            self._sessions[new_sid] = forked
+            # Carry over per-session config (model, safety) so the fork has
+            # the same settings as the source.
+            if session_id in self._session_configs:
+                self._session_configs[new_sid] = self._session_configs[session_id]
+            if session_id in self._session_modes:
+                self._session_modes[new_sid] = self._session_modes[session_id]
+            self._store.save(forked)
+            await self._setup_mcp(new_sid, mcp_servers or [])
+
+        self._spawn(self._push_available_commands(new_sid), name=f"push-cmds-{new_sid}")
+        logger.info(
+            "ACP: forked session %s → %s (%d events)", session_id, new_sid, len(forked.events)
+        )
+        return ForkSessionResponse(session_id=new_sid)
+
+    async def resume_session(
+        self,
+        cwd: str = "",
+        session_id: str = "",
+        mcp_servers: list | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Resume a previously saved session WITHOUT replaying history.
+
+        Unlike ``session/load``, ``session/resume`` does not re-send every
+        event to the client — the client already knows the history and only
+        needs the agent to reattach state (per-session registries, model,
+        safety, MCP bridges) so follow-up prompts operate on the same
+        session.
+        """
+        from acp.schema import ResumeSessionResponse
+
+        validate_session_id(session_id)
+
+        try:
+            async with self._session_lock(session_id):
+                session = self._store.load(session_id)
+                if cwd:
+                    session.metadata["cwd"] = cwd
+                self._sessions[session_id] = session
+                await self._setup_mcp(session_id, mcp_servers or [])
+            self._spawn(
+                self._push_available_commands(session_id),
+                name=f"push-cmds-{session_id}",
+            )
+            logger.info("ACP: resumed session %s (%d events)", session_id, len(session.events))
+            return ResumeSessionResponse()
+        except (FileNotFoundError, ValueError) as exc:
+            raise ValueError(f"Cannot resume: session {session_id!r} not found") from exc
 
     async def prompt(
         self,
@@ -716,12 +920,28 @@ class AarAcpAgent:
         return f"Unknown command: {cmd}"
 
     async def _setup_mcp(self, session_id: str, mcp_servers: list) -> None:
-        """Convert ACP mcp_servers → MCPServerConfig, start bridge, register tools."""
+        """Convert ACP mcp_servers → MCPServerConfig, start bridge, register tools.
+
+        Also installs the ``acp_terminal`` tool when a client is connected so
+        the agent can run commands through the editor's terminal instead of a
+        local subprocess.
+        """
+        from agent.tools.registry import ToolRegistry as TR
+
+        registry = self._session_registries.get(session_id)
+        if registry is None:
+            registry = TR()
+
+        if self._conn is not None:
+            from agent.tools.builtin.acp_terminal import register_acp_terminal_tool
+
+            register_acp_terminal_tool(registry, self._conn, session_id)
+            self._session_registries[session_id] = registry
+
         if not mcp_servers:
             return
         try:
             from agent.extensions.mcp import MCPBridge, MCPServerConfig
-            from agent.tools.registry import ToolRegistry as TR
 
             configs: list[MCPServerConfig] = []
             for srv in mcp_servers:
@@ -731,7 +951,6 @@ class AarAcpAgent:
             if not configs:
                 return
 
-            registry = TR()
             bridge = MCPBridge(configs)
             await bridge.__aenter__()
             count = await bridge.register_all(registry)
