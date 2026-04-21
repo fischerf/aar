@@ -34,6 +34,8 @@ from .common import (
     _acp_server_to_mcp_config,
     _auto_approve,
     _available_commands,
+    _build_config_options,
+    _build_mode_state,
     _build_tool_result_content,
     _extract_locations,
     _extract_text,
@@ -82,6 +84,10 @@ class AarAcpAgent:
         self._commands_pushed: set[str] = set()
         # Per-session current mode id (from set_session_mode)
         self._session_modes: dict[str, str] = {}
+        # Capabilities the peer advertised in ``initialize``. Populated by
+        # ``initialize()``; used to gate features we only expose when the
+        # client supports them (e.g. the ``acp_terminal`` tool).
+        self._client_capabilities: Any = None
         self._conn: Any = None  # acp.interfaces.Client, set in on_connect
         # Per-session async locks — serialize lifecycle mutations
         # (new/load/close/prompt-setup) so two ACP requests for the same
@@ -98,6 +104,15 @@ class AarAcpAgent:
             lock = asyncio.Lock()
             self._session_locks[session_id] = lock
         return lock
+
+    def _client_supports_terminal(self) -> bool:
+        """Return True when the connected client advertised ``terminal`` support.
+
+        Defaults to False when ``initialize`` has not run yet or the client
+        sent no capabilities block, so we never issue ``terminal/create`` to
+        a peer that would reject it as method-not-found.
+        """
+        return bool(getattr(self._client_capabilities, "terminal", False))
 
     def _spawn(self, coro: Coroutine[Any, Any, Any], *, name: str = "") -> asyncio.Task:
         """Create a tracked fire-and-forget task.
@@ -176,6 +191,8 @@ class AarAcpAgent:
             SessionResumeCapabilities,
         )
 
+        self._client_capabilities = client_capabilities
+
         return InitializeResponse(
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
@@ -211,7 +228,12 @@ class AarAcpAgent:
         # the guaranteed delivery point.
         self._spawn(self._push_available_commands(sid), name=f"push-cmds-{sid}")
         logger.info("ACP: new session %s cwd=%r", sid, cwd)
-        return NewSessionResponse(session_id=sid)
+        cfg = self._session_configs.get(sid, self._config)
+        return NewSessionResponse(
+            session_id=sid,
+            modes=_build_mode_state(cfg.safety, self._session_modes.get(sid)),
+            config_options=_build_config_options(cfg.safety),
+        )
 
     async def load_session(
         self,
@@ -274,7 +296,11 @@ class AarAcpAgent:
                 name=f"push-cmds-{session_id}",
             )
             logger.info("ACP: loaded session %s (%d events)", session_id, len(session.events))
-            return LoadSessionResponse()
+            cfg = self._session_configs.get(session_id, self._config)
+            return LoadSessionResponse(
+                modes=_build_mode_state(cfg.safety, self._session_modes.get(session_id)),
+                config_options=_build_config_options(cfg.safety),
+            )
         except (FileNotFoundError, ValueError) as exc:
             logger.info("ACP: session %s not found (%s)", session_id, exc)
             return None
@@ -932,7 +958,7 @@ class AarAcpAgent:
         if registry is None:
             registry = TR()
 
-        if self._conn is not None:
+        if self._conn is not None and self._client_supports_terminal():
             from agent.tools.builtin.acp_terminal import register_acp_terminal_tool
 
             register_acp_terminal_tool(registry, self._conn, session_id)

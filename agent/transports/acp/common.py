@@ -280,6 +280,78 @@ def _available_commands() -> list[Any]:
     ]
 
 
+def _build_mode_state(safety_cfg: Any, current_mode_id: str | None = None) -> Any:
+    """Return a ``SessionModeState`` advertising the three Aar modes.
+
+    The default ``current_mode_id`` is derived from the safety config:
+
+    * ``read-only`` if ``safety.read_only`` is set
+    * ``auto``      if both approval flags are off
+    * ``review``    otherwise (the safe default)
+    """
+    from acp.schema import SessionMode, SessionModeState
+
+    modes = [
+        SessionMode(
+            id="auto",
+            name="Auto",
+            description="Run writes and shell commands without asking for approval.",
+        ),
+        SessionMode(
+            id="review",
+            name="Review",
+            description="Ask for approval before writes and shell commands.",
+        ),
+        SessionMode(
+            id="read-only",
+            name="Read-only",
+            description="Only read-only operations; writes and shell commands are denied.",
+        ),
+    ]
+
+    if current_mode_id is None:
+        if getattr(safety_cfg, "read_only", False):
+            current_mode_id = "read-only"
+        elif not (
+            getattr(safety_cfg, "require_approval_for_writes", True)
+            or getattr(safety_cfg, "require_approval_for_execute", True)
+        ):
+            current_mode_id = "auto"
+        else:
+            current_mode_id = "review"
+
+    return SessionModeState(available_modes=modes, current_mode_id=current_mode_id)
+
+
+def _build_config_options(safety_cfg: Any) -> list[Any]:
+    """Return the boolean ``SessionConfigOption``s Aar exposes per session."""
+    from acp.schema import SessionConfigOptionBoolean
+
+    return [
+        SessionConfigOptionBoolean(
+            id="auto_approve_writes",
+            name="Auto-approve writes",
+            description="Skip approval prompts for write/edit tools.",
+            type="boolean",
+            current_value=not getattr(safety_cfg, "require_approval_for_writes", True),
+        ),
+        SessionConfigOptionBoolean(
+            id="auto_approve_execute",
+            name="Auto-approve shell commands",
+            description="Skip approval prompts for shell/execute tools.",
+            type="boolean",
+            current_value=not getattr(safety_cfg, "require_approval_for_execute", True),
+        ),
+        SessionConfigOptionBoolean(
+            id="read_only",
+            name="Read-only mode",
+            description="Deny writes and shell commands entirely.",
+            type="boolean",
+            current_value=bool(getattr(safety_cfg, "read_only", False)),
+        ),
+    ]
+
+
 def _strip_line_numbers(text: str) -> str:
     """Remove the ``read_file`` line-number prefix from numbered output.
 

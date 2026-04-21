@@ -2429,6 +2429,150 @@ class TestAcpAsgiApp:
         assert received[0]["status"] == 204
 
 
+class TestSseByteFraming:
+    """Byte-level verification that SSE streaming framing is correct on the wire."""
+
+    @pytest.mark.asyncio
+    async def test_sse_run_stream_frames_each_event_as_data_line(self):
+        """Each enqueued event becomes a well-formed ``data: <json>\\n\\n`` body frame."""
+        from agent.transports.acp.http import (
+            MessageCreatedEvent,
+            RunCompletedEvent,
+            RunInProgressEvent,
+            _sse_run_stream,
+        )
+
+        run = AcpRun(agent_name="aar", status=RunStatus.IN_PROGRESS)
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(RunInProgressEvent(run=run.model_copy()))
+        await queue.put(MessageCreatedEvent(message=AcpMessage.from_text("assistant", "hi")))
+        run2 = run.model_copy()
+        run2.status = RunStatus.COMPLETED
+        await queue.put(RunCompletedEvent(run=run2))
+        await queue.put(None)  # sentinel: close stream
+
+        sent: list[dict] = []
+
+        async def send(msg: dict) -> None:
+            sent.append(msg)
+
+        await _sse_run_stream(send, queue)
+
+        # First frame: response start with text/event-stream content-type.
+        assert sent[0]["type"] == "http.response.start"
+        assert sent[0]["status"] == 200
+        headers = dict(sent[0]["headers"])
+        assert headers[b"content-type"] == b"text/event-stream"
+        assert headers[b"cache-control"] == b"no-cache"
+
+        # Collect all body frames.
+        bodies = [m for m in sent[1:] if m["type"] == "http.response.body"]
+
+        # Three data frames + one terminating empty frame.
+        data_frames = [m for m in bodies if m["body"] and m.get("more_body")]
+        terminators = [m for m in bodies if not m["body"] and not m.get("more_body")]
+        assert len(data_frames) == 3
+        assert len(terminators) == 1
+
+        # Each data frame must be properly SSE-framed JSON.
+        event_types: list[str] = []
+        for frame in data_frames:
+            body: bytes = frame["body"]
+            assert body.startswith(b"data: ")
+            assert body.endswith(b"\n\n")
+            payload = json.loads(body[len(b"data: ") : -2].decode())
+            event_types.append(payload["type"])
+
+        assert event_types == ["run_in_progress", "message_created", "run_completed"]
+
+    @pytest.mark.asyncio
+    async def test_post_runs_stream_end_to_end_byte_framing(self, monkeypatch):
+        """End-to-end: POST /runs with mode=stream yields valid SSE bytes through the ASGI app."""
+        from agent.core.agent import Agent
+        from agent.transports.acp import http as acp_http
+
+        provider = MockProvider()
+        provider.enqueue_text("streamed hello", stop="end_turn")
+
+        # Inject MockProvider into AcpTransport (created inside create_acp_asgi_app).
+        original_init = acp_http.AcpTransport.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+
+            def make_with_mock() -> Agent:
+                return Agent(
+                    config=self.config,
+                    provider=provider,
+                    approval_callback=self.approval_callback,
+                    registry=self.registry,
+                )
+
+            self._make_agent = make_with_mock  # type: ignore[method-assign]
+
+        monkeypatch.setattr(acp_http.AcpTransport, "__init__", patched_init)
+
+        app = create_acp_asgi_app(config=_make_config(), agent_name="aar")
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/runs",
+            "query_string": b"",
+            "headers": [[b"content-type", b"application/json"]],
+        }
+        body_bytes = json.dumps(
+            {
+                "agent_name": "aar",
+                "input": [{"role": "user", "parts": [{"content": "hi"}]}],
+                "mode": "stream",
+            }
+        ).encode()
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        sent: list[dict] = []
+
+        async def send(msg: dict) -> None:
+            sent.append(msg)
+
+        await app(scope, receive, send)
+
+        # Response start advertises SSE.
+        assert sent[0]["type"] == "http.response.start"
+        assert sent[0]["status"] == 200
+        headers = dict(sent[0]["headers"])
+        assert headers[b"content-type"] == b"text/event-stream"
+
+        # Walk body frames and verify framing + decode JSON payloads.
+        payloads: list[dict] = []
+        saw_terminator = False
+        for msg in sent[1:]:
+            assert msg["type"] == "http.response.body"
+            body: bytes = msg["body"]
+            if not body:
+                assert msg.get("more_body") is False
+                saw_terminator = True
+                continue
+            assert msg.get("more_body") is True
+            assert body.startswith(b"data: ")
+            assert body.endswith(b"\n\n")
+            # Only one SSE message per frame — no stray newlines in the middle.
+            assert body.count(b"\n\n") == 1
+            payloads.append(json.loads(body[len(b"data: ") : -2].decode()))
+
+        assert saw_terminator, "stream must end with an empty more_body=False frame"
+
+        types = [p["type"] for p in payloads]
+        assert types[0] == "run_in_progress"
+        assert types[-1] == "run_completed"
+        assert "message_created" in types
+        # The streamed message must carry our mock provider's output.
+        msg_payloads = [p for p in payloads if p["type"] == "message_created"]
+        assert any("streamed hello" in part["content"] for p in msg_payloads for part in p["message"]["parts"])
+
+
 # ---------------------------------------------------------------------------
 # Helper: _collect_output
 # ---------------------------------------------------------------------------

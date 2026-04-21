@@ -81,7 +81,7 @@ def _make_aar_sdk_agent(config: AgentConfig, provider: MockProvider) -> Any:
             config=agent._session_configs.get(session_id, agent._config),
             provider=provider,
             approval_callback=approval_callback or agent._default_approval,
-            registry=agent._registry,
+            registry=agent._session_registries.get(session_id, agent._registry),
         )
 
     agent._make_aar_agent = patched_make  # type: ignore[method-assign]
@@ -644,6 +644,54 @@ class TestWireAuthenticate:
             assert isinstance(resp, AuthenticateResponse)
 
 
+class TestWireSessionDiscovery:
+    """``new_session`` / ``load_session`` must advertise modes and config options
+    so a generic client can discover what aar supports without guesswork."""
+
+    @pytest.mark.asyncio
+    async def test_new_session_advertises_modes_and_config_options(self, tmp_path):
+        agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
+        client = _CaptureClient()
+
+        async with _AcpPair(agent, client) as (_, client_side):
+            await client_side.initialize(protocol_version=1)
+            resp = await client_side.new_session(cwd="/ws", mcp_servers=[])
+
+            assert resp.modes is not None
+            mode_ids = {m.id for m in resp.modes.available_modes}
+            assert {"auto", "review", "read-only"}.issubset(mode_ids)
+            assert resp.modes.current_mode_id in mode_ids
+
+            assert resp.config_options is not None
+            option_ids = {o.id for o in resp.config_options}
+            assert {"auto_approve_writes", "auto_approve_execute", "read_only"}.issubset(
+                option_ids
+            )
+
+    @pytest.mark.asyncio
+    async def test_load_session_advertises_current_mode(self, tmp_path):
+        from agent.core.events import UserMessage
+        from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
+
+        store = SessionStore(tmp_path)
+        saved = Session()
+        saved.events.append(UserMessage(content="hi"))
+        store.save(saved)
+
+        agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
+        client = _CaptureClient()
+
+        async with _AcpPair(agent, client) as (_, client_side):
+            await client_side.initialize(protocol_version=1)
+            resp = await client_side.load_session(
+                cwd="", session_id=saved.session_id, mcp_servers=[]
+            )
+            # The test config turns both approvals off, so the derived mode
+            # must be "auto" — discovery mirrors the effective safety config.
+            assert resp.modes.current_mode_id == "auto"
+
+
 class TestWireSetSessionMode:
     @pytest.mark.asyncio
     async def test_set_mode_auto_disables_approvals(self, tmp_path):
@@ -847,16 +895,22 @@ class TestWireAcpTerminalTool:
 
     @pytest.mark.asyncio
     async def test_terminal_tool_round_trip(self, tmp_path):
+        from acp.schema import ClientCapabilities
+
         agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
         client = _CaptureClient()
         client.default_terminal_output = "hello from the editor terminal\n"
 
         async with _AcpPair(agent, client) as (_, client_side):
-            await client_side.initialize(protocol_version=1)
+            await client_side.initialize(
+                protocol_version=1,
+                client_capabilities=ClientCapabilities(terminal=True),
+            )
             sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
 
             # The acp_terminal tool is registered at session setup because
-            # _conn is set on the agent by on_connect. Call its handler.
+            # _conn is set on the agent by on_connect AND the client
+            # advertised terminal support. Call its handler.
             registry = agent._session_registries.get(sess.session_id)
             assert registry is not None, "session registry missing after new_session"
             spec = registry.get("acp_terminal")
@@ -882,6 +936,8 @@ class TestWireAcpTerminalTool:
 
     @pytest.mark.asyncio
     async def test_terminal_tool_timeout_kills_and_releases(self, tmp_path):
+        from acp.schema import ClientCapabilities
+
         agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
         client = _CaptureClient()
 
@@ -894,7 +950,10 @@ class TestWireAcpTerminalTool:
         client.wait_for_terminal_exit = hang  # type: ignore[method-assign]
 
         async with _AcpPair(agent, client) as (_, client_side):
-            await client_side.initialize(protocol_version=1)
+            await client_side.initialize(
+                protocol_version=1,
+                client_capabilities=ClientCapabilities(terminal=True),
+            )
             sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
 
             spec = agent._session_registries[sess.session_id].get("acp_terminal")
@@ -906,3 +965,102 @@ class TestWireAcpTerminalTool:
             kinds = [k for k, _ in client.terminal_calls]
             assert "kill" in kinds, "timed-out terminals must be killed"
             assert kinds[-1] == "release"
+
+    @pytest.mark.asyncio
+    async def test_terminal_tool_absent_when_client_lacks_capability(self, tmp_path):
+        """When the client doesn't advertise ``terminal`` support, the
+        ``acp_terminal`` tool must NOT be registered — otherwise the agent
+        could issue ``terminal/create`` to a peer that doesn't implement it.
+        """
+        agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
+        client = _CaptureClient()
+
+        async with _AcpPair(agent, client) as (_, client_side):
+            # Default ClientCapabilities() has terminal=False.
+            await client_side.initialize(protocol_version=1)
+            sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
+
+            # Either the session registry is absent entirely (nothing else
+            # installed) or it exists without acp_terminal — both are valid,
+            # neither must expose the tool.
+            registry = agent._session_registries.get(sess.session_id)
+            if registry is not None:
+                assert registry.get("acp_terminal") is None
+
+    @pytest.mark.asyncio
+    async def test_terminal_tool_end_to_end_via_prompt_loop(self, tmp_path):
+        """The prompt loop picks up a provider tool_call for ``acp_terminal``,
+        drives the full ``terminal/*`` lifecycle, and the client observes
+        both the terminal RPCs and the tool_call notification pair.
+        """
+        from acp.schema import ClientCapabilities, TextContentBlock
+
+        provider = MockProvider()
+        # Step 1: provider emits a tool_call for acp_terminal.
+        provider.enqueue_tool_call(
+            tool_name="acp_terminal",
+            arguments={"command": "echo", "args": ["hi"]},
+            tool_call_id="tc_term_1",
+        )
+        # Step 2: provider closes the turn with a plain-text reply.
+        provider.enqueue_text("done", stop="end_turn")
+
+        agent = _make_aar_sdk_agent(_make_config(tmp_path), provider)
+        client = _CaptureClient()
+        client.default_terminal_output = "hi\n"
+
+        async with _AcpPair(agent, client) as (_, client_side):
+            await client_side.initialize(
+                protocol_version=1,
+                client_capabilities=ClientCapabilities(terminal=True),
+            )
+            sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
+
+            resp = await client_side.prompt(
+                session_id=sess.session_id,
+                prompt=[TextContentBlock(type="text", text="run echo")],
+            )
+            assert resp.stop_reason == "end_turn"
+
+            # Wait for the full terminal lifecycle to have been observed.
+            await _wait_for(
+                lambda: "release" in [k for k, _ in client.terminal_calls]
+            )
+
+            kinds = [k for k, _ in client.terminal_calls]
+            # Full lifecycle in order: create first, release last.
+            assert kinds[0] == "create"
+            assert kinds[-1] == "release"
+            assert "wait" in kinds
+            assert "output" in kinds
+
+            # The create call must carry the provider's arguments.
+            _, create_kwargs = client.terminal_calls[0]
+            assert create_kwargs.get("command") == "echo"
+            assert create_kwargs.get("args") == ["hi"]
+
+            # And the agent sent session/update notifications framing the tool
+            # call: a ToolCallStart (session_update="tool_call") followed by
+            # at least one ToolCallProgress (session_update="tool_call_update").
+            tool_updates = [
+                u
+                for _, u in client.notifications
+                if getattr(u, "session_update", None) in ("tool_call", "tool_call_update")
+            ]
+            start_updates = [
+                u for u in tool_updates if u.session_update == "tool_call"
+            ]
+            progress_updates = [
+                u for u in tool_updates if u.session_update == "tool_call_update"
+            ]
+            assert start_updates, "expected at least one tool_call (ToolCallStart) update"
+            assert progress_updates, "expected at least one tool_call_update (ToolCallProgress)"
+
+            # The start update must name the acp_terminal tool call.
+            assert any(
+                getattr(u, "tool_call_id", None) == "tc_term_1" for u in start_updates
+            )
+            # And a terminal progress update must report completion.
+            assert any(
+                getattr(u, "status", None) == "completed" for u in progress_updates
+            )

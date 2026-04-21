@@ -14,11 +14,24 @@ On connection, Aar reports the following capabilities to the editor:
 | Capability | Value | Meaning |
 |------------|-------|---------|
 | `load_session` | `true` | Editor can resume previously saved sessions |
+| `fork_session` | supported | Editor can branch a session at a specific message |
 | `session.list` | supported | Editor can show Aar session history in its sidebar |
 | `session.close` | supported | Editor notifies Aar when a session tab is closed |
+| `session.set_mode` | supported | Editor can switch between `auto` / `review` / `read-only` modes |
+| `session.set_config_option` | supported | Editor can toggle `auto_approve_writes` / `auto_approve_execute` / `read_only` at runtime |
 | `prompt.embedded_context` | `true` | `@`-mentions embed file contents that Aar reads |
 | `mcp_capabilities.http` | `true` | Editor forwards HTTP MCP servers to Aar |
 | `mcp_capabilities.sse` | `false` | SSE transport not supported (servers skipped with warning) |
+
+### Client capabilities consumed
+
+Aar inspects the editor's advertised `ClientCapabilities` during `initialize` and gates optional
+features accordingly:
+
+| Client capability | Effect when present |
+|-------------------|---------------------|
+| `terminal` | Aar registers the [`acp_terminal` tool](#acp-terminal-tool) so the agent can run shell commands through the editor's terminal pane instead of a local subprocess |
+| `fs.read_text_file` / `fs.write_text_file` | Aar routes file reads/writes through the editor (transparent to the agent) |
 
 ---
 
@@ -164,13 +177,18 @@ curl -s -N -X POST http://127.0.0.1:8000/runs \
 
 | ACP event | What Aar does |
 |-----------|---------------|
-| `initialize` | Returns capabilities, protocol version, and agent info |
-| `session/new` | Creates a new Aar session; stores `cwd` in session metadata; starts any MCP servers passed by the editor |
-| `session/load` | Resumes a saved session from `~/.aar/sessions/`; returns `null` if not found (editor creates new) |
+| `initialize` | Returns capabilities, protocol version, and agent info; stashes client capabilities for later gating |
+| `authenticate` | No-op success response — Aar uses provider API keys from env/config, not per-session auth |
+| `session/new` | Creates a new Aar session; stores `cwd` in session metadata; starts any MCP servers passed by the editor; returns the session's current `modes` and `config_options` |
+| `session/load` | Resumes a saved session from `~/.aar/sessions/`; returns `null` if not found (editor creates new); also returns the resumed session's `modes` and `config_options` |
 | `session/list` | Returns all saved sessions with title (first assistant message) and `cwd` |
 | `session/close` | Cleans up in-memory session state and shuts down any per-session MCP bridges |
 | `session/prompt` | Runs the Aar agent loop; streams thinking, tool calls, and token updates back to the editor |
 | `session/cancel` | Sets the agent's cooperative cancel signal for the current prompt |
+| `session/fork` | Branches a session at a given message index; returns a fresh `session_id` with the trimmed history |
+| `session/resume` | Re-attaches to an existing session by id (equivalent to `load` for saved sessions, but does not replay history) |
+| `session/set_mode` | Switches the session between `auto` / `review` / `read-only`; emits a `current_mode_update` notification |
+| `session/set_config_option` | Toggles a boolean safety config at runtime (`auto_approve_writes` / `auto_approve_execute` / `read_only`); emits a `config_option_update` notification |
 
 ### Streaming updates pushed during a prompt
 
@@ -297,6 +315,111 @@ Every tool call during a prompt builds a live plan that Aar streams back as `pla
 Editors that render the plan panel (e.g. Zed's tool-call sidebar) show each step as it executes.
 No configuration is needed — the plan is always active.
 
+### Session modes and config options
+
+Each session advertises a set of **modes** and **config options** that the editor can show in a picker
+and toggle at runtime. Aar derives the defaults from the current `SafetyConfig`:
+
+| Mode | Meaning |
+|------|---------|
+| `auto` | No approval prompts — writes and execute run automatically |
+| `review` | Approval required before writes and execute (the default for most safety configs) |
+| `read-only` | Writes and execute are denied entirely; only read-side tools run |
+
+The three config options, each a boolean toggle:
+
+| Option | Effect |
+|--------|--------|
+| `auto_approve_writes` | When `true`, disables approval prompts for write-side tools (`write_file`, `edit_file`, …) |
+| `auto_approve_execute` | When `true`, disables approval prompts for `bash` and other execute-side tools |
+| `read_only` | When `true`, writes and execute are blocked outright |
+
+#### How `config.json` seeds the picker
+
+On `session/new` and `session/load`, Aar reads the loaded `AgentConfig.safety` and reports the
+current mode back to the editor. The mapping from `SafetyConfig` flags to the advertised
+`current_mode_id` and `current_value`s:
+
+| `safety.read_only` | `require_approval_for_writes` | `require_approval_for_execute` | Advertised `current_mode_id` | `auto_approve_writes` | `auto_approve_execute` | `read_only` |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `true`  | *any* | *any*  | `read-only` | `false` | `false` | `true`  |
+| `false` | `true`  | `true`  | `review` *(default)* | `false` | `false` | `false` |
+| `false` | `false` | `false` | `auto` | `true`  | `true`  | `false` |
+| `false` | `true`  | `false` | `review` *(hybrid)* | `false` | `true`  | `false` |
+| `false` | `false` | `true`  | `review` *(hybrid)* | `true`  | `false` | `false` |
+
+So a config with `read_only: false` and both `require_approval_for_*: true` (the Aar default, and
+what `aar init` writes) opens in **Review** with all three options unchecked.
+
+#### What the editor writes back
+
+When the editor calls `session/set_mode` or `session/set_config_option`, Aar applies the change
+**per-session and in-memory only** — it never touches the loaded `AgentConfig` on disk or the
+global `self._config`:
+
+| Editor action | Writes |
+|---------------|--------|
+| `set_mode("auto")` | `require_approval_for_writes=false`, `require_approval_for_execute=false`, `read_only=false` — atomic |
+| `set_mode("review")` | `require_approval_for_writes=true`, `require_approval_for_execute=true`, `read_only=false` — atomic |
+| `set_mode("read-only")` | `require_approval_for_writes=true`, `require_approval_for_execute=true`, `read_only=true` — atomic |
+| `set_config_option("auto_approve_writes", v)` | `require_approval_for_writes = not v` — single flag |
+| `set_config_option("auto_approve_execute", v)` | `require_approval_for_execute = not v` — single flag |
+| `set_config_option("read_only", v)` | `read_only = v` — single flag |
+
+`set_mode` is coarse (rewrites all three flags together); `set_config_option` is fine-grained
+(one flag at a time). After `set_mode("auto")` followed by `set_config_option("read_only", true)`
+you end up in a hybrid state — `_build_mode_state` re-reads the flags on the next load and would
+then report `read-only` because `read_only` wins the precedence check.
+
+Both call paths:
+
+1. Read the active config from `self._session_configs.get(session_id, self._config)`.
+2. Produce a new immutable `SafetyConfig` via `model_copy(update=...)`.
+3. Write the result back into `self._session_configs[session_id]`.
+4. Emit a `current_mode_update` (for `set_mode`) or `config_option_update` (for `set_config_option`)
+   notification so any other panel in the editor stays in sync.
+
+The new config takes effect on the **next tool call** — `_make_aar_agent` reads the per-session
+`SafetyConfig` every time a prompt starts, so the `PermissionManager` picks up the change
+immediately.
+
+#### Scope and persistence
+
+| Aspect | Behaviour |
+|--------|-----------|
+| Config fields affected by editor toggles | Only `safety.read_only`, `safety.require_approval_for_writes`, `safety.require_approval_for_execute` |
+| Fields **never** touched | `provider`, `tools.*`, `denied_paths`, `allowed_paths`, `sandbox.*`, `guardrails`, `max_steps`, `token_budget`, `cost_limit`, … |
+| Storage | `AarAcpAgent._session_configs[session_id]` (in-memory dict) |
+| Lifetime | Wiped on `session/close` or agent shutdown |
+| Persistence | **Not** written to `~/.aar/config.json`; a fresh process re-reads the on-disk file |
+| `session/fork` | Copies the parent session's override into the new session id — child starts with the same mode |
+| `session/load` on a previously toggled session | Re-reads `config.json` defaults; editor-side changes from a previous process run are lost |
+
+In short: the mode picker and toggles are a runtime UI over the narrow subset of `SafetyConfig` that
+governs approvals, scoped to the current editor session. Everything else in `config.json` — your
+Ollama model, sandbox profile, deny-lists, budgets — stays authoritative and untouched.
+
+### <a name="acp-terminal-tool"></a>ACP terminal tool
+
+When the editor advertises `ClientCapabilities.terminal = true` during `initialize`, Aar registers
+an `acp_terminal` built-in tool. The LLM can call it exactly like `bash`, but instead of launching
+a local subprocess Aar drives the editor's terminal pane via the ACP `terminal/*` method family:
+
+```
+terminal/create   → terminal/wait_for_exit   → terminal/output   → terminal/release
+```
+
+Benefits:
+
+- Commands run in the editor's own PTY — users see output in the familiar terminal pane
+- `cwd` and `env` can be set per invocation; output is captured and returned to the agent
+- A `timeout` argument (default 60s) caps the wait; timeouts trigger `terminal/kill` + `terminal/release`
+  so the editor never leaks PTYs
+
+If the client does **not** advertise terminal support, `acp_terminal` is not registered — the agent
+falls back to the local `bash` tool (which still honors Aar's sandbox and deny-list). This avoids
+issuing `terminal/*` calls to a peer that would reject them.
+
 ---
 
 ## 5. Programmatic embedding
@@ -348,13 +471,16 @@ it. Only `aar acp` (stdio) and `create_acp_asgi_app` need it at runtime.
 | File | Purpose |
 |------|---------|
 | `__init__.py` | Re-exports the full public API (`AarAcpAgent`, `run_acp_stdio`, `AcpTransport`, `create_acp_asgi_app`, data models) so existing imports keep working |
-| `common.py` | Helpers shared by both transports: config loading, tool-kind mapping, prompt-block extraction, stop-reason mapping, MCP config translation, provider inference |
+| `common.py` | Helpers shared by both transports: config loading, tool-kind mapping, prompt-block extraction, stop-reason mapping, MCP config translation, provider inference, session mode/config builders |
 | `stdio.py` | `AarAcpAgent` + `run_acp_stdio` — SDK-backed stdio transport (Zed, editors) |
 | `http.py` | `AcpTransport`, `create_acp_asgi_app`, and the Pydantic run/event models — HTTP + SSE transport |
 
 The sibling `agent/transports/acp_permissions.py` provides `make_acp_approval_callback`,
 which both transports use when wiring Aar's `PermissionManager` to ACP's
 `request_permission` flow.
+
+The `acp_terminal` built-in tool lives at `agent/tools/builtin/acp_terminal.py` and is registered
+by the stdio transport at session-setup time when the client advertises terminal support.
 
 ### Concurrency model (stdio)
 
