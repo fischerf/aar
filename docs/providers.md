@@ -1,6 +1,6 @@
 # Providers
 
-Aar is provider-agnostic — swap between Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint by changing one config field. No agent code changes required.
+Aar is provider-agnostic — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint by changing one config field. No agent code changes required.
 
 ## Anthropic
 
@@ -53,6 +53,26 @@ ProviderConfig(name="ollama", model="qwen2.5vl:7b", extra={"supports_vision": Tr
 
 Audio note: Gemma 4 supports audio at the model level, but Ollama's API does not yet expose audio input (as of v0.20). Audio blocks attached via `@file` will be dropped with a warning. The framework types are ready for when Ollama adds support.
 
+## Gemini
+
+See [`docs/providers_gemini.md`](providers_gemini.md) for the full Gemini setup guide — SDK mode, HTTP mode, thinking/reasoning, and all `extra` keys.
+
+Quick start:
+
+```python
+from agent import AgentConfig, ProviderConfig
+
+config = AgentConfig(provider=ProviderConfig(
+    name="gemini",
+    model="gemini-2.5-flash",   # or "gemini-2.5-pro"
+    api_key="...",               # or GEMINI_API_KEY env var
+))
+```
+
+Install: `pip install aar-agent[gemini]` (pulls `google-genai`; HTTP mode only needs `httpx`, already included).
+
+Supports: tools, streaming, thinking/reasoning (Flash optional, Pro default), vision.
+
 ## Generic (OpenAI-compatible)
 
 Any OpenAI-compatible HTTP endpoint, using a custom `api-key` header for authentication.
@@ -86,6 +106,7 @@ Each provider reports token counts differently. Aar normalises them into a singl
 | Anthropic | `usage` block in response body — always present | Collected from the `message_stop` SSE event; attached to the final `StreamDelta(done=True)` |
 | OpenAI | `usage` in response body — always present | Requested via `stream_options: {include_usage: true}`; trailing usage chunk attached to final done-delta |
 | Ollama | `prompt_eval_count` / `eval_count` in response body | Same fields on the final `done: true` NDJSON chunk; attached to final done-delta |
+| Gemini | `usageMetadata` (HTTP) / `usage_metadata` (SDK) — always present | Same field on the final SSE chunk; attached to final done-delta. Thought tokens billed separately but not currently surfaced in `ProviderMeta`. |
 | Generic | `usage` in SSE chunks if the upstream emits it | Same — presence depends on the upstream endpoint |
 
 ### Ollama token availability

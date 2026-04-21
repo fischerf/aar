@@ -1,3 +1,13 @@
+[![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)](#)
+[![Zed](https://img.shields.io/badge/Zed-white?logo=zedindustries&logoColor=084CCF)](#)
+[![ACP](https://img.shields.io/badge/ACP-0.10.5-green)](https://agentclientprotocol.com/)
+[![VS Code](https://img.shields.io/badge/VS%20Code-Insiders-blue)](https://code.visualstudio.com/)
+[![IntelliJ IDEA](https://img.shields.io/badge/IntelliJIDEA-000000.svg?logo=intellij-idea&logoColor=white)](#)
+[![Claude](https://img.shields.io/badge/Claude-D97757?logo=claude&logoColor=fff)](#)
+[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-886FBF?logo=googlegemini&logoColor=fff)](#)
+[![ChatGPT](https://custom-icon-badges.demolab.com/badge/ChatGPT-74aa9c?logo=openai&logoColor=white)](#)
+[![Ollama](https://img.shields.io/badge/Ollama-fff?logo=ollama&logoColor=000)](#)
+
 <div align="center">
 <pre>
  █████╗  █████╗ ██████╗
@@ -18,13 +28,17 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 <table width="100%">
   <tr>
-    <td width="50%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — TUI" width="100%" />
-      <br/><sub><b>AAR Agent with Textual interface (TUI)</b></sub>
+    <td width="33%" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — with CLI/TUI" width="100%" />
+      <br/><sub><b>AAR Agent — with CLI/TUI</b></sub>
     </td>
-    <td width="50%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="Zed Editor — running AAR Agent via ACP" width="100%" />
-      <br/><sub><b>Zed Editor — running AAR Agent via ACP</b></sub>
+    <td width="33%" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/a2f9fc10189fceeeb1a55f990248210bedfb06a8/aar/aar_acp.png" alt="AAR Agent in Zed code editor" width="100%" />
+      <br/><sub><b>AAR Agent in Zed code editor</b></sub>
+    </td>
+    <td width="33%" align="center" valign="top">
+      <img src="https://github.com/fischerf/fischerf.github.io/blob/55ef639b72de95e4fb5ba4678016261428cc2ab2/aar/aar_acp_vscode.png" alt="AAR Agent in VSCode" width="100%" />
+      <br/><sub><b>AAR Agent in VSCode</b></sub>
     </td>
   </tr>
 </table>
@@ -33,7 +47,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 
 - **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
-- **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint without changing agent code
+- **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint without changing agent code
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable
@@ -79,7 +93,7 @@ The `-e` flag creates a live link — editing files under `agent/` is reflected 
 
 ## Quick start
 
-Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or point `base_url` at a local Ollama instance.
+Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or point `base_url` at a local Ollama instance.
 
 ## Usage
 
@@ -147,7 +161,7 @@ See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint referen
 ```
 agent/
 ├── core/           # Loop, agent, events, session, config
-├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Generic)
+├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic)
 ├── tools/          # Tool registry, schema, execution engine
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
@@ -201,7 +215,8 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Configuration](docs/configuration.md) | `AgentConfig` reference, config precedence, approval modes, logging, system prompt, shell, project rules |
 | [Tokens & Cost](docs/tokens.md) | Token tracking pipeline, budget enforcement, cost estimation, pricing tables, TUI display |
 | [ACP](docs/acp.md) | ACP stdio setup for Zed and other editors, HTTP/SSE mode, programmatic embedding, endpoint reference |
-| [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Generic setup and options |
+| [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Gemini, Generic setup and options |
+| [Gemini provider](docs/providers_gemini.md) | Gemini SDK mode, HTTP mode, thinking/reasoning, `extra` key reference |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |

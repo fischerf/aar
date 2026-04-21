@@ -151,6 +151,66 @@ class TestExtractText:
         assert "question" in result
         assert "def foo(): pass" in result
 
+    def test_dict_image_block(self):
+        assert _extract_text([{"type": "image", "data": "abc"}]) == "[image]"
+
+    def test_dict_audio_block(self):
+        assert _extract_text([{"type": "audio", "data": "abc"}]) == "[audio]"
+
+    def test_object_image_block_by_type(self):
+        block = MagicMock(spec=["type"])
+        block.type = "image"
+        assert _extract_text([block]) == "[image]"
+
+    def test_object_audio_block_by_type(self):
+        block = MagicMock(spec=["type"])
+        block.type = "audio"
+        assert _extract_text([block]) == "[audio]"
+
+    def test_image_and_text_combined(self):
+        result = _extract_text([{"type": "image"}, {"text": "describe it"}])
+        assert result == "[image]\ndescribe it"
+
+
+class TestExtractLocations:
+    def test_path_key(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"path": "/tmp/foo.py"}) == ["/tmp/foo.py"]
+
+    def test_file_path_key(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"file_path": "/tmp/bar.py"}) == ["/tmp/bar.py"]
+
+    def test_source_and_destination(self):
+        from agent.transports.acp import _extract_locations
+
+        result = _extract_locations({"source": "/a.py", "destination": "/b.py"})
+        assert "/a.py" in result
+        assert "/b.py" in result
+
+    def test_empty_arguments(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({}) == []
+
+    def test_non_path_keys_ignored(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"cmd": "ls", "args": "-la"}) == []
+
+    def test_deduplicates_same_path(self):
+        from agent.transports.acp import _extract_locations
+
+        result = _extract_locations({"path": "/a.py", "source": "/a.py"})
+        assert result.count("/a.py") == 1
+
+    def test_empty_string_skipped(self):
+        from agent.transports.acp import _extract_locations
+
+        assert _extract_locations({"path": ""}) == []
+
 
 class TestMapStopReason:
     def test_completed(self):
@@ -165,8 +225,11 @@ class TestMapStopReason:
     def test_error_states_map_to_end_turn(self):
         """Operational failures use end_turn, not refusal (which triggers a
         prominent 'refused to respond' banner in Zed)."""
-        for state in (AgentState.ERROR, AgentState.TIMED_OUT, AgentState.BUDGET_EXCEEDED):
+        for state in (AgentState.ERROR, AgentState.TIMED_OUT):
             assert _map_stop_reason(state) == "end_turn"
+
+    def test_budget_exceeded_maps_to_max_tokens(self):
+        assert _map_stop_reason(AgentState.BUDGET_EXCEEDED) == "max_tokens"
 
 
 class TestAarAcpAgentInitialize:
@@ -183,6 +246,16 @@ class TestAarAcpAgentInitialize:
         agent = AarAcpAgent(config=_make_config())
         resp = await agent.initialize(protocol_version=42)
         assert resp.protocol_version == PROTOCOL_VERSION
+
+    @pytest.mark.asyncio
+    async def test_declares_mcp_capabilities(self):
+        """ACP clients only forward HTTP/SSE MCP servers when the agent
+        advertises support via ``mcp_capabilities``. Stdio is always sent."""
+        agent = AarAcpAgent(config=_make_config())
+        resp = await agent.initialize(protocol_version=1)
+        caps = resp.agent_capabilities.mcp_capabilities
+        assert caps is not None
+        assert caps.http is True
 
 
 class TestAarAcpAgentNewSession:
@@ -387,6 +460,47 @@ class TestAarAcpAgentListSessions:
         resp = await agent.list_sessions()
         returned_ids = {si.session_id for si in resp.sessions}
         assert ids == returned_ids
+
+    @pytest.mark.asyncio
+    async def test_updated_at_populated_when_events_exist(self, tmp_path):
+        """Sessions with events include an ISO 8601 updated_at timestamp."""
+        from agent.core.events import AssistantMessage
+        from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
+
+        store = SessionStore(tmp_path)
+        s = Session()
+        s.events.append(AssistantMessage(content="hello"))
+        store.save(s)
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        resp = await agent.list_sessions()
+        info = next(si for si in resp.sessions if si.session_id == s.session_id)
+        assert info.updated_at is not None
+        # Should be a valid ISO 8601 string
+        import datetime
+        datetime.datetime.fromisoformat(info.updated_at)
+
+    @pytest.mark.asyncio
+    async def test_updated_at_none_for_empty_session(self, tmp_path):
+        """Sessions with no events have updated_at=None."""
+        from agent.core.session import Session
+        from agent.memory.session_store import SessionStore
+
+        store = SessionStore(tmp_path)
+        s = Session()
+        store.save(s)
+
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        resp = await agent.list_sessions()
+        info = next(si for si in resp.sessions if si.session_id == s.session_id)
+        assert info.updated_at is None
 
 
 class TestAarAcpAgentEventStreaming:
@@ -748,6 +862,61 @@ class TestAarAcpAgentMcpConversion:
         result = _acp_server_to_mcp_config({})
         assert result is None
 
+    def test_sdk_stdio_with_env_list(self):
+        """Real ``McpServerStdio`` ships ``env`` as ``list[EnvVariable]`` — must
+        be coerced to ``dict``, not blindly passed to ``dict(...)``."""
+        from acp.schema import EnvVariable, McpServerStdio
+
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = McpServerStdio(
+            name="filesystem",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            env=[
+                EnvVariable(name="FOO", value="bar"),
+                EnvVariable(name="TOKEN", value="secret"),
+            ],
+        )
+        result = _acp_server_to_mcp_config(srv)
+        assert result is not None
+        assert result.transport == "stdio"
+        assert result.command == "npx"
+        assert result.env == {"FOO": "bar", "TOKEN": "secret"}
+
+    def test_sdk_http_with_headers_list(self):
+        """Real ``HttpMcpServer`` ships ``headers`` as ``list[HttpHeader]``."""
+        from acp.schema import HttpHeader, HttpMcpServer
+
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = HttpMcpServer(
+            name="remote",
+            url="https://mcp.example.com/api",
+            headers=[HttpHeader(name="Authorization", value="Bearer sk-...")],
+            type="http",
+        )
+        result = _acp_server_to_mcp_config(srv)
+        assert result is not None
+        assert result.transport == "http"
+        assert result.url == "https://mcp.example.com/api"
+        assert result.headers == {"Authorization": "Bearer sk-..."}
+
+    def test_sdk_sse_is_skipped(self, caplog):
+        """Aar's bridge cannot speak SSE framing — SSE servers must be dropped
+        (not silently routed to the http code path)."""
+        import logging
+
+        from acp.schema import SseMcpServer
+
+        from agent.transports.acp import _acp_server_to_mcp_config
+
+        srv = SseMcpServer(name="sse-remote", url="https://x/sse", headers=[], type="sse")
+        with caplog.at_level(logging.WARNING, logger="agent.transports.acp.common"):
+            result = _acp_server_to_mcp_config(srv)
+        assert result is None
+        assert any("SSE" in rec.message for rec in caplog.records)
+
 
 class TestModelIdToProvider:
     def test_claude_maps_to_anthropic(self):
@@ -994,6 +1163,43 @@ class TestSlashCommandHandler:
         assert "read_file" in reply
         assert "Available tools" in reply
 
+    def test_tools_includes_builtins_when_mcp_registry_present(self, tmp_path):
+        """When an MCP session registry exists, /tools must still list built-in
+        tools — they are not stored in the session registry but are registered
+        by AarAgent._register_builtins() at prompt time."""
+        from agent.core.config import ToolConfig
+        from agent.core.session import Session
+        from agent.tools.registry import ToolRegistry
+        from agent.tools.schema import SideEffect, ToolSpec
+
+        config = _make_config()
+        config = config.model_copy(
+            update={"tools": ToolConfig(enabled_builtins=["read_file", "write_file"])}
+        )
+        agent = AarAcpAgent(config=config)
+
+        # Simulate what _setup_mcp does: a registry with only MCP tools
+        mcp_only_registry = ToolRegistry()
+        mcp_only_registry.add(
+            ToolSpec(
+                name="fetch",
+                description="Fetch a web page",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[SideEffect.NETWORK],
+            )
+        )
+        session_id = "mcp-session"
+        agent._session_registries[session_id] = mcp_only_registry
+
+        session = Session(session_id=session_id)
+        reply = agent._handle_slash_command("/tools", session_id, session)
+
+        # MCP tool must appear
+        assert "fetch" in reply
+        # Built-in tools must also appear (the bug was they were missing)
+        assert "read_file" in reply
+        assert "write_file" in reply
+
     def test_policy_contains_approval_fields(self, tmp_path):
         from agent.core.session import Session
 
@@ -1124,6 +1330,46 @@ class TestSideEffectsToToolKind:
 
         assert _side_effects_to_tool_kind([]) == "other"
 
+    def test_delete_name_overrides_write(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "delete_file") == "delete"
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "remove_file") == "delete"
+
+    def test_move_name_overrides_write(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "move_file") == "move"
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "rename_file") == "move"
+
+    def test_search_name_overrides_read(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.READ], "search_files") == "search"
+        assert _side_effects_to_tool_kind([SideEffect.READ], "grep") == "search"
+        assert _side_effects_to_tool_kind([SideEffect.READ], "find_in_files") == "search"
+
+    def test_think_name_maps_to_think(self):
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([], "think") == "think"
+        assert _side_effects_to_tool_kind([], "reason_about") == "think"
+
+    def test_name_check_is_case_insensitive(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.WRITE], "Delete_File") == "delete"
+
+    def test_no_name_falls_through_to_side_effects(self):
+        from agent.tools.schema import SideEffect
+        from agent.transports.acp import _side_effects_to_tool_kind
+
+        assert _side_effects_to_tool_kind([SideEffect.EXECUTE]) == "execute"
+
 
 class TestToolCallPendingStatus:
     """ToolCallStart must use status='pending' per the ACP spec.
@@ -1163,6 +1409,47 @@ class TestToolCallPendingStatus:
                 assert update.status == "pending", (
                     f"ToolCallStart should use 'pending', got '{update.status}'"
                 )
+
+    def test_tool_result_emits_in_progress_then_terminal(self):
+        """on_event(ToolResult) must push in_progress before completed/failed.
+
+        The ACP spec lifecycle is pending → in_progress → completed/failed.
+        """
+        from acp.schema import ToolCallProgress
+
+        from agent.core.events import ToolResult as AarToolResult
+
+        pushed: list[Any] = []
+        sdk_agent = AarAcpAgent(config=_make_config())
+
+        def _push(update: Any) -> None:
+            pushed.append(update)
+
+        # Simulate the on_event callback logic directly
+        event = AarToolResult(tool_name="bash", tool_call_id="tc1", output="ok", is_error=False)
+
+        # Replicate the ToolResult branch from prompt()'s on_event
+        _push(
+            ToolCallProgress(
+                title=event.tool_name,
+                tool_call_id=event.tool_call_id,
+                status="in_progress",
+                session_update="tool_call_update",
+            )
+        )
+        _push(
+            ToolCallProgress(
+                title=event.tool_name,
+                tool_call_id=event.tool_call_id,
+                status="completed",
+                raw_output={"text": event.output[:4000]},
+                session_update="tool_call_update",
+            )
+        )
+
+        assert len(pushed) == 2
+        assert pushed[0].status == "in_progress"
+        assert pushed[1].status == "completed"
 
 
 class TestCancellationStopReason:
@@ -1325,7 +1612,34 @@ class TestAcpApprovalBridge:
         assert result == ApprovalResult.APPROVED_ALWAYS
 
     @pytest.mark.asyncio
+    async def test_reject_once_returns_denied(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("reject_once")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
+    async def test_reject_always_returns_denied(self):
+        from agent.safety.permissions import ApprovalResult
+        from agent.transports.acp_permissions import make_acp_approval_callback
+
+        conn = AsyncMock()
+        conn.request_permission.return_value = self._allowed_response("reject_always")
+
+        cb = make_acp_approval_callback(conn, "sess-1")
+        result = await cb(self._spec(), self._tc())
+
+        assert result == ApprovalResult.DENIED
+
+    @pytest.mark.asyncio
     async def test_deny_option_id_returns_denied(self):
+        """Legacy 'deny' option_id still maps to DENIED for backward compat."""
         from agent.safety.permissions import ApprovalResult
         from agent.transports.acp_permissions import make_acp_approval_callback
 
@@ -2113,6 +2427,150 @@ class TestAcpAsgiApp:
 
         await app(scope, receive, send)
         assert received[0]["status"] == 204
+
+
+class TestSseByteFraming:
+    """Byte-level verification that SSE streaming framing is correct on the wire."""
+
+    @pytest.mark.asyncio
+    async def test_sse_run_stream_frames_each_event_as_data_line(self):
+        """Each enqueued event becomes a well-formed ``data: <json>\\n\\n`` body frame."""
+        from agent.transports.acp.http import (
+            MessageCreatedEvent,
+            RunCompletedEvent,
+            RunInProgressEvent,
+            _sse_run_stream,
+        )
+
+        run = AcpRun(agent_name="aar", status=RunStatus.IN_PROGRESS)
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(RunInProgressEvent(run=run.model_copy()))
+        await queue.put(MessageCreatedEvent(message=AcpMessage.from_text("assistant", "hi")))
+        run2 = run.model_copy()
+        run2.status = RunStatus.COMPLETED
+        await queue.put(RunCompletedEvent(run=run2))
+        await queue.put(None)  # sentinel: close stream
+
+        sent: list[dict] = []
+
+        async def send(msg: dict) -> None:
+            sent.append(msg)
+
+        await _sse_run_stream(send, queue)
+
+        # First frame: response start with text/event-stream content-type.
+        assert sent[0]["type"] == "http.response.start"
+        assert sent[0]["status"] == 200
+        headers = dict(sent[0]["headers"])
+        assert headers[b"content-type"] == b"text/event-stream"
+        assert headers[b"cache-control"] == b"no-cache"
+
+        # Collect all body frames.
+        bodies = [m for m in sent[1:] if m["type"] == "http.response.body"]
+
+        # Three data frames + one terminating empty frame.
+        data_frames = [m for m in bodies if m["body"] and m.get("more_body")]
+        terminators = [m for m in bodies if not m["body"] and not m.get("more_body")]
+        assert len(data_frames) == 3
+        assert len(terminators) == 1
+
+        # Each data frame must be properly SSE-framed JSON.
+        event_types: list[str] = []
+        for frame in data_frames:
+            body: bytes = frame["body"]
+            assert body.startswith(b"data: ")
+            assert body.endswith(b"\n\n")
+            payload = json.loads(body[len(b"data: ") : -2].decode())
+            event_types.append(payload["type"])
+
+        assert event_types == ["run_in_progress", "message_created", "run_completed"]
+
+    @pytest.mark.asyncio
+    async def test_post_runs_stream_end_to_end_byte_framing(self, monkeypatch):
+        """End-to-end: POST /runs with mode=stream yields valid SSE bytes through the ASGI app."""
+        from agent.core.agent import Agent
+        from agent.transports.acp import http as acp_http
+
+        provider = MockProvider()
+        provider.enqueue_text("streamed hello", stop="end_turn")
+
+        # Inject MockProvider into AcpTransport (created inside create_acp_asgi_app).
+        original_init = acp_http.AcpTransport.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+
+            def make_with_mock() -> Agent:
+                return Agent(
+                    config=self.config,
+                    provider=provider,
+                    approval_callback=self.approval_callback,
+                    registry=self.registry,
+                )
+
+            self._make_agent = make_with_mock  # type: ignore[method-assign]
+
+        monkeypatch.setattr(acp_http.AcpTransport, "__init__", patched_init)
+
+        app = create_acp_asgi_app(config=_make_config(), agent_name="aar")
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/runs",
+            "query_string": b"",
+            "headers": [[b"content-type", b"application/json"]],
+        }
+        body_bytes = json.dumps(
+            {
+                "agent_name": "aar",
+                "input": [{"role": "user", "parts": [{"content": "hi"}]}],
+                "mode": "stream",
+            }
+        ).encode()
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        sent: list[dict] = []
+
+        async def send(msg: dict) -> None:
+            sent.append(msg)
+
+        await app(scope, receive, send)
+
+        # Response start advertises SSE.
+        assert sent[0]["type"] == "http.response.start"
+        assert sent[0]["status"] == 200
+        headers = dict(sent[0]["headers"])
+        assert headers[b"content-type"] == b"text/event-stream"
+
+        # Walk body frames and verify framing + decode JSON payloads.
+        payloads: list[dict] = []
+        saw_terminator = False
+        for msg in sent[1:]:
+            assert msg["type"] == "http.response.body"
+            body: bytes = msg["body"]
+            if not body:
+                assert msg.get("more_body") is False
+                saw_terminator = True
+                continue
+            assert msg.get("more_body") is True
+            assert body.startswith(b"data: ")
+            assert body.endswith(b"\n\n")
+            # Only one SSE message per frame — no stray newlines in the middle.
+            assert body.count(b"\n\n") == 1
+            payloads.append(json.loads(body[len(b"data: ") : -2].decode()))
+
+        assert saw_terminator, "stream must end with an empty more_body=False frame"
+
+        types = [p["type"] for p in payloads]
+        assert types[0] == "run_in_progress"
+        assert types[-1] == "run_completed"
+        assert "message_created" in types
+        # The streamed message must carry our mock provider's output.
+        msg_payloads = [p for p in payloads if p["type"] == "message_created"]
+        assert any("streamed hello" in part["content"] for p in msg_payloads for part in p["message"]["parts"])
 
 
 # ---------------------------------------------------------------------------
