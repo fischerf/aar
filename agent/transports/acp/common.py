@@ -278,3 +278,145 @@ def _available_commands() -> list[Any]:
             description="Show the active safety policy: approval mode and path restrictions",
         ),
     ]
+
+
+def _strip_line_numbers(text: str) -> str:
+    """Remove the ``read_file`` line-number prefix from numbered output.
+
+    ``read_file`` returns lines formatted as ``{n:>6}\\t{line}`` so that
+    the model can reference exact line numbers.  That prefix is useful for
+    the LLM but is visual noise in Zed's tool-call panel, so we strip it
+    before building the display content block.
+
+    Lines that don't match the pattern (e.g. shell output) are left as-is.
+    """
+    import re
+
+    return re.sub(r"^ *\d+\t", "", text, flags=re.MULTILINE)
+
+
+def _path_to_file_uri(path: str) -> str:
+    """Convert an absolute filesystem path to a ``file://`` URI.
+
+    Handles both Windows paths (``C:\\foo\\bar`` → ``file:///C:/foo/bar``)
+    and POSIX paths (``/foo/bar`` → ``file:///foo/bar``).
+    """
+    from pathlib import Path
+    from urllib.parse import quote
+
+    abs_path = str(Path(path).resolve())
+    unix = abs_path.replace("\\", "/")
+    if not unix.startswith("/"):
+        unix = "/" + unix
+    # RFC 3986 unreserved + sub-delims + "@" are all safe in path segments;
+    # include them so common characters like "!" are not percent-encoded.
+    return "file://" + quote(unix, safe="/:!$&'()*+,;=@~.-_")
+
+
+def _guess_mime_type(path: str) -> str:
+    """Return a MIME type for *path* based on its file extension.
+
+    Falls back to ``"text/plain"`` when the type cannot be determined.
+    """
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(path)
+    return mime or "text/plain"
+
+
+def _build_tool_result_content(
+    tool_name: str,
+    arguments: dict[str, Any],
+    output: str,
+    is_error: bool,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Build ACP ToolCallContent blocks and a matching raw_output dict.
+
+    Returns ``(content_blocks, raw_output)`` so callers can set both fields
+    on ``ToolCallProgress`` consistently.
+
+    * read_file  → EmbeddedResourceContentBlock (file URI + MIME type)
+    * edit_file  → FileEditToolCallContent       (diff: old_string vs new_string)
+    * write_file → FileEditToolCallContent       (diff: None vs full content)
+    * everything else / errors
+                 → ContentToolCallContent        (plain text block)
+
+    ``raw_output`` mirrors the display text so both fields stay in sync:
+    - read_file:  stripped clean text (no line-number prefix)
+    - edit_file / write_file: the short confirmation message from the tool
+    - everything else: same plain text (capped at 4 000 chars)
+    """
+    from pathlib import Path
+
+    from acp.schema import (
+        ContentToolCallContent,
+        EmbeddedResourceContentBlock,
+        FileEditToolCallContent,
+        TextContentBlock,
+        TextResourceContents,
+    )
+
+    _MAX = 4000
+
+    def _text_block(text: str) -> ContentToolCallContent:
+        return ContentToolCallContent(
+            type="content",
+            content=TextContentBlock(type="text", text=text[:_MAX]),
+        )
+
+    if is_error:
+        capped = output[:_MAX]
+        return [_text_block(capped)], {"text": capped}
+
+    name = tool_name.lower()
+
+    if name == "read_file":
+        path = arguments.get("path", "")
+        clean = _strip_line_numbers(output)
+        uri = _path_to_file_uri(path) if path else "file:///unknown"
+        mime = _guess_mime_type(path) if path else "text/plain"
+        block = ContentToolCallContent(
+            type="content",
+            content=EmbeddedResourceContentBlock(
+                type="resource",
+                resource=TextResourceContents(
+                    uri=uri,
+                    mime_type=mime,
+                    text=clean[:_MAX],
+                ),
+            ),
+        )
+        return [block], {"text": clean[:_MAX]}
+
+    if name == "edit_file":
+        path = arguments.get("path", "")
+        old_string = arguments.get("old_string", "")
+        new_string = arguments.get("new_string", "")
+        if path:
+            capped_out = output[:_MAX]
+            return [
+                FileEditToolCallContent(
+                    type="diff",
+                    path=str(Path(path).resolve()),
+                    old_text=old_string or None,
+                    new_text=new_string,
+                )
+            ], {"text": capped_out}
+
+    if name == "write_file":
+        path = arguments.get("path", "")
+        content = arguments.get("content", "")
+        if path:
+            capped_out = output[:_MAX]
+            return [
+                FileEditToolCallContent(
+                    type="diff",
+                    path=str(Path(path).resolve()),
+                    old_text=None,
+                    new_text=content[:_MAX],
+                )
+            ], {"text": capped_out}
+
+    # Default: plain text for list_directory, shell, etc.
+    capped = output[:_MAX]
+    return [_text_block(capped)], {"text": capped}

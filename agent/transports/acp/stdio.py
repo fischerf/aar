@@ -22,6 +22,7 @@ from agent.core.events import (
     StreamChunk,
     ToolCall,
     ToolResult,
+    UserMessage,
 )
 from agent.core.session import Session
 from agent.core.state import AgentState
@@ -33,6 +34,7 @@ from .common import (
     _acp_server_to_mcp_config,
     _auto_approve,
     _available_commands,
+    _build_tool_result_content,
     _extract_locations,
     _extract_text,
     _load_default_config,
@@ -168,6 +170,7 @@ class AarAcpAgent:
             SessionCapabilities,
             SessionCloseCapabilities,
             SessionListCapabilities,
+            SessionResumeCapabilities,
         )
 
         return InitializeResponse(
@@ -179,6 +182,7 @@ class AarAcpAgent:
                 session_capabilities=SessionCapabilities(
                     list=SessionListCapabilities(),
                     close=SessionCloseCapabilities(),
+                    resume=SessionResumeCapabilities(),
                 ),
             ),
             agent_info=Implementation(name="aar", title="Aar Agent", version="0.3.2"),
@@ -212,8 +216,17 @@ class AarAcpAgent:
         mcp_servers: list | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Resume a previously saved session. Returns None when not found."""
+        """Resume a previously saved session.
+
+        Per the ACP spec the Agent MUST replay the full conversation history to
+        the Client via ``session/update`` notifications (``UserMessageChunk`` and
+        ``AgentMessageChunk``) before responding to ``session/load``.
+
+        Returns ``None`` when the session is not found so the Client can fall
+        back to creating a new one.
+        """
         from acp import LoadSessionResponse
+        from acp.schema import AgentMessageChunk, TextContentBlock, UserMessageChunk
 
         try:
             validate_session_id(session_id)
@@ -227,6 +240,31 @@ class AarAcpAgent:
                     session.metadata["cwd"] = cwd
                 self._sessions[session_id] = session
                 await self._setup_mcp(session_id, mcp_servers or [])
+
+            # Replay conversation history per ACP spec.
+            # The Agent MUST replay the entire conversation via session/update
+            # notifications before responding to session/load.
+            if self._conn:
+                for event in session.events:
+                    if isinstance(event, UserMessage) and event.content:
+                        await self._conn.session_update(
+                            session_id=session_id,
+                            update=UserMessageChunk(
+                                session_update="user_message_chunk",
+                                content=TextContentBlock(type="text", text=event.content),
+                            ),
+                            source=self._agent_name,
+                        )
+                    elif isinstance(event, AssistantMessage) and event.content:
+                        await self._conn.session_update(
+                            session_id=session_id,
+                            update=AgentMessageChunk(
+                                session_update="agent_message_chunk",
+                                content=TextContentBlock(type="text", text=event.content),
+                            ),
+                            source=self._agent_name,
+                        )
+
             self._spawn(
                 self._push_available_commands(session_id),
                 name=f"push-cmds-{session_id}",
@@ -263,9 +301,7 @@ class AarAcpAgent:
                 session_cwd = s.metadata.get("cwd", "") if s.metadata else ""
                 last_ts = s.events[-1].timestamp if s.events else None
                 updated_at = (
-                    datetime.datetime.fromtimestamp(
-                        last_ts, tz=datetime.timezone.utc
-                    ).isoformat()
+                    datetime.datetime.fromtimestamp(last_ts, tz=datetime.timezone.utc).isoformat()
                     if last_ts is not None
                     else None
                 )
@@ -279,6 +315,13 @@ class AarAcpAgent:
                 )
             except Exception:
                 session_infos.append(SessionInfo(session_id=sid, cwd="", title=sid[:12]))
+        # Filter by cwd when requested (spec: "Only sessions with a matching cwd are returned")
+        if cwd:
+            session_infos = [s for s in session_infos if s.cwd == cwd]
+
+        # Newest-first — sessions with no timestamp sort to the end
+        session_infos.sort(key=lambda s: s.updated_at or "", reverse=True)
+
         return ListSessionsResponse(sessions=session_infos)
 
     async def close_session(self, session_id: str, **kwargs: Any) -> Any:
@@ -435,6 +478,8 @@ class AarAcpAgent:
                 )
                 update_tasks.append(task)
 
+        _tc_args: dict[str, dict[str, Any]] = {}
+
         def on_event(event: Event) -> None:
             nonlocal streamed_chunks, title_sent
 
@@ -472,9 +517,7 @@ class AarAcpAgent:
                     _spec.side_effects if _spec else [], event.tool_name
                 )
                 _loc_paths = _extract_locations(event.arguments)
-                _locations = (
-                    [ToolCallLocation(path=p) for p in _loc_paths] if _loc_paths else None
-                )
+                _locations = [ToolCallLocation(path=p) for p in _loc_paths] if _loc_paths else None
                 # Status MUST be "pending" — the tool hasn't started yet and
                 # may be awaiting approval. Zed only shows permission buttons
                 # for tool calls that are still in "pending" status.
@@ -489,6 +532,7 @@ class AarAcpAgent:
                         session_update="tool_call",
                     )
                 )
+                _tc_args[tc_id] = event.arguments
 
             elif isinstance(event, ToolResult):
                 tc_id = event.tool_call_id
@@ -502,12 +546,19 @@ class AarAcpAgent:
                         session_update="tool_call_update",
                     )
                 )
+                _content, _raw_output = _build_tool_result_content(
+                    event.tool_name,
+                    _tc_args.get(tc_id, {}),
+                    event.output,
+                    event.is_error,
+                )
                 _push(
                     ToolCallProgress(
                         title=event.tool_name,
                         tool_call_id=tc_id,
                         status="failed" if event.is_error else "completed",
-                        raw_output={"text": event.output[:4000]},
+                        content=_content,
+                        raw_output=_raw_output,
                         session_update="tool_call_update",
                     )
                 )
