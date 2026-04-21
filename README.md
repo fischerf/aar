@@ -64,7 +64,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 | `aar tui` | Interactive TUI | Scrollable Rich interface with live token counters |
 | `aar tui --fixed` | Interactive TUI | Full-screen Textual UI with fixed header/footer bars, mouse support |
 | `aar serve` | Remote / web | HTTP/SSE web API — use from a browser, curl, or remote agents |
-| `aar acp` | IDE integration | [ACP](https://agentcommunicationprotocol.dev) stdio agent for Zed and other ACP-compatible editors |
+| `aar acp` | IDE integration | [ACP](https://agentclientprotocol.com/) stdio agent for Zed and other ACP-compatible editors |
 | `aar acp --http` | Remote ACP | ACP over HTTP/SSE for programmatic or remote ACP clients |
 
 ## Installation
