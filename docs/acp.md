@@ -1,6 +1,6 @@
 # ACP — Agent Communication Protocol
 
-Aar implements [ACP v0.2](https://agentcommunicationprotocol.dev) in two modes:
+Aar implements [ACP v0.9.0](https://agentclientprotocol.com/) in two modes:
 
 | Mode | Command | Transport | Use case |
 |------|---------|-----------|----------|
