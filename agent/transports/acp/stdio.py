@@ -36,7 +36,6 @@ from .common import (
     _available_commands,
     _build_config_options,
     _build_mode_state,
-    _build_model_state,
     _build_tool_result_content,
     _extract_locations,
     _extract_text,
@@ -230,12 +229,18 @@ class AarAcpAgent:
         self._spawn(self._push_available_commands(sid), name=f"push-cmds-{sid}")
         logger.info("ACP: new session %s cwd=%r", sid, cwd)
         cfg = self._session_configs.get(sid, self._config)
-        return NewSessionResponse(
+        resp = NewSessionResponse(
             session_id=sid,
             modes=_build_mode_state(cfg.safety, self._session_modes.get(sid)),
-            config_options=_build_config_options(cfg.safety),
-            models=_build_model_state(cfg.provider),
+            config_options=_build_config_options(
+                cfg.safety, cfg.provider, self._session_modes.get(sid)
+            ),
         )
+        logger.debug(
+            "ACP: new_session response payload: %s",
+            resp.model_dump_json(by_alias=True, exclude_none=True),
+        )
+        return resp
 
     async def load_session(
         self,
@@ -299,11 +304,17 @@ class AarAcpAgent:
             )
             logger.info("ACP: loaded session %s (%d events)", session_id, len(session.events))
             cfg = self._session_configs.get(session_id, self._config)
-            return LoadSessionResponse(
+            resp = LoadSessionResponse(
                 modes=_build_mode_state(cfg.safety, self._session_modes.get(session_id)),
-                config_options=_build_config_options(cfg.safety),
-                models=_build_model_state(cfg.provider),
+                config_options=_build_config_options(
+                    cfg.safety, cfg.provider, self._session_modes.get(session_id)
+                ),
             )
+            logger.debug(
+                "ACP: load_session response payload: %s",
+                resp.model_dump_json(by_alias=True, exclude_none=True),
+            )
+            return resp
         except (FileNotFoundError, ValueError) as exc:
             logger.info("ACP: session %s not found (%s)", session_id, exc)
             return None
@@ -463,9 +474,10 @@ class AarAcpAgent:
         * ``review``     — approvals required for writes and execute (default)
         * ``read-only``  — only read-only operations; writes/execute disabled
 
-        Pushes a ``CurrentModeUpdate`` so the client UI tracks the change.
+        Pushes both a ``CurrentModeUpdate`` (legacy) and a ``ConfigOptionUpdate``
+        (current spec) so all client versions track the change.
         """
-        from acp.schema import CurrentModeUpdate, SetSessionModeResponse
+        from acp.schema import ConfigOptionUpdate, CurrentModeUpdate, SetSessionModeResponse
 
         validate_session_id(session_id)
         base_cfg = self._session_configs.get(session_id, self._config)
@@ -502,6 +514,7 @@ class AarAcpAgent:
         self._session_modes[session_id] = mode_id
 
         if self._conn is not None:
+            # Legacy mode update — for clients that use the older `modes` API.
             self._spawn(
                 self._conn.session_update(
                     session_id=session_id,
@@ -512,6 +525,20 @@ class AarAcpAgent:
                     source=self._agent_name,
                 ),
                 name=f"mode-update-{session_id}",
+            )
+            # Current spec: push full configOptions so the model/mode/config
+            # dropdowns stay in sync for clients that use configOptions.
+            cfg = self._session_configs.get(session_id, self._config)
+            self._spawn(
+                self._conn.session_update(
+                    session_id=session_id,
+                    update=ConfigOptionUpdate(
+                        session_update="config_option_update",
+                        config_options=_build_config_options(cfg.safety, cfg.provider, mode_id),
+                    ),
+                    source=self._agent_name,
+                ),
+                name=f"config-update-{session_id}",
             )
 
         logger.info("ACP: session %s mode → %s", session_id, mode_id)
@@ -524,32 +551,92 @@ class AarAcpAgent:
         value: Any,
         **kwargs: Any,
     ) -> Any:
-        """Update a per-session configuration option (unstable protocol).
+        """Update a per-session configuration option.
 
         Supported options:
 
+        * ``model``                 (select)  — switch the active model
+        * ``mode``                  (select)  — ``auto`` / ``review`` / ``read-only``
         * ``auto_approve_writes``   (boolean) — inverse of ``require_approval_for_writes``
         * ``auto_approve_execute``  (boolean) — inverse of ``require_approval_for_execute``
         * ``read_only``             (boolean) — sandbox to read-only tools
+
+        Always returns the **complete** updated ``configOptions`` list as
+        required by the ACP spec.
         """
         from acp.schema import SetSessionConfigOptionResponse
 
         validate_session_id(session_id)
         base_cfg = self._session_configs.get(session_id, self._config)
         safety = base_cfg.safety
+        provider = base_cfg.provider
 
-        if config_id == "auto_approve_writes":
+        if config_id == "model":
+            model_id = str(value)
+            provider_name, model = _model_id_to_provider(model_id)
+            new_provider = provider.model_copy(update={"name": provider_name, "model": model})
+            self._session_configs[session_id] = base_cfg.model_copy(
+                update={"provider": new_provider}
+            )
+            provider = new_provider
+            logger.info(
+                "ACP: session %s model → %s/%s (via set_config_option)",
+                session_id,
+                provider_name,
+                model,
+            )
+        elif config_id == "mode":
+            mode_id = str(value)
+            if mode_id == "auto":
+                new_safety = safety.model_copy(
+                    update={
+                        "require_approval_for_writes": False,
+                        "require_approval_for_execute": False,
+                        "read_only": False,
+                    }
+                )
+            elif mode_id == "review":
+                new_safety = safety.model_copy(
+                    update={
+                        "require_approval_for_writes": True,
+                        "require_approval_for_execute": True,
+                        "read_only": False,
+                    }
+                )
+            elif mode_id == "read-only":
+                new_safety = safety.model_copy(
+                    update={
+                        "require_approval_for_writes": True,
+                        "require_approval_for_execute": True,
+                        "read_only": True,
+                    }
+                )
+            else:
+                raise ValueError(f"Unknown mode: {mode_id!r}")
+            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
+            self._session_modes[session_id] = mode_id
+            safety = new_safety
+            logger.info("ACP: session %s mode → %s (via set_config_option)", session_id, mode_id)
+        elif config_id == "auto_approve_writes":
             new_safety = safety.model_copy(update={"require_approval_for_writes": not bool(value)})
+            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
+            safety = new_safety
+            logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
         elif config_id == "auto_approve_execute":
             new_safety = safety.model_copy(update={"require_approval_for_execute": not bool(value)})
+            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
+            safety = new_safety
+            logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
         elif config_id == "read_only":
             new_safety = safety.model_copy(update={"read_only": bool(value)})
+            self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
+            safety = new_safety
+            logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
         else:
             raise ValueError(f"Unknown config option: {config_id!r}")
 
-        self._session_configs[session_id] = base_cfg.model_copy(update={"safety": new_safety})
-        logger.info("ACP: session %s config %s = %r", session_id, config_id, value)
-        return SetSessionConfigOptionResponse(config_options=[])
+        config_opts = _build_config_options(safety, provider, self._session_modes.get(session_id))
+        return SetSessionConfigOptionResponse(config_options=config_opts)
 
     async def fork_session(
         self,

@@ -280,14 +280,34 @@ def _available_commands() -> list[Any]:
     ]
 
 
+def _derive_mode_id(safety_cfg: Any, current_mode_id: str | None = None) -> str:
+    """Derive the active mode ID from the safety config.
+
+    Returns *current_mode_id* unchanged when provided (explicit override).
+    Falls back to inferring the mode from the safety flags:
+
+    * ``read-only`` — when ``safety.read_only`` is set
+    * ``auto``      — when both approval flags are off
+    * ``review``    — otherwise (safe default)
+    """
+    if current_mode_id is not None:
+        return current_mode_id
+    if getattr(safety_cfg, "read_only", False):
+        return "read-only"
+    if not (
+        getattr(safety_cfg, "require_approval_for_writes", True)
+        or getattr(safety_cfg, "require_approval_for_execute", True)
+    ):
+        return "auto"
+    return "review"
+
+
 def _build_mode_state(safety_cfg: Any, current_mode_id: str | None = None) -> Any:
     """Return a ``SessionModeState`` advertising the three Aar modes.
 
-    The default ``current_mode_id`` is derived from the safety config:
-
-    * ``read-only`` if ``safety.read_only`` is set
-    * ``auto``      if both approval flags are off
-    * ``review``    otherwise (the safe default)
+    Kept for backwards compatibility — newer clients use ``configOptions``
+    (``category="mode"``).  The current mode is derived via
+    :func:`_derive_mode_id`.
     """
     from acp.schema import SessionMode, SessionModeState
 
@@ -309,100 +329,123 @@ def _build_mode_state(safety_cfg: Any, current_mode_id: str | None = None) -> An
         ),
     ]
 
-    if current_mode_id is None:
-        if getattr(safety_cfg, "read_only", False):
-            current_mode_id = "read-only"
-        elif not (
-            getattr(safety_cfg, "require_approval_for_writes", True)
-            or getattr(safety_cfg, "require_approval_for_execute", True)
-        ):
-            current_mode_id = "auto"
-        else:
-            current_mode_id = "review"
-
-    return SessionModeState(available_modes=modes, current_mode_id=current_mode_id)
+    return SessionModeState(
+        available_modes=modes,
+        current_mode_id=_derive_mode_id(safety_cfg, current_mode_id),
+    )
 
 
-def _build_config_options(safety_cfg: Any) -> list[Any]:
-    """Return the boolean ``SessionConfigOption``s Aar exposes per session."""
-    from acp.schema import SessionConfigOptionBoolean
+def _build_config_options(
+    safety_cfg: Any,
+    provider_cfg: Any = None,
+    current_mode_id: str | None = None,
+) -> list[Any]:
+    """Build the ``configOptions`` list for session setup and ``set_config_option`` responses.
 
-    return [
+    Returns options in priority order (per ACP spec, order drives prominent placement):
+
+    1. **Model** select  (``category="model"``) — only the active model from config;
+       no built-in catalogue so the picker shows exactly what ``config.json`` has wired up.
+    2. **Mode** select   (``category="mode"``)  — ``auto`` / ``review`` / ``read-only``.
+    3. ``auto_approve_writes`` boolean toggle.
+    4. ``auto_approve_execute`` boolean toggle.
+    5. ``read_only`` boolean toggle.
+
+    Clients that support ``configOptions`` SHOULD use these and ignore the
+    separate ``modes`` field (which is kept only for older client compatibility).
+    """
+    from acp.schema import (
+        SessionConfigOptionBoolean,
+        SessionConfigOptionSelect,
+        SessionConfigSelectOption,
+    )
+
+    opts: list[Any] = []
+
+    # 1. Model picker (category="model", type="select") — active model only.
+    if provider_cfg is not None:
+        model_id = str(getattr(provider_cfg, "model", "") or "aar")
+        provider_name = str(getattr(provider_cfg, "name", "") or "")
+        opts.append(
+            SessionConfigOptionSelect(
+                id="model",
+                name="Model",
+                type="select",
+                category="model",
+                description="The AI model to use for this session.",
+                current_value=model_id,
+                options=[
+                    SessionConfigSelectOption(
+                        value=model_id,
+                        name=model_id,
+                        description=f"Active model ({provider_name})"
+                        if provider_name
+                        else "Active model",
+                    )
+                ],
+            )
+        )
+
+    # 2. Mode picker (category="mode", type="select").
+    current_mode = _derive_mode_id(safety_cfg, current_mode_id)
+    opts.append(
+        SessionConfigOptionSelect(
+            id="mode",
+            name="Mode",
+            type="select",
+            category="mode",
+            description="Controls approval behavior for write and execute tool calls.",
+            current_value=current_mode,
+            options=[
+                SessionConfigSelectOption(
+                    value="auto",
+                    name="Auto",
+                    description="Run writes and shell commands without asking for approval.",
+                ),
+                SessionConfigSelectOption(
+                    value="review",
+                    name="Review",
+                    description="Ask for approval before writes and shell commands.",
+                ),
+                SessionConfigSelectOption(
+                    value="read-only",
+                    name="Read-only",
+                    description="Only read-only operations; writes and shell commands are denied.",
+                ),
+            ],
+        )
+    )
+
+    # 3-5. Fine-grain boolean toggles.
+    opts += [
         SessionConfigOptionBoolean(
             id="auto_approve_writes",
             name="Auto-approve writes",
-            description="Skip approval prompts for write/edit tools.",
             type="boolean",
+            description="Skip approval prompts for write/edit tools.",
             current_value=not getattr(safety_cfg, "require_approval_for_writes", True),
         ),
         SessionConfigOptionBoolean(
             id="auto_approve_execute",
             name="Auto-approve shell commands",
-            description="Skip approval prompts for shell/execute tools.",
             type="boolean",
+            description="Skip approval prompts for shell/execute tools.",
             current_value=not getattr(safety_cfg, "require_approval_for_execute", True),
         ),
         SessionConfigOptionBoolean(
             id="read_only",
             name="Read-only mode",
-            description="Deny writes and shell commands entirely.",
             type="boolean",
+            description="Deny writes and shell commands entirely.",
             current_value=bool(getattr(safety_cfg, "read_only", False)),
         ),
     ]
 
-
-# Built-in model catalogue surfaced in the editor's model picker. Ordered from
-# most-capable default first so Zed shows a sensible current selection when the
-# loaded config references a model outside the list.
-_BUILTIN_MODELS: list[tuple[str, str, str]] = [
-    # (model_id, display name, description)
-    ("claude-opus-4-7", "Claude Opus 4.7", "Anthropic — flagship reasoning model"),
-    ("claude-sonnet-4-6", "Claude Sonnet 4.6", "Anthropic — balanced quality / speed"),
-    ("claude-haiku-4-5", "Claude Haiku 4.5", "Anthropic — fast, cheap"),
-    ("gpt-5", "GPT-5", "OpenAI — flagship"),
-    ("gpt-4o", "GPT-4o", "OpenAI — vision-capable"),
-    ("o3", "o3", "OpenAI — reasoning"),
-    ("gemini-2.5-pro", "Gemini 2.5 Pro", "Google — long-context reasoning"),
-    ("gemini-2.5-flash", "Gemini 2.5 Flash", "Google — fast"),
-]
-
-
-def _build_model_state(provider_cfg: Any) -> Any:
-    """Return a ``SessionModelState`` for the editor's model picker.
-
-    Always lists the built-in catalogue plus the currently-loaded model (so the
-    picker can show *something* for locally-configured Ollama models, custom
-    gateway models, etc. that aren't in the catalogue).
-
-    ``current_model_id`` is taken from ``provider_cfg.model`` so the editor
-    opens with the same model that ``config.json`` has wired up.
-    """
-    from acp.schema import ModelInfo, SessionModelState
-
-    current_id = str(getattr(provider_cfg, "model", "") or "aar")
-    current_provider = str(getattr(provider_cfg, "name", "") or "")
-
-    seen: set[str] = set()
-    available: list[Any] = []
-    for model_id, name, desc in _BUILTIN_MODELS:
-        if model_id in seen:
-            continue
-        seen.add(model_id)
-        available.append(ModelInfo(model_id=model_id, name=name, description=desc))
-
-    if current_id and current_id not in seen:
-        # Pin the config's model to the front so the picker defaults to it.
-        available.insert(
-            0,
-            ModelInfo(
-                model_id=current_id,
-                name=current_id,
-                description=f"Loaded from config ({current_provider})" if current_provider else None,
-            ),
-        )
-
-    return SessionModelState(available_models=available, current_model_id=current_id)
+    logger.debug(
+        "ACP: config_options built: %s",
+        [getattr(o, "id", "?") for o in opts],
+    )
+    return opts
 
 
 def _strip_line_numbers(text: str) -> str:
