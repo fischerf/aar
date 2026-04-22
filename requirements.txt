@@ -1,0 +1,87 @@
+# Aar Agent requirements -- pinned transitive closure
+# Generated from: pip install -e .[all,dev] in a clean environment
+# Regenerate with: pip install -e .[all,dev] && pip freeze > requirements.txt
+
+# -- Core runtime --
+pydantic==2.12.5
+pydantic-core==2.41.5
+annotated-types==0.7.0
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+httpx==0.28.1
+httpcore==1.0.7
+h11==0.14.0
+certifi==2025.10.5
+idna==3.10
+sniffio==1.3.1
+anyio==4.12.1
+typer==0.24.1
+click==8.3.1
+shellingham==1.5.4
+colorama==0.4.6
+rich==14.3.4
+markdown-it-py==3.0.0
+mdurl==0.1.2
+mdit-py-plugins==0.5.0
+pygments==2.20.0
+textual==8.2.3
+textual-speedups==0.2.1
+jsonschema==4.25.1
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==0.27.1
+attrs==23.2.0
+
+# -- Anthropic provider --
+anthropic==0.94.0
+jiter==0.14.0
+
+# -- OpenAI provider --
+openai==2.31.0
+
+# -- Gemini provider --
+google-genai==1.73.1
+google-auth==2.49.0
+pyasn1==0.6.2
+pyasn1-modules==0.4.2
+rsa==4.9
+
+# -- MCP integration --
+mcp==1.27.0
+sse-starlette==3.3.3
+starlette==0.52.1
+uvicorn==0.42.0
+python-multipart==0.0.20
+websockets==16.0
+httpx-sse==0.4.3
+
+# -- ACP integration --
+agent-client-protocol==0.9.0
+pydantic-settings==2.8.1
+python-dotenv==1.1.0
+pyjwt==2.12.1
+cryptography==44.0.2
+cffi==1.17.1
+pycparser==2.22
+
+# -- Shared transitive --
+packaging==24.2
+platformdirs==4.3.7
+charset-normalizer==3.4.1
+distro==1.9.0
+requests==2.32.3
+urllib3==2.5.0
+tqdm==4.67.1
+tenacity==9.1.2
+docstring-parser==0.17.0
+annotated-doc==0.0.4
+
+# -- Windows --
+pywin32==311
+
+# -- Dev --
+pytest==9.0.3
+pytest-asyncio==1.3.0
+iniconfig==2.1.0
+pluggy==1.5.0
+ruff==0.15.10
