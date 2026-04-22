@@ -36,7 +36,7 @@ def _make_fake_tool(name: str, description: str, input_schema: dict | None = Non
 def _make_fake_text_content(text: str):
     block = MagicMock()
     block.text = text
-    del block.resource   # ensure hasattr(block, "resource") is False
+    del block.resource  # ensure hasattr(block, "resource") is False
     del block.data
     return block
 
@@ -128,8 +128,20 @@ def _make_mcp_sys_modules(tools: list | None = None, call_result_content=None):
 def fake_mcp(monkeypatch):
     """Inject a fake mcp module into sys.modules for the duration of the test."""
     tools = [
-        _make_fake_tool("echo", "Echo a message", {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}),
-        _make_fake_tool("reverse", "Reverse a string", {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
+        _make_fake_tool(
+            "echo",
+            "Echo a message",
+            {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        ),
+        _make_fake_tool(
+            "reverse",
+            "Reverse a string",
+            {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        ),
     ]
     modules, session = _make_mcp_sys_modules(tools=tools)
     for key, mod in modules.items():
@@ -145,31 +157,37 @@ def fake_mcp(monkeypatch):
 class TestContentToStr:
     def test_text_content(self):
         from agent.extensions.mcp import _content_to_str
+
         block = _make_fake_text_content("hello world")
         assert _content_to_str([block]) == "hello world"
 
     def test_multiple_text_blocks(self):
         from agent.extensions.mcp import _content_to_str
+
         blocks = [_make_fake_text_content("line1"), _make_fake_text_content("line2")]
         assert _content_to_str(blocks) == "line1\nline2"
 
     def test_empty_content(self):
         from agent.extensions.mcp import _content_to_str
+
         assert _content_to_str([]) == ""
 
     def test_image_content(self):
         from agent.extensions.mcp import _content_to_str
+
         block = _make_fake_image_content("image/jpeg")
         result = _content_to_str([block])
         assert result == "[image: image/jpeg]"
 
     def test_embedded_text_resource(self):
         from agent.extensions.mcp import _content_to_str
+
         block = _make_fake_embedded_text("embedded text")
         assert _content_to_str([block]) == "embedded text"
 
     def test_mixed_content(self):
         from agent.extensions.mcp import _content_to_str
+
         blocks = [
             _make_fake_text_content("before"),
             _make_fake_image_content("image/png"),
@@ -189,6 +207,7 @@ class TestContentToStr:
 class TestMCPServerConfig:
     def test_stdio_defaults(self):
         from agent.extensions.mcp import MCPServerConfig
+
         cfg = MCPServerConfig(name="test", command="python")
         assert cfg.transport == "stdio"
         assert cfg.prefix_tools is False
@@ -197,6 +216,7 @@ class TestMCPServerConfig:
 
     def test_http_config(self):
         from agent.extensions.mcp import MCPServerConfig
+
         cfg = MCPServerConfig(
             name="remote",
             transport="http",
@@ -209,6 +229,7 @@ class TestMCPServerConfig:
 
     def test_prefix_tools(self):
         from agent.extensions.mcp import MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="x", prefix_tools=True)
         assert cfg.prefix_tools is True
 
@@ -222,6 +243,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_list_tools_returns_tool_specs(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         async with MCPClient(cfg) as client:
             specs = await client.list_tools()
@@ -234,6 +256,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_tool_spec_fields(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         async with MCPClient(cfg) as client:
             specs = await client.list_tools()
@@ -247,7 +270,10 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_prefix_tools(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
-        cfg = MCPServerConfig(name="myserver", transport="stdio", command="python", prefix_tools=True)
+
+        cfg = MCPServerConfig(
+            name="myserver", transport="stdio", command="python", prefix_tools=True
+        )
         async with MCPClient(cfg) as client:
             specs = await client.list_tools()
 
@@ -258,6 +284,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_call_tool_returns_string(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         async with MCPClient(cfg) as client:
             result = await client.call_tool("echo", {"message": "hi"})
@@ -268,6 +295,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_call_tool_passes_arguments(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         async with MCPClient(cfg) as client:
             await client.call_tool("echo", {"message": "test", "count": 3})
@@ -278,6 +306,7 @@ class TestMCPClient:
     async def test_tool_handler_calls_mcp(self, fake_mcp):
         """The generated handler closure should call the MCP session."""
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         async with MCPClient(cfg) as client:
             specs = await client.list_tools()
@@ -289,6 +318,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_not_connected_raises(self):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         client = MCPClient(cfg)  # not entered as context manager
         with pytest.raises(RuntimeError, match="not connected"):
@@ -297,6 +327,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_missing_command_raises(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="")
         with pytest.raises(ValueError, match="command"):
             async with MCPClient(cfg):
@@ -305,6 +336,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_missing_url_raises(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="http", url="")
         with pytest.raises(ValueError, match="url"):
             async with MCPClient(cfg):
@@ -313,6 +345,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_unknown_transport_raises(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="grpc", command="x")
         with pytest.raises(ValueError, match="transport"):
             async with MCPClient(cfg):
@@ -321,6 +354,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_http_transport(self, fake_mcp):
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="http", url="https://example.com/mcp")
         async with MCPClient(cfg) as client:
             specs = await client.list_tools()
@@ -331,6 +365,7 @@ class TestMCPClient:
         # Simulate mcp not being installed
         monkeypatch.setitem(sys.modules, "mcp", None)  # type: ignore[arg-type]
         from agent.extensions.mcp import MCPClient, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         with pytest.raises(ImportError, match="mcp"):
             async with MCPClient(cfg):
@@ -346,6 +381,7 @@ class TestMCPBridge:
     @pytest.mark.asyncio
     async def test_register_all_returns_count(self, fake_mcp):
         from agent.extensions.mcp import MCPBridge, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         registry = ToolRegistry()
 
@@ -358,6 +394,7 @@ class TestMCPBridge:
     @pytest.mark.asyncio
     async def test_tools_callable_after_registration(self, fake_mcp):
         from agent.extensions.mcp import MCPBridge, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         registry = ToolRegistry()
 
@@ -383,11 +420,27 @@ class TestMCPBridge:
 
         async def fake_list_tools_a(self_):
             from agent.tools.schema import ToolSpec, SideEffect
-            return [ToolSpec(name="echo", description="Echo", handler=AsyncMock(return_value=""), side_effects=[SideEffect.EXTERNAL])]
+
+            return [
+                ToolSpec(
+                    name="echo",
+                    description="Echo",
+                    handler=AsyncMock(return_value=""),
+                    side_effects=[SideEffect.EXTERNAL],
+                )
+            ]
 
         async def fake_list_tools_b(self_):
             from agent.tools.schema import ToolSpec, SideEffect
-            return [ToolSpec(name="fetch", description="Fetch", handler=AsyncMock(return_value=""), side_effects=[SideEffect.EXTERNAL])]
+
+            return [
+                ToolSpec(
+                    name="fetch",
+                    description="Fetch",
+                    handler=AsyncMock(return_value=""),
+                    side_effects=[SideEffect.EXTERNAL],
+                )
+            ]
 
         cfgs = [
             MCPServerConfig(name="a", transport="stdio", command="x"),
@@ -396,9 +449,13 @@ class TestMCPBridge:
         registry = ToolRegistry()
 
         # Patch __aenter__ to avoid real connections
-        with patch.object(MCPClient, "__aenter__", return_value=None) as mock_enter, \
-             patch.object(MCPClient, "__aexit__", return_value=False):
-            mock_enter.side_effect = lambda self_: self_.__dict__.update({"_session": AsyncMock()}) or self_
+        with (
+            patch.object(MCPClient, "__aenter__", return_value=None) as mock_enter,
+            patch.object(MCPClient, "__aexit__", return_value=False),
+        ):
+            mock_enter.side_effect = lambda self_: (
+                self_.__dict__.update({"_session": AsyncMock()}) or self_
+            )
 
             bridge = MCPBridge(cfgs)
             bridge._clients = []
@@ -408,8 +465,10 @@ class TestMCPBridge:
             client_b = MCPClient(cfgs[1])
             client_b._session = AsyncMock()
 
-            with patch.object(client_a, "list_tools", lambda: fake_list_tools_a(client_a)), \
-                 patch.object(client_b, "list_tools", lambda: fake_list_tools_b(client_b)):
+            with (
+                patch.object(client_a, "list_tools", lambda: fake_list_tools_a(client_a)),
+                patch.object(client_b, "list_tools", lambda: fake_list_tools_b(client_b)),
+            ):
                 bridge._clients = [client_a, client_b]
                 count = await bridge.register_all(registry)
 
@@ -464,6 +523,7 @@ class TestMCPBridge:
     @pytest.mark.asyncio
     async def test_clients_property(self, fake_mcp):
         from agent.extensions.mcp import MCPBridge, MCPServerConfig
+
         cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
         async with MCPBridge([cfg]) as bridge:
             assert len(bridge.clients) == 1
@@ -471,6 +531,7 @@ class TestMCPBridge:
     @pytest.mark.asyncio
     async def test_empty_bridge(self):
         from agent.extensions.mcp import MCPBridge
+
         registry = ToolRegistry()
         async with MCPBridge([]) as bridge:
             count = await bridge.register_all(registry)
@@ -488,9 +549,7 @@ class TestLoadMCPConfig:
         from agent.extensions.mcp import load_mcp_config
 
         f = tmp_path / "mcp.json"
-        f.write_text(
-            '{"servers": [{"name": "test", "transport": "stdio", "command": "echo"}]}'
-        )
+        f.write_text('{"servers": [{"name": "test", "transport": "stdio", "command": "echo"}]}')
         configs = load_mcp_config(str(f))
         assert len(configs) == 1
         assert configs[0].name == "test"

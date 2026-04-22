@@ -61,10 +61,10 @@ class PromptLayer:
     __slots__ = ("label", "source", "path", "text", "loaded")
 
     def __init__(self, label: str, source: str, path: Path | None, text: str, loaded: bool) -> None:
-        self.label = label    # short tag, e.g. "aar-system", "global", "project-d"
+        self.label = label  # short tag, e.g. "aar-system", "global", "project-d"
         self.source = source  # human description, e.g. "~/.aar/rules.md"
-        self.path = path      # absolute Path or None for built-in
-        self.text = text      # actual content (empty string if not loaded)
+        self.path = path  # absolute Path or None for built-in
+        self.text = text  # actual content (empty string if not loaded)
         self.loaded = loaded  # False when file was missing / skipped
 
 
@@ -87,33 +87,51 @@ def _collect_layers(
     global_dir = Path.home() / ".aar"
 
     global_rules = global_dir / "rules.md"
-    layers.append(PromptLayer(
-        "global", str(global_rules), global_rules,
-        global_rules.read_text(encoding="utf-8").strip() if global_rules.is_file() else "",
-        global_rules.is_file(),
-    ))
+    layers.append(
+        PromptLayer(
+            "global",
+            str(global_rules),
+            global_rules,
+            global_rules.read_text(encoding="utf-8").strip() if global_rules.is_file() else "",
+            global_rules.is_file(),
+        )
+    )
 
     for extra in sorted((global_dir / "rules.d").glob("*.md")):
-        layers.append(PromptLayer(
-            "global-d", str(extra), extra,
-            extra.read_text(encoding="utf-8").strip(), True,
-        ))
+        layers.append(
+            PromptLayer(
+                "global-d",
+                str(extra),
+                extra,
+                extra.read_text(encoding="utf-8").strip(),
+                True,
+            )
+        )
 
     rules_dir = project_rules_dir if project_rules_dir is not None else Path(".agent")
     base = Path.cwd() / rules_dir
 
     project_rules = base / "rules.md"
-    layers.append(PromptLayer(
-        "project", str(project_rules), project_rules,
-        project_rules.read_text(encoding="utf-8").strip() if project_rules.is_file() else "",
-        project_rules.is_file(),
-    ))
+    layers.append(
+        PromptLayer(
+            "project",
+            str(project_rules),
+            project_rules,
+            project_rules.read_text(encoding="utf-8").strip() if project_rules.is_file() else "",
+            project_rules.is_file(),
+        )
+    )
 
     for extra in sorted((base / "rules.d").glob("*.md")):
-        layers.append(PromptLayer(
-            "project-d", str(extra), extra,
-            extra.read_text(encoding="utf-8").strip(), True,
-        ))
+        layers.append(
+            PromptLayer(
+                "project-d",
+                str(extra),
+                extra,
+                extra.read_text(encoding="utf-8").strip(),
+                True,
+            )
+        )
 
     return layers
 
@@ -203,10 +221,10 @@ class WslSandboxConfig(BaseModel):
     the config that references this model overrides the profile value.
     """
 
-    profile: str | None = None   # path to a distro-profile JSON (merged as base defaults)
+    profile: str | None = None  # path to a distro-profile JSON (merged as base defaults)
 
     distro: str = "aar-sandbox"
-    shell: str = "sh"            # shell binary inside the distro
+    shell: str = "sh"  # shell binary inside the distro
     workspace: str | None = None  # Windows path, auto-translated to /mnt/…; None → cwd
     # Provisioning fields (used by aar sandbox setup / reset)
     install_path: str | None = None  # None → %LOCALAPPDATA%\aar\wsl-distros\<distro>
@@ -236,7 +254,10 @@ class WslSandboxConfig(BaseModel):
             raise ValueError(f"WslSandboxConfig: profile not found: {path}")
         profile_data: dict = json.loads(path.read_text(encoding="utf-8"))
         profile_data.pop("profile", None)  # don't let the profile reference itself
-        merged = {**profile_data, **{k: v for k, v in data.items() if k != "profile" and v is not None}}
+        merged = {
+            **profile_data,
+            **{k: v for k, v in data.items() if k != "profile" and v is not None},
+        }
         merged["profile"] = str(path)
         return merged
 
@@ -312,7 +333,9 @@ class SafetyConfig(BaseModel):
     allowed_paths: list[str] = Field(default_factory=lambda: ["<cwd>/**"])
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     log_all_commands: bool = True
-    acp_approval_timeout: float = 0.0  # seconds the ACP client has to respond; 0 = wait indefinitely
+    acp_approval_timeout: float = (
+        0.0  # seconds the ACP client has to respond; 0 = wait indefinitely
+    )
 
 
 class TUIConfig(BaseModel):

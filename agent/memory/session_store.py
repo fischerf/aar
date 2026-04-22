@@ -128,9 +128,7 @@ class SessionStore:
         session = self.load(session_id)
         if len(session.events) > max_events:
             session.events = session.events[-max_events:]
-            logger.info(
-                "Compacted session %s to %d events", session_id, len(session.events)
-            )
+            logger.info("Compacted session %s to %d events", session_id, len(session.events))
         self.save(session)
         return session
 

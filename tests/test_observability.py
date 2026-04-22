@@ -23,21 +23,25 @@ def _make_session(
     s.step_count = n_steps
 
     for step in range(n_steps):
-        s.append(ProviderMeta(
-            provider="mock",
-            model="mock-1",
-            usage={"input_tokens": 10, "output_tokens": 5},
-            duration_ms=provider_ms,
-        ))
+        s.append(
+            ProviderMeta(
+                provider="mock",
+                model="mock-1",
+                usage={"input_tokens": 10, "output_tokens": 5},
+                duration_ms=provider_ms,
+            )
+        )
         for t in range(tool_calls):
             tc_id = f"tc_{step}_{t}"
             s.append(ToolCall(tool_name="echo", tool_call_id=tc_id, arguments={}))
-            s.append(ToolResult(
-                tool_call_id=tc_id,
-                tool_name="echo",
-                output="ok",
-                duration_ms=tool_ms,
-            ))
+            s.append(
+                ToolResult(
+                    tool_call_id=tc_id,
+                    tool_name="echo",
+                    output="ok",
+                    duration_ms=tool_ms,
+                )
+            )
 
     for _ in range(errors):
         s.append(ErrorEvent(message="boom", recoverable=False))
@@ -70,7 +74,7 @@ class TestSessionMetrics:
         m = session_metrics(s)
 
         assert m.total_provider_duration_ms == pytest.approx(120.0)
-        assert m.total_tool_calls == 6        # 3 steps × 2 tools
+        assert m.total_tool_calls == 6  # 3 steps × 2 tools
         assert m.total_tool_duration_ms == pytest.approx(48.0)  # 6 × 8ms
         assert len(m.steps) == 3
         assert len(m.steps[0].tool_calls) == 2
@@ -84,7 +88,11 @@ class TestSessionMetrics:
         s = Session()
         s.append(ProviderMeta(provider="m", model="m", usage={}, duration_ms=10))
         s.append(ToolCall(tool_name="bash", tool_call_id="tc_1", arguments={}))
-        s.append(ToolResult(tool_call_id="tc_1", tool_name="bash", output="Error", is_error=True, duration_ms=5))
+        s.append(
+            ToolResult(
+                tool_call_id="tc_1", tool_name="bash", output="Error", is_error=True, duration_ms=5
+            )
+        )
         m = session_metrics(s)
         assert m.total_errors == 1
         assert m.steps[0].tool_calls[0].is_error is True

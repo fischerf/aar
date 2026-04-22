@@ -482,6 +482,7 @@ class TestAarAcpAgentListSessions:
         assert info.updated_at is not None
         # Should be a valid ISO 8601 string
         import datetime
+
         datetime.datetime.fromisoformat(info.updated_at)
 
     @pytest.mark.asyncio
@@ -1420,7 +1421,7 @@ class TestToolCallPendingStatus:
         from agent.core.events import ToolResult as AarToolResult
 
         pushed: list[Any] = []
-        sdk_agent = AarAcpAgent(config=_make_config())
+        AarAcpAgent(config=_make_config())
 
         def _push(update: Any) -> None:
             pushed.append(update)
@@ -2570,7 +2571,11 @@ class TestSseByteFraming:
         assert "message_created" in types
         # The streamed message must carry our mock provider's output.
         msg_payloads = [p for p in payloads if p["type"] == "message_created"]
-        assert any("streamed hello" in part["content"] for p in msg_payloads for part in p["message"]["parts"])
+        assert any(
+            "streamed hello" in part["content"]
+            for p in msg_payloads
+            for part in p["message"]["parts"]
+        )
 
 
 # ---------------------------------------------------------------------------
