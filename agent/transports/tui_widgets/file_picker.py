@@ -18,7 +18,17 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 _IGNORE_DIRS = frozenset(
-    {".git", ".venv", "venv", "__pycache__", "node_modules", ".mypy_cache", ".ruff_cache", "dist", ".tox"}
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        ".mypy_cache",
+        ".ruff_cache",
+        "dist",
+        ".tox",
+    }
 )
 _MAX_COLLECT = 500
 _MAX_DISPLAY = 80

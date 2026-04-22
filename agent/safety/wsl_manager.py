@@ -114,8 +114,8 @@ def run_in_distro(name: str, command: str, timeout: int = 120) -> tuple[str, str
 # ---------------------------------------------------------------------------
 
 _ALPINE_ROOTFS_URL = (
-     "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/"
-     "alpine-minirootfs-3.23.0-x86_64.tar.gz"
+    "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/"
+    "alpine-minirootfs-3.23.0-x86_64.tar.gz"
 )
 
 

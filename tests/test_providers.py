@@ -811,7 +811,9 @@ class TestExtractChannelTokens:
     def test_basic(self):
         from agent.providers._thinking import extract_channel_tokens
 
-        clean, blocks = extract_channel_tokens("<|channel>thought\nsome reasoning\n<channel|>answer")
+        clean, blocks = extract_channel_tokens(
+            "<|channel>thought\nsome reasoning\n<channel|>answer"
+        )
         assert clean == "answer"
         assert len(blocks) == 1
         assert "some reasoning" in blocks[0].content

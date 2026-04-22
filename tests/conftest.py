@@ -19,8 +19,8 @@ def _isolate_user_dir(tmp_path):
     nonexistent paths inside a temp directory, so tests are hermetic
     regardless of what the developer has installed locally.
     """
-    fake_config = tmp_path / "no_config.json"       # does not exist
-    fake_mcp = tmp_path / "no_mcp_servers.json"     # does not exist
+    fake_config = tmp_path / "no_config.json"  # does not exist
+    fake_mcp = tmp_path / "no_mcp_servers.json"  # does not exist
     with (
         patch("agent.transports.cli._USER_CONFIG", fake_config),
         patch("agent.transports.cli._USER_MCP_CONFIG", fake_mcp),

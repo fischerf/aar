@@ -66,9 +66,7 @@ class PermissionManager:
                             return True
         return False
 
-    async def request_approval(
-        self, spec: ToolSpec, tc: ToolCall
-    ) -> PolicyDecision:
+    async def request_approval(self, spec: ToolSpec, tc: ToolCall) -> PolicyDecision:
         """Request human approval for a tool call.
 
         Returns ALLOW or DENY based on the human's response.
@@ -79,9 +77,7 @@ class PermissionManager:
 
         # No callback = deny by default
         if not self._approval_callback:
-            logger.warning(
-                "No approval callback configured; denying %s", spec.name
-            )
+            logger.warning("No approval callback configured; denying %s", spec.name)
             return PolicyDecision.DENY
 
         result = await self._approval_callback(spec, tc)
