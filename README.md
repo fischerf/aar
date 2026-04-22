@@ -139,12 +139,15 @@ aar acp              # stdio — for Zed and other ACP-compatible editors
 aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
 ```
 
-**Zed local dev** — add to `~/.config/zed/settings.json`:
+### Zed - local dev
+
+- add to (Linux) `~/.config/zed/settings.json`:
+- add to (Windows) `%appdata%\zed\settings.json`:
 
 ```json
 {
   "agent_servers": {
-    "Aar": {
+    "Aar Agent": {
       "type": "custom",
       "command": "aar",
       "args": ["acp"],
@@ -152,6 +155,29 @@ aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
     }
   }
 }
+```
+
+### VSCode
+
+- Requirements: Install ACP Client for VSCode: [ACP Client](https://marketplace.visualstudio.com/items?itemName=formulahendry.acp-client)
+
+- add to (Linux) `~/.config/Code/User/settings.json`:
+- add to (Windows) `%appdata%\Code\User\settings.json`:
+
+```json
+    "acp.agents": {
+        "Aar Agent": {
+       	"command": "aar",
+       	"args": [
+        		"acp",
+        		"--log-level",
+        		"DEBUG",
+        		"--log-file",
+        		"aar.log"
+       	],
+       	"env": {}
+        }
+    }
 ```
 
 See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint reference, and programmatic embedding.
