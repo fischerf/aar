@@ -1,6 +1,6 @@
 [project]
 name = "aar-agent"
-version = "0.3.2"
+version = "0.3.3.dev0"
 description = "Aar — Adaptive Action & Reasoning Agent framework"
 readme = "README.md"
 requires-python = ">=3.12.2"
