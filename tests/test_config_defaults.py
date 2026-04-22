@@ -82,11 +82,16 @@ class TestBuildConfigDefaults:
 
     def test_safety_require_approval_writes(self, fake_home):
         cfg = _build_config()
-        assert cfg.safety.require_approval_for_writes == _CANONICAL.safety.require_approval_for_writes
+        assert (
+            cfg.safety.require_approval_for_writes == _CANONICAL.safety.require_approval_for_writes
+        )
 
     def test_safety_require_approval_execute(self, fake_home):
         cfg = _build_config()
-        assert cfg.safety.require_approval_for_execute == _CANONICAL.safety.require_approval_for_execute
+        assert (
+            cfg.safety.require_approval_for_execute
+            == _CANONICAL.safety.require_approval_for_execute
+        )
 
     def test_safety_denied_paths(self, fake_home):
         cfg = _build_config()
@@ -233,8 +238,14 @@ class TestInitConfigMatchesDefaults:
         assert loaded.tools.command_timeout == canonical.tools.command_timeout
         assert loaded.tools.max_output_chars == canonical.tools.max_output_chars
         assert loaded.safety.read_only == canonical.safety.read_only
-        assert loaded.safety.require_approval_for_writes == canonical.safety.require_approval_for_writes
-        assert loaded.safety.require_approval_for_execute == canonical.safety.require_approval_for_execute
+        assert (
+            loaded.safety.require_approval_for_writes
+            == canonical.safety.require_approval_for_writes
+        )
+        assert (
+            loaded.safety.require_approval_for_execute
+            == canonical.safety.require_approval_for_execute
+        )
         assert loaded.safety.denied_paths == canonical.safety.denied_paths
         assert loaded.safety.allowed_paths == canonical.safety.allowed_paths
         assert loaded.safety.sandbox == canonical.safety.sandbox

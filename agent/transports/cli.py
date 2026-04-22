@@ -640,8 +640,8 @@ def prompt(
                 console.print(f"  {i:2}. {tag:30}  {src}  [dim]({n} chars)[/]")
             else:
                 console.print(f"  {i:2}. {tag:30}  [dim]{layer.source}  (not found — skipped)[/]")
-        loaded = sum(1 for l in layer_list if l.loaded)
-        total_chars = sum(len(l.text) for l in layer_list if l.loaded)
+        loaded = sum(1 for lyr in layer_list if lyr.loaded)
+        total_chars = sum(len(lyr.text) for lyr in layer_list if lyr.loaded)
         console.print(f"\n  [dim]{loaded} layer(s) loaded · {total_chars} total chars[/]")
         return
 
@@ -1085,7 +1085,9 @@ def init(
             " [bold]aar sandbox setup[/]."
         )
         console.print("  7. Run [bold]aar chat[/] — no flags needed.")
-        console.print("  Tip: run [bold]aar prompt --layers[/] to inspect the system prompt sources.")
+        console.print(
+            "  Tip: run [bold]aar prompt --layers[/] to inspect the system prompt sources."
+        )
     if skipped:
         console.print("\n[dim]Re-run with --force to overwrite skipped files.[/]")
 
@@ -1201,9 +1203,7 @@ def sandbox_setup(
     if packages == _DEFAULT_PACKAGES and wsl_cfg.packages:
         packages = ",".join(wsl_cfg.packages)
 
-    resolved_install = _resolve_install_path(
-        distro, install_path or wsl_cfg.install_path
-    )
+    resolved_install = _resolve_install_path(distro, install_path or wsl_cfg.install_path)
 
     # Handle existing distro
     if wm.distro_exists(distro):
@@ -1261,9 +1261,7 @@ def sandbox_setup(
     if pkg_list:
         console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
         install_cmd = wsl_cfg.package_install_command.format(packages=" ".join(pkg_list))
-        stdout, stderr, rc = wm.run_in_distro(
-            distro, f"{install_cmd} 2>&1", timeout=600
-        )
+        stdout, stderr, rc = wm.run_in_distro(distro, f"{install_cmd} 2>&1", timeout=600)
         if stdout.strip():
             console.print(f"[dim]{stdout.strip()[:1200]}[/]")
         if rc != 0:

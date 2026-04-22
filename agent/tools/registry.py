@@ -74,6 +74,7 @@ class ToolRegistry:
 def _infer_schema(fn: Callable) -> dict[str, Any]:
     """Infer a JSON schema from function type hints."""
     import typing
+
     sig = inspect.signature(fn)
     properties: dict[str, Any] = {}
     required: list[str] = []

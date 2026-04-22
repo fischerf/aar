@@ -19,7 +19,6 @@ from agent.core.events import (
     ToolCall,
     ToolResult,
 )
-from agent.transports.keybinds import KeyBind, KeyBinds
 from agent.transports.themes import ThemeRegistry
 from agent.transports.themes.builtin import (
     BUILTIN_THEMES,

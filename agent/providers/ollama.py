@@ -422,5 +422,3 @@ def _map_stop_reason(done_reason: str, has_tool_calls: bool) -> str:
     if done_reason in mapping:
         return mapping[done_reason].value
     return StopReason.END_TURN.value
-
-

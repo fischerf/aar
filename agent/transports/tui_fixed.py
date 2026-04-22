@@ -39,9 +39,8 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Horizontal, Vertical
-    from textual.screen import ModalScreen
-    from textual.widgets import Input, RichLog, Static
+    from textual.containers import Horizontal
+    from textual.widgets import RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "The fixed TUI requires the 'textual' package. "
@@ -95,8 +94,8 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
     _Block,
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
-from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
+from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
 from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
@@ -932,9 +931,7 @@ class AarFixedApp(App):
                 return
         await self.push_screen(LogViewerModal())
 
-    def on_history_text_area_at_triggered(
-        self, _event: "HistoryTextArea.AtTriggered"
-    ) -> None:
+    def on_history_text_area_at_triggered(self, _event: "HistoryTextArea.AtTriggered") -> None:
         """Open the file picker when the user types '@' in the input."""
         inp = self.query_one("#user-input", HistoryTextArea)
 
