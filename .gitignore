@@ -1,4 +1,6 @@
 .venv_release/
+dist/
+build/
 .agent/*
 !.agent/rules.md
 tools/game_mcp/
