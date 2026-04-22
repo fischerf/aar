@@ -132,7 +132,7 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or point `base_url`
 
 ## ACP — IDE integration
 
-`aar acp` starts an [Agent Communication Protocol](https://agentclientprotocol.com/) agent that editors like [Zed](https://zed.dev) connect to over stdio.
+`aar acp` starts an [Agent Client Protocol](https://agentclientprotocol.com/) agent that editors like [Zed](https://zed.dev) connect to over stdio.
 
 ```bash
 aar acp              # stdio — for Zed and other ACP-compatible editors

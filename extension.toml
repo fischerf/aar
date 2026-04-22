@@ -7,7 +7,7 @@ description = "Aar adaptive action & reasoning agent — provider-agnostic AI ag
 repository = "https://github.com/fischerf/aar"
 
 # ---------------------------------------------------------------------------
-# Agent server — speaks Agent Communication Protocol (ACP v0.2)
+# Agent server — speaks Agent Client Protocol (ACP)
 # ---------------------------------------------------------------------------
 #
 # Each platform archive is a small tarball / zip that contains only a launcher
