@@ -28,6 +28,11 @@ Bugs fixed vs. earlier draft
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.core.session import Session
+
 from rich.text import Text
 
 try:
@@ -394,4 +399,20 @@ class CompanionPanel(Static):
     def apply_theme(self, theme: Theme) -> None:
         """Update theme reference (called on theme cycle)."""
         self._theme = theme
+        self.refresh()
+
+    def bootstrap_from_session(self, session: "Session") -> None:
+        """Restore companion progress from a resumed session.
+
+        Called by :class:`~agent.transports.tui_fixed.AarFixedApp` immediately
+        after loading a ``--session``.  Progress is derived purely from the
+        session's event history — no separate companion save-file is needed.
+
+        The companion level and step count are recovered by scanning the
+        session's ``ToolCall`` events plus any ``companion_baseline`` watermark
+        stored in ``session.metadata`` (written by ``SessionStore.compact()``
+        before it prunes old events).  This means progress is infinite and
+        survives sliding-window context compaction transparently.
+        """
+        self._engine.bootstrap_from_session(session)
         self.refresh()

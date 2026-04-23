@@ -765,6 +765,12 @@ class AarFixedApp(App):
                 self._session = self._store.load(self._session_id)
                 header.session_id = self._session.session_id
                 header.refresh()
+                # Restore companion progress derived from the session's event history.
+                # No separate save-file is needed: tool-call and error counts are
+                # counted from session.events plus the companion_baseline watermark
+                # that SessionStore.compact() writes before pruning old events.
+                if cp_cfg.enabled and self._renderer and self._renderer._companion is not None:
+                    self._renderer._companion.bootstrap_from_session(self._session)
                 loop = asyncio.get_running_loop()
                 loop.create_task(
                     chat_body._mount_block(

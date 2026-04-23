@@ -27,6 +27,11 @@ Level 5: 50 steps  — cosmic
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.core.session import Session
+
 from dataclasses import dataclass
 from enum import Enum
 
@@ -178,6 +183,30 @@ class CompanionEngine:
         if self.mood in (Mood.HAPPY, Mood.FOCUSED, Mood.STRESSED, Mood.SLEEPING):
             self.on_idle()
 
+    def bootstrap_from_session(self, session: "Session") -> None:
+        """Seed engine state from a loaded session without replaying events.
+
+        Called when the TUI resumes a ``--session`` so the companion's
+        accumulated progress (level, steps, errors) is restored.  Mood is
+        initialised to the calm resting state; the periodic git-health poll
+        will update it within the first poll interval.
+
+        The session needs no special companion-specific fields: progress is
+        derived from the ``ToolCall`` and ``ErrorEvent`` counts in
+        ``session.events``, augmented by the ``companion_baseline`` watermark
+        that ``SessionStore.compact()`` writes before truncating old events.
+        """
+        stats = companion_stats_from_session(session)
+        self.steps = stats["steps"]
+        self.errors = stats["errors"]
+        self.level = steps_to_level(self.steps)
+        # Settle into a resting mood; git health poll will refine it shortly.
+        self.mood = Mood.HAPPY
+        self._level_up_ticks = 0
+        self._idle_ticks = 0
+        # on_idle() respects the git_health already stored on the engine
+        self.on_idle()
+
     def tick(self) -> None:
         """Animation tick (~2x per second).
 
@@ -203,6 +232,35 @@ class CompanionEngine:
     def xp(self) -> float:
         """XP progress within the current level (0.0–1.0)."""
         return xp_fraction(self.steps, self.level)
+
+
+# ---------------------------------------------------------------------------
+# Session-derived progress
+# ---------------------------------------------------------------------------
+
+
+def companion_stats_from_session(session: "Session") -> dict[str, int]:
+    """Derive companion stats from a session's event history + compaction baseline.
+
+    Returns ``{"steps": N, "errors": N}`` where:
+
+    - ``steps``  — total ``ToolCall`` events across the session's entire
+      lifetime, including any that were pruned by ``SessionStore.compact()``.
+      Compaction preserves a ``companion_baseline`` watermark in
+      ``session.metadata`` so progress is never lost.
+    - ``errors`` — same, for ``ErrorEvent`` occurrences.
+
+    This is a pure function of the session object — no I/O, no side-effects.
+    """
+    from agent.core.events import ErrorEvent, ToolCall  # lazy: avoids top-level cross-layer import
+
+    baseline: dict[str, int] = session.metadata.get("companion_baseline", {})
+    base_steps = int(baseline.get("steps", 0))
+    base_errors = int(baseline.get("errors", 0))
+
+    steps = base_steps + sum(1 for e in session.events if isinstance(e, ToolCall))
+    errors = base_errors + sum(1 for e in session.events if isinstance(e, ErrorEvent))
+    return {"steps": steps, "errors": errors}
 
 
 # ---------------------------------------------------------------------------

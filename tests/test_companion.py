@@ -12,6 +12,7 @@ from agent.transports.companion_state import (
     CompanionEngine,
     GitHealth,
     Mood,
+    companion_stats_from_session,
     get_git_health,
     steps_to_level,
     xp_fraction,
@@ -468,3 +469,187 @@ class TestGetGitHealth:
 
         assert result.dirty_files == 0
         assert result.untracked_files == 0
+
+
+# ---------------------------------------------------------------------------
+# companion_stats_from_session — derives stats from session event history
+# ---------------------------------------------------------------------------
+
+
+def _make_session_with_events(tool_calls: int = 0, errors: int = 0, baseline: dict | None = None):
+    """Build a minimal Session with the requested ToolCall / ErrorEvent counts."""
+    from agent.core.events import ErrorEvent, ToolCall
+    from agent.core.session import Session
+
+    session = Session()
+    if baseline:
+        session.metadata["companion_baseline"] = baseline
+    for _ in range(tool_calls):
+        session.events.append(ToolCall(tool_name="test_tool", tool_call_id="x"))
+    for _ in range(errors):
+        session.events.append(ErrorEvent(message="boom"))
+    return session
+
+
+class TestCompanionStatsFromSession:
+    """companion_stats_from_session — pure function, no I/O."""
+
+    def test_empty_session_returns_zeros(self) -> None:
+        session = _make_session_with_events()
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 0
+        assert stats["errors"] == 0
+
+    def test_counts_tool_calls_as_steps(self) -> None:
+        session = _make_session_with_events(tool_calls=7)
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 7
+
+    def test_counts_error_events(self) -> None:
+        session = _make_session_with_events(errors=3)
+        stats = companion_stats_from_session(session)
+        assert stats["errors"] == 3
+
+    def test_counts_both_tool_calls_and_errors(self) -> None:
+        session = _make_session_with_events(tool_calls=4, errors=2)
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 4
+        assert stats["errors"] == 2
+
+    def test_adds_baseline_steps_to_event_counts(self) -> None:
+        """Baseline watermark from compaction is included in the total."""
+        session = _make_session_with_events(tool_calls=3, baseline={"steps": 20, "errors": 0})
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 23
+
+    def test_adds_baseline_errors_to_event_counts(self) -> None:
+        session = _make_session_with_events(errors=1, baseline={"steps": 0, "errors": 5})
+        stats = companion_stats_from_session(session)
+        assert stats["errors"] == 6
+
+    def test_baseline_and_events_both_contribute(self) -> None:
+        session = _make_session_with_events(
+            tool_calls=10, errors=2, baseline={"steps": 30, "errors": 3}
+        )
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 40
+        assert stats["errors"] == 5
+
+    def test_missing_baseline_key_treated_as_zero(self) -> None:
+        """Partial baseline dict (only 'steps' present) is handled gracefully."""
+        session = _make_session_with_events(
+            tool_calls=5,
+            baseline={"steps": 10},  # 'errors' key absent
+        )
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 15
+        assert stats["errors"] == 0
+
+    def test_non_tool_call_events_are_ignored(self) -> None:
+        """AssistantMessage, UserMessage etc. do not increment steps."""
+        from agent.core.events import AssistantMessage, UserMessage
+        from agent.core.session import Session
+
+        session = Session()
+        session.events.append(UserMessage(content="hello"))
+        session.events.append(AssistantMessage(content="hi"))
+        stats = companion_stats_from_session(session)
+        assert stats["steps"] == 0
+        assert stats["errors"] == 0
+
+
+# ---------------------------------------------------------------------------
+# CompanionEngine.bootstrap_from_session — restore state on session resume
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapFromSession:
+    """CompanionEngine.bootstrap_from_session seeded from session event history."""
+
+    def test_bootstrap_empty_session_leaves_level_1(self) -> None:
+        engine = CompanionEngine()
+        session = _make_session_with_events()
+        engine.bootstrap_from_session(session)
+        assert engine.steps == 0
+        assert engine.level == 1
+
+    def test_bootstrap_counts_tool_calls(self) -> None:
+        engine = CompanionEngine()
+        session = _make_session_with_events(tool_calls=6)
+        engine.bootstrap_from_session(session)
+        assert engine.steps == 6
+        assert engine.level == 2  # threshold at 5
+
+    def test_bootstrap_counts_errors(self) -> None:
+        engine = CompanionEngine()
+        session = _make_session_with_events(errors=4)
+        engine.bootstrap_from_session(session)
+        assert engine.errors == 4
+
+    def test_bootstrap_derives_correct_level(self) -> None:
+        engine = CompanionEngine()
+        session = _make_session_with_events(tool_calls=30)
+        engine.bootstrap_from_session(session)
+        assert engine.level == 4  # threshold at 30
+
+    def test_bootstrap_reads_baseline_from_metadata(self) -> None:
+        """Progress is not lost when session events were compacted."""
+        engine = CompanionEngine()
+        # Simulate: 40 steps were compacted away, 5 remain in events
+        session = _make_session_with_events(tool_calls=5, baseline={"steps": 40, "errors": 0})
+        engine.bootstrap_from_session(session)
+        assert engine.steps == 45
+        # steps_to_level(45): 45 >= 30 → level 4, 45 < 50 → not level 5
+        assert engine.level == 4
+
+    def test_bootstrap_to_level_5_from_baseline(self) -> None:
+        engine = CompanionEngine()
+        session = _make_session_with_events(tool_calls=5, baseline={"steps": 50, "errors": 0})
+        engine.bootstrap_from_session(session)
+        assert engine.steps == 55
+        assert engine.level == 5
+
+    def test_bootstrap_resets_level_up_ticks(self) -> None:
+        engine = CompanionEngine()
+        engine._level_up_ticks = 99
+        session = _make_session_with_events()
+        engine.bootstrap_from_session(session)
+        assert engine._level_up_ticks == 0
+
+    def test_bootstrap_resets_idle_ticks(self) -> None:
+        engine = CompanionEngine()
+        engine._idle_ticks = 999
+        session = _make_session_with_events()
+        engine.bootstrap_from_session(session)
+        assert engine._idle_ticks == 0
+
+    def test_bootstrap_mood_is_happy_on_clean_git(self) -> None:
+        engine = CompanionEngine()
+        engine.git_health = GitHealth(dirty_files=0, untracked_files=0)
+        session = _make_session_with_events(tool_calls=3)
+        engine.bootstrap_from_session(session)
+        assert engine.mood == Mood.HAPPY
+
+    def test_bootstrap_mood_is_focused_on_minor_chaos(self) -> None:
+        engine = CompanionEngine()
+        engine.git_health = GitHealth(dirty_files=2, untracked_files=1)
+        session = _make_session_with_events()
+        engine.bootstrap_from_session(session)
+        assert engine.mood == Mood.FOCUSED
+
+    def test_bootstrap_mood_is_stressed_on_major_chaos(self) -> None:
+        engine = CompanionEngine()
+        engine.git_health = GitHealth(dirty_files=5, untracked_files=3)
+        session = _make_session_with_events()
+        engine.bootstrap_from_session(session)
+        assert engine.mood == Mood.STRESSED
+
+    def test_bootstrap_does_not_raise_on_missing_baseline(self) -> None:
+        """Sessions without companion_baseline in metadata are handled gracefully."""
+        engine = CompanionEngine()
+        from agent.core.session import Session
+
+        session = Session()  # metadata is {}
+        engine.bootstrap_from_session(session)
+        assert engine.steps == 0
+        assert engine.level == 1
