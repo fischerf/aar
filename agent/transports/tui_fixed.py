@@ -482,17 +482,19 @@ class FixedTUIRenderer:
                 kind="usage",
             )
 
-    def render_welcome(self) -> None:
+    def render_welcome(self, extra_commands: list[str] | None = None) -> None:
         if not self.layout.welcome.visible:
             return
         t = self.theme
+        builtin = ["help", "quit", "status", "tools", "policy", "theme", "think", "clear"]
+        cmds = builtin + list(extra_commands or [])
+        cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
             "Type your message and press Ctrl+S to send.\n"
             "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
-            "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-            "[bold]/policy[/] [bold]/theme[/] [bold]/think[/] [bold]/clear[/]\n\n"
+            f"Commands: {cmds_markup}\n\n"
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
@@ -512,6 +514,9 @@ _KB = KeyBinds()
 
 class AarFixedApp(App):
     """Full-screen Textual application for the Textual TUI mode."""
+
+    # ext_cmds is injected by run_tui_fixed after eager extension init.
+    _ext_cmds: list[str] = []
 
     # Keys come from _KB so that keybinds.py remains the single source of
     # truth.  Only Textual-specific attrs (action name, priority, show) live
@@ -784,7 +789,7 @@ class AarFixedApp(App):
                     )
                 )
 
-        self._renderer.render_welcome()
+        self._renderer.render_welcome(extra_commands=self._ext_cmds or None)
 
         # Start periodic git health polling for the companion
         if cp_cfg.enabled:
@@ -947,7 +952,12 @@ class AarFixedApp(App):
             await thinking_panel.clear_log()
         except Exception:
             pass
-        self._renderer.render_welcome()
+        _ext_cmds_now = (
+            list(self._agent._extension_manager.commands.keys())
+            if self._agent._extension_manager
+            else list(self._ext_cmds)
+        )
+        self._renderer.render_welcome(extra_commands=_ext_cmds_now or None)
 
     async def action_cancel_agent(self) -> None:
         """Ctrl+X — cancel the running agent."""
@@ -1098,6 +1108,35 @@ class AarFixedApp(App):
             return
         elif stripped.lower() == "/think":
             self._renderer.toggle_thinking()
+            return
+        elif stripped.lower() in {"/help", "/h"}:
+            _ext_cmds_now = (
+                list(self._agent._extension_manager.commands.keys())
+                if self._agent._extension_manager
+                else list(self._ext_cmds)
+            )
+            self._renderer.render_welcome(extra_commands=_ext_cmds_now or None)
+            return
+        # --- Extension slash-commands ------------------------------------
+        elif stripped.startswith("/"):
+            cmd_name = stripped[1:].split()[0].lower()
+            args_str = stripped[len(cmd_name) + 1 :].strip()
+            ext_mgr = getattr(self._agent, "_extension_manager", None)
+            if ext_mgr is not None:
+                cmds = ext_mgr.commands
+                if cmd_name in cmds:
+                    _, handler = cmds[cmd_name]
+                    ctx = ext_mgr._context
+                    try:
+                        result = handler(args_str, ctx)
+                        if result is not None:
+                            await _write(Text(str(result), style=t.dim_text))
+                    except Exception as exc:
+                        await _write(
+                            Text(f"Extension command error: {exc}", style=t.error.border_style)
+                        )
+                    return
+            await _write(Text(f"Unknown command: {stripped}", style=t.dim_text))
             return
         # --- Parse multimodal attachments --------------------------------
         content = parse_multimodal_input(stripped)
@@ -1284,6 +1323,19 @@ async def run_tui_fixed(
 
     agent = agent or Agent(config=config)
 
+    # Eagerly initialise extensions before the Textual app launches so the
+    # welcome screen can list all slash-commands (including extension ones)
+    # from the very first render.
+    try:
+        from agent.core.session import Session as _Session
+
+        _bootstrap = _Session()
+        await agent._init_extensions(_bootstrap)
+    except Exception:
+        pass  # failures are logged inside _init_extensions
+
+    _ext_cmds = list(agent._extension_manager.commands.keys()) if agent._extension_manager else []
+
     app = AarFixedApp(
         agent=agent,
         config=config,
@@ -1293,4 +1345,5 @@ async def run_tui_fixed(
         verbose=verbose,
         session_id=session_id,
     )
+    app._ext_cmds = _ext_cmds
     await app.run_async()

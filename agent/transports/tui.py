@@ -282,17 +282,19 @@ class TUIRenderer:
         )
         self.console.print(status)
 
-    def render_welcome(self) -> None:
+    def render_welcome(self, extra_commands: list[str] | None = None) -> None:
         if not self.layout.welcome.visible:
             return
         t = self.theme
+        builtin = ["help", "quit", "status", "tools", "policy", "theme", "clear"]
+        cmds = builtin + list(extra_commands or [])
+        cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         self.console.print(
             Panel(
                 "[bold]Aar Agent TUI[/]\n\n"
                 "Type your message and press Enter.\n"
                 "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
-                "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-                "[bold]/policy[/] [bold]/theme[/] [bold]/clear[/]",
+                f"Commands: {cmds_markup}",
                 border_style=t.welcome.border_style,
                 padding=t.welcome.padding,
             )
@@ -367,7 +369,18 @@ async def run_tui(
             return
 
     agent.on_event(renderer.render_event)
-    renderer.render_welcome()
+
+    # Eagerly initialise extensions so their commands are known before the
+    # welcome screen is rendered.  We need a temporary Session to satisfy
+    # _init_extensions; the real session is created (or loaded) on first run.
+    _bootstrap_session = session if session is not None else Session()
+    try:
+        await agent._init_extensions(_bootstrap_session)
+    except Exception:
+        pass  # extension load failures are already logged inside _init_extensions
+
+    _ext_cmds = list(agent._extension_manager.commands.keys()) if agent._extension_manager else []
+    renderer.render_welcome(extra_commands=_ext_cmds or None)
 
     try:
         while True:
@@ -383,6 +396,14 @@ async def run_tui(
             # Handle TUI commands
             if stripped.lower() in {"/quit", "/exit", "/q"}:
                 break
+            elif stripped.lower() in {"/help", "/h"}:
+                _ext_cmds_now = (
+                    list(agent._extension_manager.commands.keys())
+                    if agent._extension_manager
+                    else []
+                )
+                renderer.render_welcome(extra_commands=_ext_cmds_now or None)
+                continue
             elif stripped.lower() == "/status":
                 if session:
                     renderer.render_status_bar(session)
@@ -403,7 +424,12 @@ async def run_tui(
             elif stripped.lower() == "/clear":
                 renderer.console.clear()
                 session = None
-                renderer.render_welcome()
+                _ext_cmds_now = (
+                    list(agent._extension_manager.commands.keys())
+                    if agent._extension_manager
+                    else []
+                )
+                renderer.render_welcome(extra_commands=_ext_cmds_now or None)
                 continue
             elif stripped.lower().startswith("/theme"):
                 parts = stripped.split(maxsplit=1)
@@ -427,6 +453,28 @@ async def run_tui(
                             renderer.console.print(
                                 f"[{renderer.theme.error.border_style}]Unknown theme: {arg}[/]"
                             )
+                continue
+
+            # --- Extension slash-commands --------------------------------
+            elif stripped.startswith("/"):
+                cmd_name = stripped[1:].split()[0].lower()
+                args_str = stripped[len(cmd_name) + 1 :].strip()
+                ext_mgr = getattr(agent, "_extension_manager", None)
+                if ext_mgr is not None:
+                    cmds = ext_mgr.commands
+                    if cmd_name in cmds:
+                        _, handler = cmds[cmd_name]
+                        ctx = ext_mgr._context
+                        try:
+                            result = handler(args_str, ctx)
+                            if result is not None:
+                                renderer.console.print(str(result))
+                        except Exception as exc:
+                            renderer.console.print(
+                                f"[{renderer.theme.error.border_style}]Extension command error: {exc}[/]"
+                            )
+                        continue
+                renderer.console.print(f"[{renderer.theme.dim_text}]Unknown command: {stripped}[/]")
                 continue
 
             # Parse multimodal attachments (@file syntax)
