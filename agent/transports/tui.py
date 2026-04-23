@@ -463,6 +463,10 @@ async def run_tui(
                 if ext_mgr is not None:
                     cmds = ext_mgr.commands
                     if cmd_name in cmds:
+                        # Sync so commands see the current session (loaded or live),
+                        # not the empty bootstrap snapshot from _init_extensions.
+                        if session is not None:
+                            ext_mgr.update_session(session)
                         _, handler = cmds[cmd_name]
                         ctx = ext_mgr._context
                         try:

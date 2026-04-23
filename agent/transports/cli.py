@@ -321,6 +321,12 @@ async def _async_chat_loop(
         try:
             session = store.load(session_id)
             console.print(f"[dim]Resumed session {session_id}[/]")
+            # Keep extension context in sync with the resumed session so that
+            # slash-commands (e.g. /inspect) see the loaded history, not the
+            # empty bootstrap snapshot created during Agent.__init__.
+            ext_mgr = getattr(agent, "_extension_manager", None)
+            if ext_mgr is not None:
+                ext_mgr.update_session(session)
         except FileNotFoundError:
             console.print(f"[red]Session {session_id} not found[/]")
             raise typer.Exit(1)
@@ -342,8 +348,35 @@ async def _async_chat_loop(
 
             if not user_input.strip():
                 continue
-            if user_input.strip().lower() in {"/quit", "/exit", "/q"}:
+
+            stripped = user_input.strip()
+
+            if stripped.lower() in {"/quit", "/exit", "/q"}:
                 break
+
+            # --- Extension slash-commands --------------------------------
+            if stripped.startswith("/"):
+                cmd_name = stripped[1:].split()[0].lower()
+                if cmd_name not in {"quit", "exit", "q"}:
+                    args_str = stripped[len(cmd_name) + 1 :].strip()
+                    ext_mgr = getattr(agent, "_extension_manager", None)
+                    if ext_mgr is not None:
+                        cmds = ext_mgr.commands
+                        if cmd_name in cmds:
+                            # Sync session so commands see the latest state
+                            if session is not None:
+                                ext_mgr.update_session(session)
+                            _, handler = cmds[cmd_name]
+                            ctx = ext_mgr._context
+                            try:
+                                result = handler(args_str, ctx)
+                                if result is not None:
+                                    console.print(str(result))
+                            except Exception as exc:
+                                console.print(f"[red]Extension command error: {exc}[/]")
+                            continue
+                    console.print(f"[dim]Unknown command: {stripped}[/]")
+                    continue
 
             content = parse_multimodal_input(user_input)
             if isinstance(content, list):
