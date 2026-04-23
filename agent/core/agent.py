@@ -167,6 +167,11 @@ class Agent:
         if self._extension_manager is None:
             await self._init_extensions(session, cancel_event)
 
+        # Keep the extension context in sync with the live session so that
+        # extension slash-commands (e.g. /inspect) see current data.
+        if self._extension_manager is not None:
+            self._extension_manager.update_session(session)
+
         session = await run_loop(
             session=session,
             provider=self.provider,

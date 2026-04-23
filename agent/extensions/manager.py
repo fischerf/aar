@@ -68,6 +68,19 @@ class ExtensionManager:
                 count += 1
         return count
 
+    def update_session(self, session: Any) -> None:
+        """Replace the session in the shared context with a live session object.
+
+        Call this before dispatching slash-commands or after each agent.run()
+        so that extension handlers see current session data rather than the
+        bootstrap snapshot.
+        """
+        if self._context is None:
+            return
+        from dataclasses import replace
+
+        self._context = replace(self._context, session=session)
+
     def get_system_prompt_additions(self) -> str:
         """Return all system prompt additions joined by newlines."""
         parts: list[str] = []
