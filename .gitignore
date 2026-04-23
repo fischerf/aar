@@ -1,4 +1,5 @@
 .venv_release/
+aar-extensions-registry/
 dist/
 build/
 .agent/*
