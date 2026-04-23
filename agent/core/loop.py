@@ -14,7 +14,7 @@ import logging
 import time
 
 from agent.core.config import AgentConfig
-from agent.core.events import AssistantMessage, ErrorEvent, StopReason
+from agent.core.events import AssistantMessage, ErrorEvent, SessionEvent, StopReason, ToolResult
 from agent.core.guardrails import LoopGuardrails
 from agent.core.loop_helpers import (
     append_internal_user_message,
@@ -26,6 +26,8 @@ from agent.core.loop_helpers import (
 from agent.core.provider_runner import ProviderRequestFailed, provider_request
 from agent.core.session import Session, trim_to_token_budget
 from agent.core.state import AgentState
+from agent.extensions.api import BlockResult
+from agent.extensions.manager import ExtensionManager
 from agent.providers.base import Provider
 from agent.tools.execution import ToolExecutor
 
@@ -39,6 +41,7 @@ async def run_loop(
     config: AgentConfig,
     on_event=None,
     cancel_event: asyncio.Event | None = None,
+    extension_manager: ExtensionManager | None = None,
 ) -> Session:
     """Run the agent loop until completion, max steps, or timeout.
 
@@ -49,6 +52,7 @@ async def run_loop(
         config: Agent configuration.
         on_event: Optional callback called with each new event.
         cancel_event: Optional asyncio.Event; set it to request cooperative cancellation.
+        extension_manager: Optional extension manager for firing lifecycle hooks.
 
     Returns:
         The updated session.
@@ -61,11 +65,16 @@ async def run_loop(
     log = logger.getChild("loop")
     log_extra = {"session_id": session.session_id, "trace_id": session.trace_id}
 
+    if extension_manager is not None:
+        await extension_manager.fire_event("session_start", SessionEvent(action="started"))
+
     try:
         while not done and session.step_count < config.max_steps:
             if cancel_event is not None and cancel_event.is_set():
                 session.state = AgentState.CANCELLED
                 emit(session, on_event, ErrorEvent(message="Agent cancelled", recoverable=False))
+                if extension_manager is not None:
+                    await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
                 return session
 
             if config.timeout > 0.0 and time.monotonic() - start_time > config.timeout:
@@ -77,12 +86,17 @@ async def run_loop(
                         message=f"Agent timed out after {config.timeout}s", recoverable=False
                     ),
                 )
+                if extension_manager is not None:
+                    await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
                 return session
 
             session.increment_step()
             messages = session.to_messages()
             if config.context_window > 0 and config.context_strategy == "sliding_window":
                 messages = trim_to_token_budget(messages, config.context_window)
+
+            if extension_manager is not None:
+                await extension_manager.fire_event("before_turn", None)
 
             tool_schemas = tool_executor.registry.to_provider_schemas() or None
             try:
@@ -99,11 +113,18 @@ async def run_loop(
                     log_extra=log_extra,
                 )
             except ProviderRequestFailed:
+                if extension_manager is not None:
+                    await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
                 return session
 
             emit_provider_observation(session, on_event, response, provider_ms)
             if apply_usage_and_budget(session, on_event, response, config):
+                if extension_manager is not None:
+                    await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
                 return session
+
+            if extension_manager is not None:
+                await extension_manager.fire_event("after_turn", response)
 
             if guardrails.check_near_budget(session, config.token_budget, config.cost_limit):
                 log.warning(
@@ -132,10 +153,43 @@ async def run_loop(
             )
 
             if response.tool_calls:
+                # --- Extension: tool_call filtering ---
+                if extension_manager is not None:
+                    unblocked = []
+                    for tc in response.tool_calls:
+                        rv = await extension_manager.fire_event("tool_call", tc)
+                        if isinstance(rv, BlockResult):
+                            emit(session, on_event, tc)
+                            emit(
+                                session,
+                                on_event,
+                                ToolResult(
+                                    tool_call_id=tc.tool_call_id,
+                                    tool_name=tc.tool_name,
+                                    output=f"Blocked by extension: {rv.reason}",
+                                    is_error=True,
+                                ),
+                            )
+                        else:
+                            unblocked.append(tc)
+                    response.tool_calls = unblocked
+                    if not response.tool_calls:
+                        # All tool calls were blocked — emit assistant message and continue
+                        emit(
+                            session,
+                            on_event,
+                            AssistantMessage(
+                                content=response.content, stop_reason=StopReason.TOOL_USE
+                            ),
+                        )
+                        continue
+
                 guardrails.observe_tool_calls(session, response.tool_calls)
                 if guardrails.is_stuck(session):
                     log.warning(
-                        "Repetition guard triggered at step %d", session.step_count, extra=log_extra
+                        "Repetition guard triggered at step %d",
+                        session.step_count,
+                        extra=log_extra,
                     )
                     emit(
                         session,
@@ -148,6 +202,10 @@ async def run_loop(
                         ),
                     )
                     session.state = AgentState.ERROR
+                    if extension_manager is not None:
+                        await extension_manager.fire_event(
+                            "session_end", SessionEvent(action="ended")
+                        )
                     return session
 
                 # Emit ToolCall events BEFORE AssistantMessage so that
@@ -167,6 +225,14 @@ async def run_loop(
 
                 session.state = AgentState.WAITING_FOR_TOOL
                 results = await tool_executor.execute(response.tool_calls)
+
+                # --- Extension: tool_result post-processing ---
+                if extension_manager is not None:
+                    for tr in results:
+                        replacement = await extension_manager.fire_event("tool_result", tr)
+                        if isinstance(replacement, str):
+                            tr.output = replacement
+
                 for tr in results:
                     emit(session, on_event, tr)
                 session.state = AgentState.RUNNING
@@ -174,6 +240,9 @@ async def run_loop(
 
             stop = parse_stop(response.stop_reason)
             emit(session, on_event, AssistantMessage(content=response.content, stop_reason=stop))
+
+            if extension_manager is not None:
+                await extension_manager.fire_event("assistant_message", session.events[-1])
 
             if stop == StopReason.MAX_TOKENS and guardrails.should_continue_after_max_tokens(
                 session
@@ -200,9 +269,14 @@ async def run_loop(
         if session.state == AgentState.RUNNING:
             session.state = AgentState.COMPLETED
 
+        if extension_manager is not None:
+            await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
+
     except asyncio.CancelledError:
         session.state = AgentState.CANCELLED
         emit(session, on_event, ErrorEvent(message="Agent cancelled", recoverable=False))
+        if extension_manager is not None:
+            await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
         raise
 
     return session

@@ -54,8 +54,13 @@ agent/
 │   └── session_store.py      # JSONL event persistence + compaction
 │
 ├── extensions/
+│   ├── api.py                # ExtensionAPI, BlockResult, ExtensionContext, Protocols
+│   ├── loader.py             # Three-tier auto-discovery + module loading
+│   ├── manager.py            # ExtensionManager — wires extensions into the core loop
 │   ├── mcp.py                # MCP bridge (stdio + HTTP transports)
-│   └── observability.py      # session_metrics() — reads event history only
+│   ├── observability.py      # session_metrics() — reads event history only
+│   └── contrib/              # Built-in example extensions
+│       └── companion.py      # Living companion (mood, level, XP) as extension
 │
 └── transports/               # Thin I/O adapters — no business logic
     ├── cli.py                # Typer CLI (chat, run, tui, serve, acp)
@@ -360,3 +365,14 @@ All transports share the same `AgentConfig` schema. Transport-specific behavior 
 - Per-step breakdown with the same metrics
 
 No live provider or executor needed — it reads the event history only.
+
+## Extensions
+
+The extension system (`agent/extensions/`) lets third-party code hook into the agent lifecycle without touching core internals.
+
+- **`api.py`** — public surface: `ExtensionAPI` (the stable interface extensions program against), `BlockResult` (return type for blocking hooks), `ExtensionContext` (read-only snapshot of loop state passed to every hook)
+- **`loader.py`** — three-tier discovery: built-in extensions → `~/.aar/extensions/` user dir → workspace `.aar/extensions/` dir. Each tier can override the previous.
+- **`manager.py`** — runtime integration: loads extensions via the loader, wires them into the core loop, and dispatches lifecycle events (init, pre/post-step, shutdown)
+- **`contrib/`** — example/reference extensions shipped with Aar
+
+See [docs/extensions.md](extensions.md) for the full developer guide.
