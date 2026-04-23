@@ -952,9 +952,10 @@ class AarFixedApp(App):
             await thinking_panel.clear_log()
         except Exception:
             pass
+        _ext_mgr_clear = getattr(self._agent, "_extension_manager", None)
         _ext_cmds_now = (
-            list(self._agent._extension_manager.commands.keys())
-            if self._agent._extension_manager
+            list(_ext_mgr_clear.commands.keys())
+            if _ext_mgr_clear is not None
             else list(self._ext_cmds)
         )
         self._renderer.render_welcome(extra_commands=_ext_cmds_now or None)
@@ -1110,9 +1111,10 @@ class AarFixedApp(App):
             self._renderer.toggle_thinking()
             return
         elif stripped.lower() in {"/help", "/h"}:
+            _ext_mgr_help = getattr(self._agent, "_extension_manager", None)
             _ext_cmds_now = (
-                list(self._agent._extension_manager.commands.keys())
-                if self._agent._extension_manager
+                list(_ext_mgr_help.commands.keys())
+                if _ext_mgr_help is not None
                 else list(self._ext_cmds)
             )
             self._renderer.render_welcome(extra_commands=_ext_cmds_now or None)
