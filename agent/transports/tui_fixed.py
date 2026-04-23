@@ -39,7 +39,7 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Horizontal
+    from textual.containers import Horizontal, Vertical
     from textual.widgets import RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -66,6 +66,7 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
+from agent.transports.companion_state import get_git_health  # noqa: F401
 from agent.transports.keybinds import KeyBinds
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
@@ -94,6 +95,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
     _Block,
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
+from agent.transports.tui_widgets.companion import CompanionPanel  # noqa: F401
 from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
@@ -120,6 +122,7 @@ class FixedTUIRenderer:
         log: "RichLog | SelectableRichLog | None" = None,
         chat_body: ChatBody | None = None,
         thinking_panel: "ThinkingPanel | None" = None,
+        companion: "CompanionPanel | None" = None,
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
@@ -128,6 +131,7 @@ class FixedTUIRenderer:
         self._log = log
         self._chat_body = chat_body
         self._thinking_panel: ThinkingPanel | None = thinking_panel
+        self._companion: CompanionPanel | None = companion
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -245,6 +249,8 @@ class FixedTUIRenderer:
                         self._panel_thinking_active = True
                         self._thinking_panel.begin_step(self._step_count + 1)
                     self._thinking_panel.append(event.reasoning_text)
+                    if self._companion is not None:
+                        self._companion.agent_thinking()
                 elif self._thinking_visible:
                     # Fallback: no panel — stream inline to chat body (test mode)
                     if self._current_thinking is None:
@@ -269,6 +275,8 @@ class FixedTUIRenderer:
                     self._current_answer = AnswerBlock(self.theme)
                     self._mount_streaming(self._current_answer)
                 self._current_answer.append(event.text)
+                if self._companion is not None:
+                    self._companion.agent_streaming()
 
             if event.finished:
                 self._stream_in_reasoning = False
@@ -319,6 +327,8 @@ class FixedTUIRenderer:
                     raw=event.content,
                     kind="assistant",
                 )
+            if self._companion is not None:
+                self._companion.agent_idle()
             return
 
         # --- Tool call --------------------------------------------------------
@@ -359,6 +369,8 @@ class FixedTUIRenderer:
                 raw=f"Tool: {event.tool_name}\n{raw_args}",
                 kind="tool_call",
             )
+            if self._companion is not None:
+                self._companion.agent_step()
 
         # --- Tool result ------------------------------------------------------
         elif isinstance(event, ToolResult):
@@ -380,6 +392,8 @@ class FixedTUIRenderer:
                 raw=output,
                 kind="tool_result",
             )
+            if event.is_error and self._companion is not None:
+                self._companion.agent_error()
 
         # --- Reasoning block (non-streaming) ----------------------------------
         elif isinstance(event, ReasoningBlock) and event.content:
@@ -423,6 +437,8 @@ class FixedTUIRenderer:
                 raw=event.message,
                 kind="error",
             )
+            if self._companion is not None:
+                self._companion.agent_error()
 
         # --- Provider metadata -----------------------------------------------
         elif isinstance(event, ProviderMeta):
@@ -539,8 +555,12 @@ class AarFixedApp(App):
         height: 100%;
         min-height: 4;
     }
-    ThinkingPanel {
+    #right-col {
         height: 100%;
+        width: 40;
+    }
+    ThinkingPanel {
+        height: 1fr;
     }
     #input-sep {
         height: 1;
@@ -584,15 +604,27 @@ class AarFixedApp(App):
     # ------------------------------------------------------------------
 
     def _make_body_split(self) -> Horizontal:
-        """Build the horizontal body container: ChatBody + ThinkingPanel side by side."""
+        """Build the horizontal body container: ChatBody + right column (companion + thinking panel)."""
         tp_cfg = self._theme.fixed_layout.thinking_panel
+        cp_cfg = self._theme.fixed_layout.companion
         panel = ThinkingPanel(self._theme, tp_cfg)
         if tp_cfg.side == "left":
             panel.add_class("_left_side")
         body = ChatBody(id="chat-body")
+
+        # Build the right column: optional CompanionPanel stacked above ThinkingPanel
+        if cp_cfg.enabled:
+            right_col = Vertical(
+                CompanionPanel(self._theme, cp_cfg),
+                panel,
+                id="right-col",
+            )
+        else:
+            right_col = Vertical(panel, id="right-col")
+
         if tp_cfg.side == "left":
-            return Horizontal(panel, body, id="body-split")
-        return Horizontal(body, panel, id="body-split")
+            return Horizontal(right_col, body, id="body-split")
+        return Horizontal(body, right_col, id="body-split")
 
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
@@ -681,12 +713,26 @@ class AarFixedApp(App):
             config=self._config,
         )
 
+        # Wire companion panel into the renderer (if enabled)
+        cp_cfg = fl.companion
+        if cp_cfg.enabled:
+            try:
+                companion = self.query_one(CompanionPanel)
+                self._renderer._companion = companion
+            except Exception:
+                pass
+
         self._agent.on_event(self._renderer.render_event)
 
         # Apply thinking panel styles from theme
         tp_cfg = fl.thinking_panel
         thinking_panel.styles.background = tp_cfg.background
         thinking_panel.styles.width = tp_cfg.width
+        try:
+            right_col = self.query_one("#right-col")
+            right_col.styles.width = tp_cfg.width
+        except Exception:
+            pass
         sb = tp_cfg.scrollbar
         thinking_panel.styles.scrollbar_color = sb.color
         thinking_panel.styles.scrollbar_color_hover = sb.color_hover
@@ -748,6 +794,14 @@ class AarFixedApp(App):
                 )
 
         self._renderer.render_welcome()
+
+        # Start periodic git health polling for the companion
+        if cp_cfg.enabled:
+            self.run_worker(
+                self._companion_git_poll(),
+                exclusive=False,
+                name="companion-git-poll",
+            )
 
         self.query_one("#user-input", HistoryTextArea).focus()
 
@@ -829,6 +883,18 @@ class AarFixedApp(App):
             # Preserve current visibility state
             if self._renderer and not self._renderer._thinking_visible:
                 panel.styles.display = "none"
+        except Exception:
+            pass
+        try:
+            right_col = self.query_one("#right-col")
+            right_col.styles.width = theme.fixed_layout.thinking_panel.width
+        except Exception:
+            pass
+
+        # Companion panel
+        try:
+            companion = self.query_one(CompanionPanel)
+            companion.apply_theme(theme)
         except Exception:
             pass
 
@@ -1101,6 +1167,8 @@ class AarFixedApp(App):
                     )
                 except Exception:
                     pass
+            if self._renderer and self._renderer._companion is not None:
+                self._renderer._companion.agent_idle()
             self._restore_input()
             return
 
@@ -1126,6 +1194,8 @@ class AarFixedApp(App):
                 header.refresh()
 
         self._store.save(self._session)
+        if self._renderer and self._renderer._companion is not None:
+            self._renderer._companion.agent_idle()
         self._restore_input()
 
     def _restore_input(self) -> None:
@@ -1136,6 +1206,25 @@ class AarFixedApp(App):
             inp.focus()
         except Exception:
             pass
+
+    async def _companion_git_poll(self) -> None:
+        """Periodically probe git health and update the companion's mood.
+
+        Sleeps *first* so the initial probe is deferred — this keeps app
+        startup fast and ensures Textual test teardown is never blocked by
+        subprocess creation before the app has fully mounted.
+        """
+        import asyncio as _asyncio
+
+        while True:
+            await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
+            try:
+                health = await get_git_health()
+                companion = self.query_one(CompanionPanel)
+                companion.apply_git_health(health)
+            except Exception:
+                pass
+            await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
 
     def on_unmount(self) -> None:
         if self._session:
