@@ -215,7 +215,16 @@ class FixedTUIRenderer:
         self._header.thinking_enabled = self._thinking_visible
         self._header.refresh_info()
         if self._thinking_panel is not None:
-            self._thinking_panel.styles.display = "block" if self._thinking_visible else "none"
+            display = "block" if self._thinking_visible else "none"
+            self._thinking_panel.styles.display = display
+            # Also hide the parent right-column container so its fixed width
+            # (typ. 40 cols) is released back to the ChatBody's ``1fr`` track
+            # when the panel is hidden. Hiding only the panel leaves an empty
+            # 40-column gutter because the Vertical parent still participates
+            # in the Horizontal split's layout.
+            parent = getattr(self._thinking_panel, "parent", None)
+            if parent is not None and getattr(parent, "id", None) == "right-col":
+                parent.styles.display = display
         label = "shown" if self._thinking_visible else "hidden"
         self._write(
             Text(f"Thinking panel {label}", style=self.theme.dim_text),
