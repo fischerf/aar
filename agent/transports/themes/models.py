@@ -165,6 +165,10 @@ class CompanionConfig(BaseModel):
     enabled: bool = True
     name: str = "Bit"
     git_poll_interval: int = 60  # seconds between git status probes
+    # Rendering order for the inline header companion.
+    # Valid part names: "kaomoji", "xp_bar", "level", "mood", "name", "steps"
+    parts: list[str] = Field(default_factory=lambda: ["kaomoji", "xp_bar", "level", "mood"])
+    animation_interval: float = 0.4  # seconds between kaomoji animation frames
 
 
 class FixedLayoutConfig(BaseModel):

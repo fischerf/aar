@@ -47,6 +47,216 @@ from agent.transports.companion_state import CompanionEngine, GitHealth, Mood
 from agent.transports.themes.models import CompanionConfig, Theme
 
 # ---------------------------------------------------------------------------
+# Kaomoji data — single-line companion display
+# ---------------------------------------------------------------------------
+# Each mood maps to a list of animation frames (2–3 faces).
+# Selected for a coding-agent context: calm → busy → panicked progression.
+
+_KAOMOJI: dict[str, list[str]] = {
+    "happy": ["(◕‿◕)", "(◕‿◕✿)"],
+    "sleeping": ["(-.-)Zzz", "(-.-) Zzz"],
+    "focused": ["(￣ー￣)", "(¬_¬)"],
+    "thinking": ["(◔_◔)", "( ˘•ω•˘ )"],
+    "excited": ["٩(◕‿◕｡)۶", "(ﾉ^_^)ﾉ"],
+    "stressed": ["(╥_╥)", "(×_×)"],
+    "level_up": ["ヽ(^▽^)ﾉ", "(★ω★)"],
+}
+
+_KAOMOJI_MOOD_STYLES: dict[str, str] = {
+    "happy": "bold green",
+    "sleeping": "dim blue",
+    "focused": "cyan",
+    "thinking": "magenta",
+    "excited": "bold yellow",
+    "stressed": "bold red",
+    "level_up": "bold gold1",
+}
+
+_KAOMOJI_MOOD_LABELS: dict[str, str] = {
+    "happy": "content",
+    "sleeping": "zzz",
+    "focused": "focused",
+    "thinking": "thinking",
+    "excited": "excited!",
+    "stressed": "stressed!",
+    "level_up": "LV UP!",
+}
+
+_KAOMOJI_LEVEL_STYLES: dict[int, str] = {
+    1: "dim white",
+    2: "white",
+    3: "cyan",
+    4: "green",
+    5: "bold gold1",
+}
+
+_KAOMOJI_XP_WIDTH = 8  # cells of XP bar (■ / ░)
+
+
+# ---------------------------------------------------------------------------
+# KaomojiCompanion — single-line header companion widget
+# ---------------------------------------------------------------------------
+
+
+class KaomojiCompanion(Static):
+    """Single-line kaomoji companion that lives in the right side of the header bar.
+
+    Renders a compact inline display (separated from the info section by a ``│``)
+    whose parts and order are fully configurable via ``CompanionConfig.parts``:
+
+    ``  │  (◕‿◕✿)  [■■■■░░░░]  lv.2  content``
+
+    Valid part names
+    ----------------
+    ``"kaomoji"``   — animated mood face (2-frame cycle)
+    ``"xp_bar"``    — filled / empty progress bar
+    ``"level"``     — current level label  (``lv.3``)
+    ``"mood"``      — mood word            (``thinking``)
+    ``"name"``      — companion name from config
+    ``"steps"``     — lifetime step count  (``42✦``)
+
+    Agent event hooks
+    -----------------
+    Call ``agent_streaming()``, ``agent_thinking()``, ``agent_step()``,
+    ``agent_error()``, and ``agent_idle()`` from
+    :class:`~agent.transports.tui_fixed.FixedTUIRenderer`.  They update the
+    engine state and call ``refresh()`` — safe from inside the Textual event
+    loop.
+
+    Notes
+    -----
+    - Method names use the ``agent_*`` prefix to **avoid clashing** with
+      Textual's built-in ``events.Idle`` (and friends) auto-registration —
+      the ``on_idle`` name triggers an infinite repaint loop.
+    """
+
+    DEFAULT_CSS = """
+    KaomojiCompanion {
+        width: auto;
+        height: 1;
+    }
+    """
+
+    def __init__(self, theme: Theme, config: CompanionConfig) -> None:
+        super().__init__()
+        self._theme = theme
+        self._config = config
+        self._engine = CompanionEngine()
+        self._frame: int = 0
+
+    # ------------------------------------------------------------------
+    # Textual lifecycle
+    # ------------------------------------------------------------------
+
+    def on_mount(self) -> None:
+        """Start the animation timer."""
+        self.set_interval(self._config.animation_interval, self._animate)
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def render(self) -> Text:
+        """Build the companion display as a single-line ``Text`` object."""
+        engine = self._engine
+        mood = engine.mood
+        level = engine.level
+
+        mood_style = _KAOMOJI_MOOD_STYLES.get(mood.value, "white")
+        level_style = _KAOMOJI_LEVEL_STYLES.get(level, "white")
+        frames = _KAOMOJI.get(mood.value, _KAOMOJI["happy"])
+        kaomoji = frames[self._frame % len(frames)]
+
+        filled = int(engine.xp * _KAOMOJI_XP_WIDTH)
+
+        t = Text(no_wrap=True, overflow="ellipsis")
+        # Leading separator — visually separates companion from info section
+        t.append("  │  ", style="dim")
+
+        for i, part in enumerate(self._config.parts):
+            if i > 0:
+                t.append("  ", style="dim")
+
+            if part == "kaomoji":
+                t.append(kaomoji, style=mood_style)
+
+            elif part == "xp_bar":
+                t.append("[", style="dim")
+                t.append("■" * filled, style=mood_style)
+                t.append("░" * (_KAOMOJI_XP_WIDTH - filled), style="dim")
+                t.append("]", style="dim")
+
+            elif part == "level":
+                t.append(f"lv.{level}", style=level_style)
+
+            elif part == "mood":
+                label = _KAOMOJI_MOOD_LABELS.get(mood.value, mood.value)
+                t.append(label, style=mood_style)
+
+            elif part == "name":
+                t.append(self._config.name, style="dim")
+
+            elif part == "steps":
+                t.append(f"{engine.steps}✦", style="dim cyan")
+
+        return t
+
+    # ------------------------------------------------------------------
+    # Animation
+    # ------------------------------------------------------------------
+
+    def _animate(self) -> None:
+        """Advance the animation frame and tick the engine's sleep counter."""
+        self._frame += 1
+        self._engine.tick()
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # Agent event hooks — called by FixedTUIRenderer
+    # ------------------------------------------------------------------
+
+    def agent_streaming(self) -> None:
+        """LLM started emitting answer tokens."""
+        self._engine.on_streaming()
+        self.refresh()
+
+    def agent_thinking(self) -> None:
+        """LLM started emitting reasoning tokens."""
+        self._engine.on_thinking()
+        self.refresh()
+
+    def agent_step(self) -> None:
+        """A tool call was made."""
+        self._engine.on_step()
+        self.refresh()
+
+    def agent_error(self) -> None:
+        """An error occurred."""
+        self._engine.on_error()
+        self.refresh()
+
+    def agent_idle(self) -> None:
+        """Agent run completed; settle into a resting mood."""
+        self._engine.on_idle()
+        self.refresh()
+
+    def apply_git_health(self, health: GitHealth) -> None:
+        """Update git health and let the engine adjust the resting mood."""
+        self._engine.apply_git_health(health)
+        self.refresh()
+
+    def apply_theme(self, theme: Theme) -> None:
+        """Update theme reference (called on theme cycle)."""
+        self._theme = theme
+        self.refresh()
+
+    def bootstrap_from_session(self, session: "Session") -> None:
+        """Restore companion progress from a resumed session."""
+        self._engine.bootstrap_from_session(session)
+        self.refresh()
+
+
+# ---------------------------------------------------------------------------
 # ASCII art frames
 # ---------------------------------------------------------------------------
 # Structure: _ART[level][mood.value] = list of frames

@@ -95,7 +95,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
     _Block,
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
-from agent.transports.tui_widgets.companion import CompanionPanel  # noqa: F401
+from agent.transports.tui_widgets.companion import CompanionPanel, KaomojiCompanion  # noqa: F401
 from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
@@ -131,7 +131,7 @@ class FixedTUIRenderer:
         self._log = log
         self._chat_body = chat_body
         self._thinking_panel: ThinkingPanel | None = thinking_panel
-        self._companion: CompanionPanel | None = companion
+        self._companion: "KaomojiCompanion | None" = None
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -213,7 +213,7 @@ class FixedTUIRenderer:
         """Toggle the thinking side panel. Returns the new visibility state."""
         self._thinking_visible = not self._thinking_visible
         self._header.thinking_enabled = self._thinking_visible
-        self._header.refresh()
+        self._header.refresh_info()
         if self._thinking_panel is not None:
             self._thinking_panel.styles.display = "block" if self._thinking_visible else "none"
         label = "shown" if self._thinking_visible else "hidden"
@@ -239,10 +239,7 @@ class FixedTUIRenderer:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
                     self._header.streaming = True
-                    try:
-                        self._header.update(self._header.render())
-                    except Exception:
-                        self._header.refresh()
+                    self._header.refresh_info()
                 if self._thinking_panel is not None:
                     # Route reasoning to the side panel
                     if not self._panel_thinking_active:
@@ -262,10 +259,7 @@ class FixedTUIRenderer:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._header.streaming = True
-                    try:
-                        self._header.update(self._header.render())
-                    except Exception:
-                        self._header.refresh()
+                    self._header.refresh_info()
                 if self._stream_in_reasoning:
                     self._stream_in_reasoning = False
                     # Finalize inline thinking block if panel is not in use
@@ -290,10 +284,7 @@ class FixedTUIRenderer:
                 # _streaming_active stays True until AssistantMessage arrives
                 # so we know to finalize (not re-create) the answer block.
                 self._header.streaming = False
-                try:
-                    self._header.update(self._header.render())
-                except Exception:
-                    self._header.refresh()
+                self._header.refresh_info()
             return
 
         # --- Final assistant message ------------------------------------------
@@ -474,10 +465,7 @@ class FixedTUIRenderer:
             # Static.update() requires a running Textual app context.  In test
             # mode (no app) we fall back to refresh() which is a no-op outside
             # an active message pump.
-            try:
-                self._header.update(self._header.render())
-            except Exception:
-                self._header.refresh()
+            self._header.refresh_info()
 
             if not self.layout.token_usage.visible:
                 return
@@ -606,21 +594,14 @@ class AarFixedApp(App):
     def _make_body_split(self) -> Horizontal:
         """Build the horizontal body container: ChatBody + right column (companion + thinking panel)."""
         tp_cfg = self._theme.fixed_layout.thinking_panel
-        cp_cfg = self._theme.fixed_layout.companion
         panel = ThinkingPanel(self._theme, tp_cfg)
         if tp_cfg.side == "left":
             panel.add_class("_left_side")
         body = ChatBody(id="chat-body")
 
-        # Build the right column: optional CompanionPanel stacked above ThinkingPanel
-        if cp_cfg.enabled:
-            right_col = Vertical(
-                CompanionPanel(self._theme, cp_cfg),
-                panel,
-                id="right-col",
-            )
-        else:
-            right_col = Vertical(panel, id="right-col")
+        # Companion now lives in the header bar as KaomojiCompanion.
+        # The right column only holds the ThinkingPanel.
+        right_col = Vertical(panel, id="right-col")
 
         if tp_cfg.side == "left":
             return Horizontal(right_col, body, id="body-split")
@@ -713,11 +694,15 @@ class AarFixedApp(App):
             config=self._config,
         )
 
-        # Wire companion panel into the renderer (if enabled)
+        # Mount kaomoji companion into the header bar (right side) if enabled.
         cp_cfg = fl.companion
         if cp_cfg.enabled:
             try:
-                companion = self.query_one(CompanionPanel)
+                from agent.transports.tui_widgets.companion import KaomojiCompanion
+
+                header = self.query_one(HeaderBar)
+                companion = KaomojiCompanion(self._theme, cp_cfg)
+                header.mount(companion)
                 self._renderer._companion = companion
             except Exception:
                 pass
@@ -764,7 +749,7 @@ class AarFixedApp(App):
             try:
                 self._session = self._store.load(self._session_id)
                 header.session_id = self._session.session_id
-                header.refresh()
+                header.refresh_info()
                 # Restore companion progress derived from the session's event history.
                 # No separate save-file is needed: tool-call and error counts are
                 # counted from session.events plus the companion_baseline watermark
@@ -897,9 +882,9 @@ class AarFixedApp(App):
         except Exception:
             pass
 
-        # Companion panel
+        # Kaomoji companion (lives inside HeaderBar)
         try:
-            companion = self.query_one(CompanionPanel)
+            companion = self.query_one(KaomojiCompanion)
             companion.apply_theme(theme)
         except Exception:
             pass
@@ -946,7 +931,7 @@ class AarFixedApp(App):
         header.output_tokens = 0
         header.state = "idle"
         header.streaming = False
-        header.refresh()
+        header.refresh_info()
         footer.step_count = 0
         footer.refresh()
         self._renderer._step_count = 0
@@ -989,7 +974,7 @@ class AarFixedApp(App):
                     header = self.query_one(HeaderBar)
                     header.streaming = False
                     header.state = "cancelled"
-                    header.refresh()
+                    header.refresh_info()
                 except Exception:
                     pass
                 self._restore_input()
@@ -1135,7 +1120,7 @@ class AarFixedApp(App):
 
         # --- Run agent (in worker so the UI event loop stays responsive) ---
         header.state = "running"
-        header.refresh()
+        header.refresh_info()
         inp.disabled = True
         chat_body.auto_scroll = True
 
@@ -1187,7 +1172,7 @@ class AarFixedApp(App):
         header = self.query_one(HeaderBar)
         header.state = self._session.state.value
         header.session_id = self._session.session_id
-        header.refresh()
+        header.refresh_info()
 
         if self._session.state == AgentState.ERROR:
             last_error = next(
@@ -1197,7 +1182,7 @@ class AarFixedApp(App):
             if last_error and last_error.recoverable:
                 self._session.state = AgentState.COMPLETED
                 header.state = "completed"
-                header.refresh()
+                header.refresh_info()
 
         self._store.save(self._session)
         if self._renderer and self._renderer._companion is not None:
@@ -1226,7 +1211,7 @@ class AarFixedApp(App):
             await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
             try:
                 health = await get_git_health()
-                companion = self.query_one(CompanionPanel)
+                companion = self.query_one(KaomojiCompanion)
                 companion.apply_git_health(health)
             except Exception:
                 pass
