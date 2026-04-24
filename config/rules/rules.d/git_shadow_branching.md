@@ -56,7 +56,7 @@ At the very start of every session, before doing any work:
    |---|---|---|
    | **No prior sessions** | No `aar/session-*` branches | "No previous Aar sessions found. Starting fresh." |
    | **One prior session** | Exactly one `aar/session-*` branch | "Found prior session `<branch>` (last commit: `<hash> <msg>`). Resume it or start a new session?" |
-   | **Multiple sessions or forks** | Several `aar/session-*` branches | List each branch name with its tip commit and timestamp. Ask the user which one to resume, or whether to start fresh. |
+   | **Multiple sessions or branches** | Several `aar/session-*` branches | List each branch name with its tip commit and timestamp. Ask the user which one to resume, or whether to start fresh. |
 
    **d. If resuming a prior session**, check it out and reconstruct state:
    ```bash
@@ -220,34 +220,34 @@ When the user asks to undo or revert N steps:
    turns did not happen. Do not reference or rebuild the reverted changes
    unless the user explicitly asks you to.
 
-### `/fork [N]`
+### `/branch [N]`
 When the user wants to preserve the current attempt and start a fresh one from
 an earlier point — e.g. "go back 3 steps and try something different":
 
 1. **Preserve the current attempt.** Rename the active shadow branch to an
-   auto-generated name using the session ID and a fork counter (fork-1,
-   fork-2, etc.) so it is never lost:
+   auto-generated name using the session ID and a branch counter (branch-1,
+   branch-2, etc.) so it is never lost:
    ```bash
-   git branch -m aar/session-<SESSION_ID> aar/session-<SESSION_ID>-fork-<FORK_N>
+   git branch -m aar/session-<SESSION_ID> aar/session-<SESSION_ID>-branch-<BRANCH_N>
    ```
 
-   **Derive `<FORK_N>` from the branches already on disk**, not from an
+   **Derive `<BRANCH_N>` from the branches already on disk**, not from an
    in-memory counter, so numbering survives session reloads and deep
-   fork-of-fork chains:
+   branch-of-branch chains:
    ```bash
-   git branch --list "aar/session-<SESSION_ID>-fork-*"
+   git branch --list "aar/session-<SESSION_ID>-branch-*"
    # -> pick (max existing suffix + 1), or 1 if none exist.
    ```
 
-2. **Identify the fork point.** If the user said `/fork N`, count back N
+2. **Identify the branch point.** If the user said `/branch N`, count back N
    checkpoints from your recorded trail and extract that commit hash.
-   If no N was given (bare `/fork`), use the **current** checkpoint
-   (i.e. HEAD) as the fork point — this preserves the current attempt and
+   If no N was given (bare `/branch`), use the **current** checkpoint
+   (i.e. HEAD) as the branch point — this preserves the current attempt and
    lets the user try a different approach from the same point.
 
 3. **Create the new branch from that hash:**
    ```bash
-   git checkout -b aar/session-<SESSION_ID> <fork-point-hash>
+   git checkout -b aar/session-<SESSION_ID> <branch-point-hash>
    ```
    This new branch becomes the active shadow branch for the rest of the
    session. Your checkpoint counter continues from where it left off —
@@ -256,26 +256,26 @@ an earlier point — e.g. "go back 3 steps and try something different":
 4. **Truncate your working memory.** Treat the reverted turns as if they
    happened on a different timeline. Do not carry forward assumptions,
    partial implementations, or conclusions from those turns. You may
-   reference the preserved fork branch by name if the user asks you to
+   reference the preserved branch by name if the user asks you to
    compare approaches, but do not merge or re-apply its changes unless
    explicitly asked.
 
-5. **Confirm the fork to the user:**
+5. **Confirm the branch to the user:**
    ```
-   [FORK preserved=aar/session-<SESSION_ID>-fork-<FORK_N> active=aar/session-<SESSION_ID>
-    forked-from=turn-<N> hash=<short_hash>]
+   [BRANCH preserved=aar/session-<SESSION_ID>-branch-<BRANCH_N> active=aar/session-<SESSION_ID>
+    branched-from=turn-<N> hash=<short_hash>]
    ```
    Then ask: "What approach would you like to try?"
 
-**Multiple forks are allowed.** Each `/fork` produces a new auto-named branch
-whose number is one higher than the largest existing `*-fork-<K>` suffix. The
+**Multiple branches are allowed.** Each `/branch` produces a new auto-named branch
+whose number is one higher than the largest existing `*-branch-<K>` suffix. The
 user can later compare them with
-`git diff aar/session-<ID>-fork-1 aar/session-<ID>-fork-2` or ask you to
+`git diff aar/session-<ID>-branch-1 aar/session-<ID>-branch-2` or ask you to
 do so.
 
-**At `/done`**, if multiple fork branches exist, list them all by their
+**At `/done`**, if multiple preserved branches exist, list them all by their
 auto-generated names and ask which one (or which combination) should be
-squashed into the final commit. Do not silently discard any fork branch.
+squashed into the final commit. Do not silently discard any preserved branch.
 
 ### `/done` or session end
 When the user signals they are satisfied:
