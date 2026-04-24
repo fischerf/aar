@@ -53,11 +53,29 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": [
-      "<cwd>/**"
-    ],
+    "allowed_paths": ["<cwd>/**"],
     "sandbox": {
-      "mode": "local"
+      "mode": "local",
+      "local": {},
+      "linux": {
+        "workspace": null,
+        "max_memory_mb": 512
+      },
+      "windows": {
+        "workspace": null,
+        "max_memory_mb": 512,
+        "max_processes": 10,
+        "use_low_integrity": true
+      },
+      "wsl": {
+        "distro": "aar-sandbox",
+        "shell": "sh",
+        "wsl_user": null,
+        "restrict_to_workspace": true,
+        "workspace": null,
+        "install_path": null,
+        "profile": null
+      }
     },
     "log_all_commands": true,
     "acp_approval_timeout": 0.0
