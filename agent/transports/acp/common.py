@@ -260,11 +260,14 @@ def _model_id_to_provider(model_id: str) -> tuple[str, str]:
     return "ollama", model_id
 
 
-def _available_commands() -> list[Any]:
-    """Return the list of slash commands Aar exposes to ACP editors."""
+def _available_commands(extra: dict[str, str] | None = None) -> list[Any]:
+    """Return the list of slash commands Aar exposes to ACP editors.
+
+    *extra* maps command name → description for extension-registered commands.
+    """
     from acp.schema import AvailableCommand
 
-    return [
+    cmds = [
         AvailableCommand(
             name="status",
             description="Show current session info: model, provider, step count, and session ID",
@@ -278,6 +281,10 @@ def _available_commands() -> list[Any]:
             description="Show the active safety policy: approval mode and path restrictions",
         ),
     ]
+    if extra:
+        for name, desc in extra.items():
+            cmds.append(AvailableCommand(name=name, description=desc or ""))
+    return cmds
 
 
 def _derive_mode_id(safety_cfg: Any, current_mode_id: str | None = None) -> str:
