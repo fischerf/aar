@@ -225,6 +225,15 @@ class WslSandboxConfig(BaseModel):
 
     distro: str = "aar-sandbox"
     shell: str = "sh"  # shell binary inside the distro
+    # Set wsl_user to a non-root account (e.g. "user") to reduce blast radius.
+    # The aar-sandbox Alpine distro created by `aar sandbox setup` adds a "user"
+    # account; set wsl_user = "user" to run as that account instead of root.
+    wsl_user: str | None = (
+        None  # Linux user to run commands as inside the distro; None = distro default (often root)
+    )
+    restrict_to_workspace: bool = (
+        True  # use wsl --cd to pin initial cwd; prevents cd-escape in command strings
+    )
     workspace: str | None = None  # Windows path, auto-translated to /mnt/…; None → cwd
     # Provisioning fields (used by aar sandbox setup / reset)
     install_path: str | None = None  # None → %LOCALAPPDATA%\aar\wsl-distros\<distro>
