@@ -969,6 +969,75 @@ class TestSetSessionModel:
         assert session_cfg.provider.model == "claude-sonnet-4-6"
 
     @pytest.mark.asyncio
+    async def test_switches_model_by_registry_key(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "session_dir": tmp_path,
+                "providers": {
+                    "fast": ProviderConfig(name="openai", model="gpt-4o-mini", api_key="k1"),
+                    "smart": ProviderConfig(
+                        name="anthropic", model="claude-sonnet-4-6", api_key="k2"
+                    ),
+                },
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        await agent.set_session_model(model_id="fast", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "openai"
+        assert session_cfg.provider.model == "gpt-4o-mini"
+        assert session_cfg.provider.api_key == "k1"
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_model_by_registry_key(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "session_dir": tmp_path,
+                "providers": {
+                    "fast": ProviderConfig(name="openai", model="gpt-4o-mini", api_key="k1"),
+                    "smart": ProviderConfig(
+                        name="anthropic", model="claude-sonnet-4-6", api_key="k2"
+                    ),
+                },
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        resp = await agent.set_config_option(config_id="model", value="smart", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+        assert session_cfg.provider.api_key == "k2"
+        # Response should include updated config_options
+        assert resp is not None
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_model_fallback_to_prefix(self, tmp_path):
+        """When model_id is not a registry key, fall back to _model_id_to_provider."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        resp = await agent.set_config_option(
+            config_id="model", value="claude-sonnet-4-6", session_id=sid
+        )
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+
+    @pytest.mark.asyncio
     async def test_different_sessions_have_independent_models(self, tmp_path):
         config = _make_config()
         config = config.model_copy(update={"session_dir": tmp_path})
@@ -1008,11 +1077,11 @@ class TestAvailableCommands:
         assert "tools" in names
         assert "policy" in names
 
-    def test_no_model_or_clear_commands(self):
+    def test_model_command_present_clear_absent(self):
         from agent.transports.acp import _available_commands
 
         names = {c.name for c in _available_commands()}
-        assert "model" not in names
+        assert "model" in names
         assert "clear" not in names
 
     def test_all_commands_have_descriptions(self):
@@ -2664,9 +2733,7 @@ class TestExtensionCommands:
         mock_mgr.commands = {"extcmd": ("My extension command", my_handler)}
         sdk_agent._extension_managers[sid] = mock_mgr
 
-        response = await sdk_agent.prompt(
-            prompt=[{"text": "/extcmd some args"}], session_id=sid
-        )
+        response = await sdk_agent.prompt(prompt=[{"text": "/extcmd some args"}], session_id=sid)
 
         assert response.stop_reason == "end_turn"
         assert len(called_with) == 1
@@ -2732,6 +2799,7 @@ class TestExtensionCommands:
     async def test_extension_commands_in_available_commands_push(self, tmp_path):
         """AvailableCommandsUpdate includes extension commands from the session's manager."""
         from acp.schema import AvailableCommandsUpdate
+
         from agent.extensions.api import ExtensionAPI
         from agent.extensions.loader import ExtensionInfo
         from agent.extensions.manager import ExtensionManager

@@ -286,7 +286,7 @@ class TUIRenderer:
         if not self.layout.welcome.visible:
             return
         t = self.theme
-        builtin = ["help", "quit", "status", "tools", "policy", "theme", "clear"]
+        builtin = ["help", "quit", "model", "status", "tools", "policy", "theme", "clear"]
         cmds = builtin + list(extra_commands or [])
         cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         self.console.print(

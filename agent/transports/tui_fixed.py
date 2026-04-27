@@ -495,7 +495,7 @@ class FixedTUIRenderer:
         if not self.layout.welcome.visible:
             return
         t = self.theme
-        builtin = ["help", "quit", "status", "tools", "policy", "theme", "think", "clear"]
+        builtin = ["help", "quit", "model", "status", "tools", "policy", "theme", "think", "clear"]
         cmds = builtin + list(extra_commands or [])
         cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         welcome_text = (

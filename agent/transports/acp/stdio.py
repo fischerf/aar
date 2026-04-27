@@ -241,7 +241,10 @@ class AarAcpAgent:
             session_id=sid,
             modes=_build_mode_state(cfg.safety, self._session_modes.get(sid)),
             config_options=_build_config_options(
-                cfg.safety, cfg.provider, self._session_modes.get(sid)
+                cfg.safety,
+                cfg.resolve_provider(),
+                self._session_modes.get(sid),
+                providers=cfg.providers,
             ),
         )
         logger.debug(
@@ -316,7 +319,10 @@ class AarAcpAgent:
             resp = LoadSessionResponse(
                 modes=_build_mode_state(cfg.safety, self._session_modes.get(session_id)),
                 config_options=_build_config_options(
-                    cfg.safety, cfg.provider, self._session_modes.get(session_id)
+                    cfg.safety,
+                    cfg.resolve_provider(),
+                    self._session_modes.get(session_id),
+                    providers=cfg.providers,
                 ),
             )
             logger.debug(
@@ -564,7 +570,12 @@ class AarAcpAgent:
                     session_id=session_id,
                     update=ConfigOptionUpdate(
                         session_update="config_option_update",
-                        config_options=_build_config_options(cfg.safety, cfg.provider, mode_id),
+                        config_options=_build_config_options(
+                            cfg.safety,
+                            cfg.resolve_provider(),
+                            mode_id,
+                            providers=cfg.providers,
+                        ),
                     ),
                     source=self._agent_name,
                 ),
@@ -596,12 +607,18 @@ class AarAcpAgent:
         validate_session_id(session_id)
         base_cfg = self._session_configs.get(session_id, self._config)
         safety = base_cfg.safety
-        provider = base_cfg.provider
+        provider = base_cfg.resolve_provider()
 
         if config_id == "model":
             model_id = str(value)
-            provider_name, model = _model_id_to_provider(model_id)
-            new_provider = provider.model_copy(update={"name": provider_name, "model": model})
+            # Check if model_id is a named provider key in the config registry
+            if model_id in base_cfg.providers:
+                new_provider = base_cfg.providers[model_id]
+            else:
+                p_name, p_model = _model_id_to_provider(model_id)
+                new_provider = provider.model_copy(
+                    update={"name": p_name, "model": p_model},
+                )
             self._session_configs[session_id] = base_cfg.model_copy(
                 update={"provider": new_provider}
             )
@@ -609,8 +626,8 @@ class AarAcpAgent:
             logger.info(
                 "ACP: session %s model → %s/%s (via set_config_option)",
                 session_id,
-                provider_name,
-                model,
+                new_provider.name,
+                new_provider.model,
             )
         elif config_id == "mode":
             mode_id = str(value)
@@ -647,7 +664,12 @@ class AarAcpAgent:
         else:
             raise ValueError(f"Unknown config option: {config_id!r}")
 
-        config_opts = _build_config_options(safety, provider, self._session_modes.get(session_id))
+        config_opts = _build_config_options(
+            safety,
+            provider,
+            self._session_modes.get(session_id),
+            providers=base_cfg.providers,
+        )
         return SetSessionConfigOptionResponse(config_options=config_opts)
 
     async def fork_session(
@@ -917,8 +939,11 @@ class AarAcpAgent:
 
         # Handle slash commands locally — no agent loop needed
         cmd = text.strip().split()[0].lower() if text.strip().startswith("/") else ""
-        if cmd in ("/status", "/tools", "/policy"):
-            reply = self._handle_slash_command(cmd, session_id, session)
+        if cmd in ("/status", "/tools", "/policy", "/model"):
+            cmd_args = (
+                text.strip().split(maxsplit=1)[1] if len(text.strip().split(maxsplit=1)) > 1 else ""
+            )
+            reply = self._handle_slash_command(cmd, session_id, session, args=cmd_args)
             _push(update_agent_message(text_block(reply)))
             if update_tasks:
                 await asyncio.gather(*update_tasks, return_exceptions=True)
@@ -1013,10 +1038,63 @@ class AarAcpAgent:
             registry=registry,
         )
 
-    def _handle_slash_command(self, cmd: str, session_id: str, session: Session) -> str:
+    def _handle_slash_command(
+        self,
+        cmd: str,
+        session_id: str,
+        session: Session,
+        args: str = "",
+    ) -> str:
         """Return a plain-text reply for a built-in slash command."""
         cfg = self._session_configs.get(session_id, self._config)
         registry = self._session_registries.get(session_id, self._registry)
+
+        if cmd == "/model":
+            active = cfg.resolve_provider()
+            if not args:
+                lines = [
+                    f"**Active:** {active.name}/{active.model}",
+                ]
+                if cfg.providers:
+                    lines.append("")
+                    lines.append("**Available providers:**")
+                    for key, pcfg in cfg.providers.items():
+                        marker = (
+                            " *(active)*"
+                            if (pcfg.name == active.name and pcfg.model == active.model)
+                            else ""
+                        )
+                        lines.append(f"- `{key}` → {pcfg.name}/{pcfg.model}{marker}")
+                else:
+                    lines.append(
+                        "\nNo named providers configured. "
+                        "Use `/model <provider/model>` for ad-hoc switch."
+                    )
+                return "\n".join(lines)
+            # Switch
+            key = args.strip()
+            if key in cfg.providers:
+                new_provider = cfg.providers[key]
+            elif "/" in key:
+                provider_name, model = key.split("/", 1)
+                new_provider = active.model_copy(
+                    update={"name": provider_name, "model": model},
+                )
+            else:
+                provider_name, model = _model_id_to_provider(key)
+                new_provider = active.model_copy(
+                    update={"name": provider_name, "model": model},
+                )
+            self._session_configs[session_id] = cfg.model_copy(
+                update={"provider": new_provider},
+            )
+            logger.info(
+                "ACP: session %s model → %s/%s (via /model)",
+                session_id,
+                new_provider.name,
+                new_provider.model,
+            )
+            return f"Switched to **{new_provider.name}/{new_provider.model}**"
 
         if cmd == "/status":
             lines = [
