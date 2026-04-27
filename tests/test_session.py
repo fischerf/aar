@@ -384,6 +384,117 @@ class TestSessionPersistence:
 
 
 # ---------------------------------------------------------------------------
+# Compact — companion baseline watermark
+# ---------------------------------------------------------------------------
+
+
+class TestCompactCompanionBaseline:
+    """compact() must roll ToolCall / ErrorEvent counts into companion_baseline
+    before truncating events so the companion's lifetime progress is never lost."""
+
+    def test_compact_writes_companion_baseline(self, tmp_dir: Path):
+        """After compaction companion_stats_from_session still returns the
+        full lifetime counts (baseline covers pruned events, remaining events
+        are added on top — no double-counting)."""
+        from agent.core.events import ErrorEvent, ToolCall
+        from agent.transports.companion_state import companion_stats_from_session
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(8):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        for _ in range(2):
+            s.events.append(ErrorEvent(message="boom"))
+        store.save(s)
+
+        store.compact(s.session_id, max_events=5)
+        reloaded = store.load(s.session_id)
+
+        # Only 5 events remain, but the full 8 steps / 2 errors are recoverable
+        assert len(reloaded.events) == 5
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 8
+        assert stats["errors"] == 2
+
+    def test_compact_baseline_accumulates_across_multiple_compactions(self, tmp_dir: Path):
+        """A second compaction adds to the watermark set by the first, and
+        companion_stats_from_session always returns the correct lifetime total."""
+        from agent.core.events import ToolCall
+        from agent.transports.companion_state import companion_stats_from_session
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        # First batch: 6 tool calls
+        for _ in range(6):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+        store.compact(s.session_id, max_events=3)  # prunes 3, baseline steps=3, keeps 3
+
+        # Add 4 more tool calls to the saved session, then compact again
+        s2 = store.load(s.session_id)
+        for _ in range(4):
+            s2.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s2)
+        store.compact(s2.session_id, max_events=3)  # prunes 4 more, baseline=3+4=7, keeps 3
+
+        # The end-to-end check: lifetime total is always 6 + 4 = 10
+        reloaded = store.load(s.session_id)
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 10
+
+    def test_compact_baseline_is_saved_to_disk(self, tmp_dir: Path):
+        """The baseline watermark survives a save/load round-trip, and
+        companion_stats_from_session recovers the correct lifetime total."""
+        from agent.core.events import ToolCall
+        from agent.transports.companion_state import companion_stats_from_session
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(5):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+        store.compact(s.session_id, max_events=2)
+
+        reloaded = store.load(s.session_id)
+        # 2 events remain; the other 3 were pruned and recorded in the baseline.
+        assert len(reloaded.events) == 2
+        # End-to-end: full lifetime count is still recoverable.
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 5
+
+    def test_compact_no_op_does_not_write_baseline(self, tmp_dir: Path):
+        """When events are under the limit, no baseline is written."""
+        from agent.core.events import ToolCall
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(3):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+
+        compacted = store.compact(s.session_id, max_events=100)
+        assert "companion_baseline" not in compacted.metadata
+
+    def test_compact_baseline_used_by_companion_stats(self, tmp_dir: Path):
+        """companion_stats_from_session recovers lifetime totals after compaction."""
+        from agent.core.events import ToolCall
+        from agent.transports.companion_state import companion_stats_from_session
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(12):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+        store.compact(s.session_id, max_events=4)
+
+        reloaded = store.load(s.session_id)
+        # Only 4 events remain, but the baseline covers the other 8
+        assert len(reloaded.events) == 4
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 12
+
+
+# ---------------------------------------------------------------------------
 # Session resumption
 # ---------------------------------------------------------------------------
 

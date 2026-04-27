@@ -425,6 +425,33 @@ if pricing:
 
 `get_pricing()` uses prefix matching against a built-in pricing table, so `"claude-sonnet-4-20250514"` matches the `claude-sonnet-4` entry. If no match is found it returns `None` and cost fields default to `0.0`.
 
+## Extensions
+
+Aar's extension API lets you hook into the agent lifecycle, register custom tools, add slash-commands, and append to the system prompt — all without modifying core code.
+
+```python
+from agent.extensions.api import ExtensionAPI, ExtensionContext
+
+def register(api: ExtensionAPI) -> None:
+    @api.on("tool_call")
+    def guard(event, ctx: ExtensionContext):
+        if "rm -rf" in event.arguments.get("command", ""):
+            return api.block("Blocked by extension")
+        return None
+
+    @api.tool(
+        name="hello",
+        description="Say hello",
+        input_schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    )
+    def hello(name: str, ctx: ExtensionContext) -> str:
+        return f"Hello, {name}!"
+```
+
+Place the file at `~/.aar/extensions/my_ext.py` or `.agent/extensions/my_ext.py` and it will be auto-discovered.
+
+See [Extensions](extensions.md) for the full developer guide — event hooks, tools, commands, auto-discovery, publishing to PyPI, and the CLI commands (`aar install`, `aar extensions list`, `aar extensions inspect`).
+
 ## Testing
 
 ```bash

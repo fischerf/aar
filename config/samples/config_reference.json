@@ -1,0 +1,265 @@
+{
+  "provider": "claude",
+  "providers": {
+    "claude": {
+      "name": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 8192,
+      "temperature": 0.0,
+      "context_window": 1000000,
+      "token_budget": 500000,
+      "cost_limit": 5.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "timeout": null
+      }
+    },
+    "openai": {
+      "name": "openai",
+      "model": "gpt-5.4-mini",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 8192,
+      "temperature": 0.0,
+      "context_window": 200000,
+      "token_budget": 500000,
+      "cost_limit": 5.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "timeout": null
+      }
+    },
+    "gemini-flash": {
+      "name": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 8192,
+      "temperature": 0.0,
+      "context_window": 1000000,
+      "token_budget": 500000,
+      "cost_limit": 5.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "thinking_budget": 0,
+        "timeout": 120.0
+      }
+    },
+    "gemini-pro": {
+      "name": "gemini",
+      "model": "gemini-2.5-pro",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 16384,
+      "temperature": 0.0,
+      "context_window": 1000000,
+      "token_budget": 300000,
+      "cost_limit": 10.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "thinking_budget": -1,
+        "timeout": 180.0
+      }
+    },
+    "gemma": {
+      "name": "ollama",
+      "model": "gemma4:e4b",
+      "api_key": "",
+      "base_url": "http://localhost:11434",
+      "max_tokens": 8192,
+      "temperature": 0.6,
+      "context_window": 32768,
+      "token_budget": 0,
+      "cost_limit": 0.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "num_ctx": 32768,
+        "top_p": 0.95,
+        "top_k": 64,
+        "min_p": 0.0,
+        "supports_reasoning": true,
+        "supports_tools": true,
+        "supports_vision": true,
+        "keep_alive": "10m",
+        "read_timeout": null
+      }
+    },
+    "deepseek": {
+      "name": "ollama",
+      "model": "deepseek-r1:8b",
+      "api_key": "",
+      "base_url": "http://localhost:11434",
+      "max_tokens": 8192,
+      "temperature": 0.6,
+      "context_window": 32768,
+      "token_budget": 0,
+      "cost_limit": 0.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "num_ctx": 32768,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "supports_reasoning": true,
+        "supports_tools": false,
+        "supports_vision": true,
+        "keep_alive": "10m",
+        "read_timeout": null
+      }
+    },
+    "qwen": {
+      "name": "ollama",
+      "model": "qwen3.5:9b",
+      "api_key": "",
+      "base_url": "http://localhost:11434",
+      "max_tokens": 8192,
+      "temperature": 0.6,
+      "context_window": 32768,
+      "token_budget": 0,
+      "cost_limit": 0.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "num_ctx": 32768,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "supports_reasoning": true,
+        "supports_tools": true,
+        "supports_vision": true,
+        "keep_alive": "10m",
+        "read_timeout": null
+      }
+    },
+    "omnicoder": {
+      "name": "ollama",
+      "model": "carstenuhlig/omnicoder-2-9b",
+      "api_key": "",
+      "base_url": "http://localhost:11434",
+      "max_tokens": 8192,
+      "temperature": 0.6,
+      "context_window": 32768,
+      "token_budget": 0,
+      "cost_limit": 0.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "supports_reasoning": true,
+        "supports_tools": true,
+        "supports_vision": false,
+        "keep_alive": "10m",
+        "read_timeout": null
+      }
+    }
+  },
+  "tools": {
+    "enabled_builtins": [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "list_directory",
+      "bash"
+    ],
+    "bash_default_timeout": 120,
+    "command_timeout": 300,
+    "max_output_chars": 50000
+  },
+  "safety": {
+    "read_only": false,
+    "require_approval_for_writes": true,
+    "require_approval_for_execute": true,
+    "denied_paths": [
+      "/etc/shadow",
+      "/etc/passwd",
+      "/etc/sudoers",
+      "/etc/sudoers.d/**",
+      "**/.env",
+      "**/.env.*",
+      "**/credentials",
+      "**/credentials.*",
+      "**/secrets",
+      "**/secrets.*",
+      "**/*.pem",
+      "**/*.key",
+      "**/*.p12",
+      "**/*.pfx",
+      "**/.ssh/**",
+      "**/id_rsa",
+      "**/id_dsa",
+      "**/id_ecdsa",
+      "**/id_ed25519",
+      "**/.aws/**",
+      "**/.azure/**",
+      "**/.config/gcloud/**",
+      "**/.netrc",
+      "**/.npmrc",
+      "**/.pypirc"
+    ],
+    "allowed_paths": ["<cwd>/**"],
+    "sandbox": {
+      "mode": "local",
+      "local": {},
+      "linux": {
+        "workspace": null,
+        "max_memory_mb": 512
+      },
+      "windows": {
+        "workspace": null,
+        "max_memory_mb": 512,
+        "max_processes": 10,
+        "use_low_integrity": true
+      },
+      "wsl": {
+        "profile": null,
+        "distro": "aar-sandbox",
+        "shell": "sh",
+        "wsl_user": null,
+        "restrict_to_workspace": true,
+        "workspace": null,
+        "install_path": null,
+        "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+        "pre_install_commands": [],
+        "packages": ["python3", "py3-pip"],
+        "package_install_command": "apk add --no-cache {packages}",
+        "system_prompt_hint": ""
+      }
+    },
+    "log_all_commands": true,
+    "acp_approval_timeout": 0.0
+  },
+  "tui": {
+    "theme": "default",
+    "layout": {}
+  },
+  "guardrails": {
+    "max_tokens_recoveries": 2,
+    "max_repeated_tool_steps": 3,
+    "reserve_tokens": 512,
+    "reserve_cost_fraction": 0.1
+  },
+  "max_steps": 50,
+  "timeout": 0.0,
+  "max_retries": 3,
+  "streaming": true,
+  "context_window": 200000,
+  "context_strategy": "sliding_window",
+  "token_budget": 500000,
+  "cost_limit": 5.0,
+  "token_warning_threshold": 0.8,
+  "cost_warning_threshold": 0.8,
+  "session_dir": ".agent/sessions",
+  "project_rules_dir": ".agent",
+  "log_level": "WARNING",
+  "log_file": null
+}

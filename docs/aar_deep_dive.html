@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aar Agent Framework — Deep Dive</title>
+<style>
+/* ── VS CODE LIGHT THEME ─────────────────────────────────── */
+:root {
+  --bg:        #ffffff;
+  --surface:   #f3f3f3;
+  --surface2:  #e8e8e8;
+  --border:    #e5e5e5;
+  --border-md: #c8c8c8;
+  --text:      #1e1e1e;
+  --muted:     #616161;
+  --accent:    #0078d4;
+  --accent-bg: #eff6ff;
+  --green:     #16825d;
+  --green-bg:  #f0faf5;
+  --red:       #a1260d;
+  --red-bg:    #fff5f5;
+  --orange:    #bf8803;
+  --orange-bg: #fef9ec;
+  --purple:    #6f42c1;
+  --purple-bg: #f5f0ff;
+  --mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* VS Code syntax colors */
+  --syn-kw:   #0000ff;
+  --syn-str:  #a31515;
+  --syn-cmt:  #008000;
+  --syn-type: #267f99;
+  --syn-fn:   #795e26;
+  --syn-num:  #098658;
+  --syn-prop: #0451a5;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; background: var(--bg); color: var(--text);
+  font-family: var(--sans); overflow: hidden; user-select: none; }
+
+/* ── DECK ── */
+#deck { width: 100vw; height: 100vh; position: relative; overflow: hidden; }
+
+.slide {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  padding: 48px 68px 52px;
+  opacity: 0; transform: translateX(48px);
+  transition: opacity .3s ease, transform .3s ease;
+  pointer-events: none; overflow: hidden;
+  background: var(--bg);
+}
+.slide.active  { opacity: 1; transform: translateX(0);  pointer-events: auto; }
+.slide.exit-l  { opacity: 0; transform: translateX(-48px); }
+
+/* ── SLIDE CHROME ── */
+.slide-tag {
+  font-size: 11px; font-family: var(--mono); color: var(--accent);
+  letter-spacing: .1em; text-transform: uppercase; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 8px;
+}
+.slide-tag::before {
+  content: ''; display: inline-block; width: 16px; height: 2px;
+  background: var(--accent); border-radius: 2px;
+}
+
+/* ── TYPE SCALE ── */
+h1 { font-size: clamp(2rem, 3.8vw, 3rem); font-weight: 700; letter-spacing: -.025em;
+  color: var(--text); margin-bottom: 12px; }
+h1 span { color: var(--accent); }
+h2 { font-size: clamp(1.35rem, 2.4vw, 1.9rem); font-weight: 700; letter-spacing: -.02em;
+  color: var(--text); margin-bottom: 18px; }
+h3 { font-size: .95rem; font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+p  { font-size: .93rem; line-height: 1.7; color: var(--muted); }
+.lead { font-size: 1.08rem; color: var(--text); line-height: 1.65; }
+
+/* ── LAYOUT ── */
+.cols { display: flex; gap: 28px; flex: 1; min-height: 0; }
+.col  { flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.col-2 { flex: 2; }
+.col-3 { flex: 3; }
+
+/* ── CARD ── */
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px 18px; flex-shrink: 0;
+}
+.card.blue   { border-left: 3px solid var(--accent);  background: var(--accent-bg); }
+.card.green  { border-left: 3px solid var(--green);   background: var(--green-bg); }
+.card.red    { border-left: 3px solid var(--red);     background: var(--red-bg); }
+.card.orange { border-left: 3px solid var(--orange);  background: var(--orange-bg); }
+.card.purple { border-left: 3px solid var(--purple);  background: var(--purple-bg); }
+
+/* ── CODE ── */
+pre {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px 18px;
+  font-family: var(--mono); font-size: .78rem; line-height: 1.65;
+  color: var(--text); overflow: auto; flex-shrink: 0;
+}
+pre.grow { flex: 1; overflow: auto; }
+code { font-family: var(--mono); font-size: .85em;
+  background: var(--surface); padding: 1px 5px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--text); }
+.kw { color: var(--syn-kw); }
+.st { color: var(--syn-str); }
+.cm { color: var(--syn-cmt); font-style: italic; }
+.ty { color: var(--syn-type); }
+.fn { color: var(--syn-fn); }
+.nm { color: var(--syn-num); }
+.pr { color: var(--syn-prop); }
+
+/* ── TABLE ── */
+table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+th { text-align: left; padding: 7px 12px; color: var(--muted); font-size: .72rem;
+  font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
+  border-bottom: 1px solid var(--border); }
+td { padding: 7px 12px; border-bottom: 1px solid var(--border); color: var(--text);
+  vertical-align: top; font-size: .83rem; }
+td:first-child { color: var(--accent); font-family: var(--mono); font-size: .8rem; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--surface); }
+
+/* ── BADGE ── */
+.badge {
+  display: inline-block; font-family: var(--mono); font-size: .7rem;
+  padding: 2px 7px; border-radius: 4px; font-weight: 600; white-space: nowrap;
+}
+.b-blue   { background: #dbeafe; color: var(--accent); }
+.b-green  { background: #d1fae5; color: var(--green); }
+.b-red    { background: #fee2e2; color: var(--red); }
+.b-orange { background: #fef3c7; color: var(--orange); }
+.b-purple { background: #ede9fe; color: var(--purple); }
+.b-grey   { background: var(--surface2); color: var(--muted); }
+
+/* ── PILL LIST ── */
+.pills { display: flex; flex-wrap: wrap; gap: 7px; }
+.pill { background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 20px; padding: 4px 12px; font-size: .79rem; color: var(--text); }
+
+/* ── HERO ── */
+.hero { display: flex; flex-direction: column; justify-content: center; flex: 1; }
+.hero-stats { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 36px; }
+.stat-val { font-size: 1.8rem; font-weight: 700; color: var(--accent);
+  font-family: var(--mono); line-height: 1; }
+.stat-lbl { font-size: .78rem; color: var(--muted); margin-top: 4px; }
+.hero-file-list { margin-top: 40px; }
+.hero-file-list .pills .pill { font-family: var(--mono); }
+
+/* ── COMPONENT MAP (diag) ── */
+.diag {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 18px 20px; font-family: var(--mono); font-size: .76rem; line-height: 1.7;
+  color: var(--muted); overflow: auto; white-space: pre; flex: 1;
+}
+.diag .dn { color: var(--text); font-weight: 600; }
+.diag .da { color: var(--accent); }
+.diag .dg { color: var(--green); }
+.diag .dr { color: var(--red); }
+.diag .do { color: var(--orange); }
+.diag .dp { color: var(--purple); }
+.diag .dd { color: #b0b0b0; }
+
+/* ── STATE GRID ── */
+.state-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.sn {
+  background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; text-align: center;
+  font-family: var(--mono); font-size: .82rem; font-weight: 600;
+}
+.sn.blue   { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+.sn.green  { border-color: var(--green);  color: var(--green);  background: var(--green-bg); }
+.sn.red    { border-color: var(--red);    color: var(--red);    background: var(--red-bg); }
+.sn.orange { border-color: var(--orange); color: var(--orange); background: var(--orange-bg); }
+.sn.purple { border-color: var(--purple); color: var(--purple); background: var(--purple-bg); }
+.sn.muted  { border-color: var(--border-md); color: var(--muted); }
+.sn-sub    { font-size: .68rem; font-weight: 400; color: var(--muted); margin-top: 4px;
+  font-family: var(--sans); }
+
+/* ── SAFETY FLOW ── */
+.safety-flow { display: flex; flex-direction: column; gap: 0; flex: 1; }
+.safety-step {
+  display: flex; align-items: stretch; gap: 12px; position: relative;
+}
+.safety-line {
+  display: flex; flex-direction: column; align-items: center; flex-shrink: 0;
+}
+.safety-dot {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--accent); color: white;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .75rem; font-weight: 700; flex-shrink: 0;
+}
+.safety-connector { width: 2px; background: var(--border); flex: 1; min-height: 10px; }
+.safety-content { padding: 0 0 16px 0; flex: 1; }
+.safety-title { font-weight: 600; font-size: .9rem; color: var(--text); margin-bottom: 4px; }
+.safety-desc  { font-size: .82rem; color: var(--muted); line-height: 1.5; }
+
+/* ── NAV ── */
+#progress { position: fixed; bottom: 0; left: 0; height: 2px;
+  background: var(--accent); transition: width .3s ease; }
+#nav { position: fixed; bottom: 18px; right: 24px;
+  display: flex; align-items: center; gap: 10px; }
+#counter { font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+.nbtn {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  width: 32px; height: 32px; border-radius: 6px; cursor: pointer;
+  font-size: .95rem; display: flex; align-items: center; justify-content: center;
+  transition: border-color .15s, background .15s;
+}
+.nbtn:hover { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
+.nbtn:disabled { opacity: .35; cursor: not-allowed; }
+#hint { position: fixed; bottom: 22px; left: 24px;
+  font-size: .72rem; color: var(--muted); font-family: var(--mono); }
+.wmark { position: fixed; top: 16px; right: 24px;
+  font-family: var(--mono); font-size: .72rem; color: var(--muted); opacity: .4; }
+
+/* ── DIVIDER ── */
+hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+/* ── SCROLL ── */
+.scroll { overflow-y: auto; flex: 1; }
+.scroll::-webkit-scrollbar { width: 4px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--surface2); border-radius: 4px; }
+
+/* ═══════════════════════════════════════════════════════
+   ANIMATED LOOP DIAGRAM (slide 4)
+═══════════════════════════════════════════════════════ */
+.loop-wrap {
+  display: flex; gap: 24px; flex: 1; min-height: 0;
+}
+
+/* Left: the flowchart */
+.loop-chart {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 0; flex-shrink: 0; width: 310px;
+}
+.lc-node {
+  width: 100%; background: var(--surface); border: 2px solid var(--border);
+  border-radius: 10px; padding: 11px 16px; cursor: default;
+  transition: all .35s ease; position: relative;
+}
+.lc-node.lc-active {
+  border-color: var(--accent); background: var(--accent-bg);
+  box-shadow: 0 0 0 4px rgba(0,120,212,.12);
+  transform: translateX(4px);
+}
+.lc-node.lc-exit-yes.lc-active  { border-color: var(--red); background: var(--red-bg);
+  box-shadow: 0 0 0 4px rgba(161,38,13,.1); }
+.lc-node.lc-exit-no.lc-active   { border-color: var(--green); background: var(--green-bg);
+  box-shadow: 0 0 0 4px rgba(22,130,93,.1); }
+.lc-node.lc-done.lc-active      { border-color: var(--green); background: var(--green-bg);
+  box-shadow: 0 0 0 4px rgba(22,130,93,.1); }
+
+.ln-num  { font-family: var(--mono); font-size: .72rem; font-weight: 700;
+  color: var(--accent); margin-bottom: 2px; }
+.lc-node.lc-active .ln-num { color: var(--accent); }
+.ln-name { font-size: .88rem; font-weight: 600; color: var(--text); }
+.ln-sub  { font-size: .72rem; color: var(--muted); margin-top: 2px; font-family: var(--mono); }
+.lc-node.lc-active .ln-name { color: var(--text); }
+
+/* Arrows between nodes */
+.lc-arrow {
+  display: flex; flex-direction: column; align-items: center;
+  height: 22px; position: relative; flex-shrink: 0;
+}
+.lc-arrow::before {
+  content: ''; width: 2px; height: 12px; background: var(--border);
+  transition: background .3s ease;
+}
+.lc-arrow::after {
+  content: '▾'; font-size: .8rem; color: var(--muted);
+  transition: color .3s ease; line-height: 1;
+}
+.lc-arrow.arr-active::before { background: var(--accent); }
+.lc-arrow.arr-active::after  { color: var(--accent); }
+
+/* Branch row */
+.lc-branch {
+  display: flex; width: 100%; gap: 10px; align-items: flex-start;
+}
+.lc-branch-col {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 0;
+}
+.lc-branch-label {
+  font-family: var(--mono); font-size: .7rem; font-weight: 700;
+  margin-bottom: 6px; padding: 2px 8px; border-radius: 4px;
+}
+.lc-branch-label.yes { background: #fee2e2; color: var(--red); }
+.lc-branch-label.no  { background: #d1fae5; color: var(--green); }
+
+/* Loop-back arrow (from tool execute back to top) */
+.lc-loopback {
+  font-family: var(--mono); font-size: .7rem; color: var(--muted);
+  text-align: center; margin-top: 6px; padding: 5px 10px;
+  border: 1.5px dashed var(--border); border-radius: 6px;
+  background: var(--surface); width: 100%;
+  transition: all .3s ease;
+}
+.lc-loopback.lb-active {
+  border-color: var(--accent); color: var(--accent); background: var(--accent-bg);
+}
+
+/* Right: description panel */
+.loop-desc {
+  flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0;
+}
+.ld-phase-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: .78rem;
+  color: var(--accent); font-weight: 700;
+  background: var(--accent-bg); border: 1px solid var(--accent);
+  padding: 4px 12px; border-radius: 20px; align-self: flex-start;
+  transition: all .3s ease;
+}
+.ld-title {
+  font-size: 1.2rem; font-weight: 700; color: var(--text); line-height: 1.2;
+  transition: all .3s ease;
+}
+.ld-body  { font-size: .9rem; color: var(--muted); line-height: 1.7; flex: 1; }
+.ld-exits { margin-top: 4px; }
+.ld-exit-row {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: .83rem; padding: 5px 0; border-bottom: 1px solid var(--border);
+}
+.ld-exit-row:last-child { border-bottom: none; }
+.ld-exit-cond { font-family: var(--mono); color: var(--accent); min-width: 130px; }
+.ld-exit-what { color: var(--muted); }
+
+/* play/pause control */
+.loop-controls {
+  display: flex; align-items: center; gap: 12px; margin-top: auto; padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.pp-btn {
+  background: var(--accent); border: none; color: white; border-radius: 6px;
+  padding: 6px 16px; font-size: .82rem; font-family: var(--sans); font-weight: 600;
+  cursor: pointer; transition: background .15s; display: flex; align-items: center; gap: 6px;
+}
+.pp-btn:hover { background: #006bbf; }
+.pp-dots { display: flex; gap: 6px; }
+.pp-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--surface2);
+  border: 1.5px solid var(--border); transition: all .3s ease;
+}
+.pp-dot.active { background: var(--accent); border-color: var(--accent); }
+.pp-speed { font-size: .78rem; color: var(--muted); font-family: var(--mono); margin-left: auto; }
+</style>
+</head>
+<body>
+<div id="deck">
+
+<!-- ════════════════════════════════════════════════════════
+     1 · HERO
+════════════════════════════════════════════════════════ -->
+<div class="slide active" id="s1">
+  <div class="hero">
+    <div class="slide-tag">Aar Agent Framework</div>
+    <h1>How the Agent<br><span>Actually Works</span></h1>
+    <p class="lead" style="max-width:580px;margin-top:14px">
+      A deep dive into the execution loop, guardrails, state machine, tool pipeline, safety layers, and transport architecture.
+    </p>
+    <div class="hero-stats">
+      <div><div class="stat-val">~80</div><div class="stat-lbl">lines — core loop</div></div>
+      <div><div class="stat-val">4</div><div class="stat-lbl">LLM providers</div></div>
+      <div><div class="stat-val">4</div><div class="stat-lbl">sandbox modes</div></div>
+      <div><div class="stat-val">717+</div><div class="stat-lbl">tests</div></div>
+    </div>
+    <div class="hero-file-list">
+      <p style="margin-bottom:10px;font-size:.82rem">Jump to:</p>
+      <div class="pills">
+        <span class="pill">loop.py</span>
+        <span class="pill">guardrails.py</span>
+        <span class="pill">safety/policy.py</span>
+        <span class="pill">tools/execution.py</span>
+        <span class="pill">transports/acp/</span>
+        <span class="pill">events.py</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     2 · ARCHITECTURE PRINCIPLES
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s2">
+  <div class="slide-tag">Architecture · 01</div>
+  <h2>Design Principles</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="card blue">
+        <h3>Thin Core Loop</h3>
+        <p><code>loop.py</code> is a single coroutine doing exactly three things: call the provider, execute tool calls, append events to the session. Everything else is delegated to sibling modules.</p>
+      </div>
+      <div class="card green">
+        <h3>Typed Event Model</h3>
+        <p>Every interaction is a <strong>Pydantic model</strong>. Events are serializable, carry timing data, and are the single source of truth. No raw dicts in the event stream.</p>
+      </div>
+      <div class="card orange">
+        <h3>Provider-Agnostic</h3>
+        <p>The loop works with any <code>Provider</code> ABC implementation. Swapping from Anthropic to Ollama requires changing <em>one config field</em>. Never import a provider outside <code>agent/providers/</code>.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card red">
+        <h3>Safe by Default</h3>
+        <p>Path restrictions, command deny-lists, and approval gates are built in and <strong>always active</strong>. Interactive modes enable a workspace sandbox automatically. Defaults can only be hardened, not relaxed, via CLI.</p>
+      </div>
+      <div class="card purple">
+        <h3>Modular Transports</h3>
+        <p>The same <code>Agent</code> class runs from CLI, TUI, web API, ACP, or embedded in code. Transports only handle I/O — never business logic. They wire events to UI, nothing more.</p>
+      </div>
+      <div class="card blue">
+        <h3>Fully Observable</h3>
+        <p>Every event has a timestamp and is persisted to JSONL. <code>session_metrics()</code> reconstructs full telemetry from history — no live agent needed.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     3 · COMPONENT MAP (real structure)
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s3">
+  <div class="slide-tag">Architecture · 02</div>
+  <h2>Component Map</h2>
+  <div class="cols">
+    <div class="col col-2">
+      <div class="diag"><span class="da">agent/</span>
+<span class="dd">├──</span> <span class="da">core/</span>               <span class="dd">← The heart</span>
+<span class="dd">│   ├──</span> <span class="dn">agent.py</span>             Agent class — orchestrator
+<span class="dd">│   ├──</span> <span class="dn">loop.py</span>              run_loop() — control flow only
+<span class="dd">│   ├──</span> <span class="dn">provider_runner.py</span>   request + retry + streaming
+<span class="dd">│   ├──</span> <span class="dn">loop_helpers.py</span>      event emit, budget, parse_stop
+<span class="dd">│   ├──</span> <span class="dn">guardrails.py</span>        LoopGuardrails, GuardrailsConfig
+<span class="dd">│   ├──</span> <span class="dn">events.py</span>            Pydantic event models
+<span class="dd">│   ├──</span> <span class="dn">session.py</span>           event history + to_messages()
+<span class="dd">│   ├──</span> <span class="dn">config.py</span>            AgentConfig schema
+<span class="dd">│   ├──</span> <span class="dn">state.py</span>             AgentState enum
+<span class="dd">│   ├──</span> <span class="dn">tokens.py</span>            token budget + cost tracking
+<span class="dd">│   ├──</span> <span class="dn">multimodal.py</span>        multimodal content helpers
+<span class="dd">│   └──</span> <span class="dn">logging.py</span>           structured audit logging
+<span class="dd">│</span>
+<span class="dd">├──</span> <span class="da">providers/</span>
+<span class="dd">│   ├──</span> <span class="dn">base.py</span>              Provider ABC + ProviderResponse
+<span class="dd">│   ├──</span> <span class="dn">anthropic.py</span>         tools, streaming, extended thinking
+<span class="dd">│   ├──</span> <span class="dn">openai.py</span>            tools, streaming, Azure / Together
+<span class="dd">│   ├──</span> <span class="dn">ollama.py</span>            tools, DeepSeek-r1 reasoning
+<span class="dd">│   └──</span> <span class="dn">generic.py</span>           any OpenAI-compatible endpoint
+<span class="dd">│</span>
+<span class="dd">├──</span> <span class="da">tools/</span>
+<span class="dd">│   ├──</span> <span class="dn">registry.py</span>          ToolRegistry, ToolSpec
+<span class="dd">│   ├──</span> <span class="dn">execution.py</span>         ToolExecutor → policy → sandbox
+<span class="dd">│   ├──</span> <span class="dn">schema.py</span>            JSON schema helpers
+<span class="dd">│   └──</span> <span class="dn">builtin/</span>
+<span class="dd">│       ├──</span> filesystem.py      read_file, write_file, edit_file, list_directory
+<span class="dd">│       └──</span> shell.py           bash
+<span class="dd">│</span>
+<span class="dd">├──</span> <span class="dg">safety/</span>
+<span class="dd">│   ├──</span> <span class="dn">policy.py</span>            SafetyPolicy  ALLOW / DENY / ASK
+<span class="dd">│   ├──</span> <span class="dn">permissions.py</span>       ApprovalCallback, APPROVED_ALWAYS cache
+<span class="dd">│   ├──</span> <span class="dn">sandbox.py</span>           Local / Linux / Windows / WSL sandboxes
+<span class="dd">│   └──</span> <span class="dn">wsl_manager.py</span>       WSL2 distro lifecycle management
+<span class="dd">│</span>
+<span class="dd">├──</span> <span class="da">memory/</span>
+<span class="dd">│   └──</span> <span class="dn">session_store.py</span>     JSONL event persistence + compaction
+<span class="dd">│</span>
+<span class="dd">├──</span> <span class="da">extensions/</span>
+<span class="dd">│   ├──</span> <span class="dn">mcp.py</span>               MCP bridge  (stdio + HTTP)
+<span class="dd">│   └──</span> <span class="dn">observability.py</span>     session_metrics() — reads history only
+<span class="dd">│</span>
+<span class="dd">└──</span> <span class="da">transports/</span>
+<span class="dd">    ├──</span> <span class="dn">cli.py</span>               Typer CLI  (chat, run, tui, serve, acp)
+<span class="dd">    ├──</span> <span class="dn">tui.py</span>               Rich inline TUI
+<span class="dd">    ├──</span> <span class="dn">tui_fixed.py</span>         Textual full-screen TUI
+<span class="dd">    ├──</span> <span class="dn">web.py</span>               ASGI web server + SSE streaming
+<span class="dd">    ├──</span> <span class="dn">stream.py</span>            EventStream — cross-request pub/sub
+<span class="dd">    ├──</span> <span class="dn">keybinds.py</span>          keyboard shortcuts for fixed TUI
+<span class="dd">    ├──</span> <span class="dn">acp_permissions.py</span>   ACP approval callback
+<span class="dd">    ├──</span> <span class="dp">acp/</span>                 ACP transport package
+<span class="dd">    │   ├──</span> <span class="dn">common.py</span>        shared types + helpers
+<span class="dd">    │   ├──</span> <span class="dn">http.py</span>          HTTP / SSE server  (REST clients)
+<span class="dd">    │   └──</span> <span class="dn">stdio.py</span>         SDK stdio transport  (Zed)
+<span class="dd">    ├──</span> <span class="da">themes/</span>
+<span class="dd">    │   ├──</span> <span class="dn">models.py</span>        ThemeModel, ColorScheme
+<span class="dd">    │   └──</span> <span class="dn">builtin.py</span>       built-in themes
+<span class="dd">    ├──</span> <span class="da">tui_utils/</span>
+<span class="dd">    │   └──</span> <span class="dn">formatting.py</span>    shared Rich formatting helpers
+<span class="dd">    └──</span> <span class="da">tui_widgets/</span>         Textual widget classes
+<span class="dd">        ├──</span> bars.py · blocks.py · chat_body.py
+<span class="dd">        ├──</span> input.py · log_viewer.py
+<span class="dd">        └──</span> thinking_panel.py</div>
+    </div>
+    <div class="col">
+      <div class="card blue">
+        <h3>Dependency rule</h3>
+        <p>Core never imports providers. Providers never import tools. Tools never bypass safety. Transports never contain business logic. One direction only.</p>
+      </div>
+      <div class="card green">
+        <h3>ACP is now a package</h3>
+        <p><code>transports/acp/</code> is split into three focused modules: <code>stdio.py</code> for Zed (SDK), <code>http.py</code> for REST clients, and <code>common.py</code> for shared types. Old single-file <code>acp.py</code> is gone.</p>
+      </div>
+      <div class="card orange">
+        <h3>WSL management</h3>
+        <p><code>safety/wsl_manager.py</code> handles WSL2 distro download, setup, and lifecycle — keeping sandbox.py focused purely on command execution.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     4 · CORE LOOP — ANIMATED
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s4">
+  <div class="slide-tag">Core Loop · 01</div>
+  <h2>Execution Flow</h2>
+  <div class="loop-wrap">
+
+    <!-- Left: flowchart -->
+    <div class="loop-chart" id="loopChart">
+      <!-- Phase 0: Pre-flight -->
+      <div class="lc-node" data-phase="0" id="lp0">
+        <div class="ln-num">① PRE-FLIGHT</div>
+        <div class="ln-name">Guard Checks</div>
+        <div class="ln-sub">cancel · timeout · max_steps</div>
+      </div>
+      <div class="lc-arrow" id="la0"></div>
+
+      <!-- Phase 1: Context trim -->
+      <div class="lc-node" data-phase="1" id="lp1">
+        <div class="ln-num">② CONTEXT</div>
+        <div class="ln-name">Trim Messages</div>
+        <div class="ln-sub">sliding_window strategy</div>
+      </div>
+      <div class="lc-arrow" id="la1"></div>
+
+      <!-- Phase 2: Provider -->
+      <div class="lc-node" data-phase="2" id="lp2">
+        <div class="ln-num">③ PROVIDER</div>
+        <div class="ln-name">Call the LLM</div>
+        <div class="ln-sub">complete() or stream()</div>
+      </div>
+      <div class="lc-arrow" id="la2"></div>
+
+      <!-- Phase 3: Budget -->
+      <div class="lc-node" data-phase="3" id="lp3">
+        <div class="ln-num">④ BUDGET</div>
+        <div class="ln-name">Token &amp; Cost Check</div>
+        <div class="ln-sub">exceeded → exit</div>
+      </div>
+      <div class="lc-arrow" id="la3"></div>
+
+      <!-- Branch -->
+      <div style="display:flex;width:100%;align-items:center;padding:4px 0 2px">
+        <div style="flex:1;height:1.5px;background:var(--border)"></div>
+        <div style="padding:3px 10px;font-size:.72rem;font-family:var(--mono);color:var(--muted);background:var(--surface);border:1.5px solid var(--border);border-radius:4px;">tool_calls?</div>
+        <div style="flex:1;height:1.5px;background:var(--border)"></div>
+      </div>
+
+      <div class="lc-branch">
+        <!-- YES branch -->
+        <div class="lc-branch-col">
+          <div class="lc-branch-label yes">YES</div>
+          <div class="lc-node lc-exit-yes" data-phase="4" id="lp4" style="width:100%">
+            <div class="ln-num" style="color:var(--red)">⑤A TOOLS</div>
+            <div class="ln-name">Guardrail + Execute</div>
+            <div class="ln-sub">safety → sandbox</div>
+          </div>
+          <div class="lc-loopback" id="loopback">↑ back to ①</div>
+        </div>
+        <!-- NO branch -->
+        <div class="lc-branch-col">
+          <div class="lc-branch-label no">NO</div>
+          <div class="lc-node lc-exit-no" data-phase="5" id="lp5" style="width:100%">
+            <div class="ln-num" style="color:var(--orange)">⑤B RECOVER</div>
+            <div class="ln-name">max_tokens?</div>
+            <div class="ln-sub">inject continue →①</div>
+          </div>
+          <div style="height:6px"></div>
+          <div class="lc-node lc-done" data-phase="6" id="lp6" style="width:100%">
+            <div class="ln-num" style="color:var(--green)">✓ DONE</div>
+            <div class="ln-name">end_turn</div>
+            <div class="ln-sub">COMPLETED</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: description panel -->
+    <div class="loop-desc" id="loopDesc">
+      <div class="ld-phase-badge" id="ldBadge">① Pre-flight</div>
+      <div class="ld-title" id="ldTitle">Guard Checks</div>
+      <p class="ld-body" id="ldBody">Loading…</p>
+      <div class="card" style="padding:12px 16px;margin-top:auto">
+        <div style="font-size:.78rem;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.07em">Possible exits</div>
+        <div class="ld-exits" id="ldExits"></div>
+      </div>
+
+      <div class="loop-controls">
+        <button class="pp-btn" id="ppBtn">⏸ Pause</button>
+        <div class="pp-dots" id="ppDots"></div>
+        <span class="pp-speed" id="ppSpeed">auto · 2.5s</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     5 · PSEUDOCODE (simple)
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s5">
+  <div class="slide-tag">Core Loop · 02</div>
+  <h2>The Loop in Plain English</h2>
+  <div class="cols">
+    <div class="col col-2">
+      <pre class="grow"><span class="cm">LOOP — repeat until done:</span>
+
+  <span class="kw">①</span> <span class="fn">Guard checks</span>
+       Cancelled?     → stop immediately
+       Timed out?     → stop
+       Too many steps → stop
+
+  <span class="kw">②</span> <span class="fn">Trim context</span>  <span class="cm">(if sliding_window is on)</span>
+       Messages exceed token budget → drop oldest
+
+  <span class="kw">③</span> <span class="fn">Call the LLM</span>
+       Send: messages + available tools + system prompt
+       Retry automatically on network errors
+       Receive: text,  tool_calls,  stop_reason,  token usage
+
+  <span class="kw">④</span> <span class="fn">Check budget</span>
+       Tokens or cost over the limit? → stop
+
+  <span class="kw">⑤</span> <span class="fn">Handle the response</span>
+
+       <span class="st">if</span> tool_calls present:
+           Same calls as last step × 3? → stuck guard fires → stop
+           Otherwise: run each tool safely → loop back to ①
+
+       <span class="st">else</span> (no tool calls):
+           stop_reason = max_tokens?
+               Still have retries? → inject "keep going…" → loop back to ①
+               No retries left?    → treat as finished
+
+           stop_reason = end_turn?
+               → <span class="ty">DONE ✓</span></pre>
+    </div>
+    <div class="col">
+      <div class="card blue">
+        <h3>Three rules of the loop</h3>
+        <p>The loop does exactly three things and nothing else:</p>
+        <ol style="margin-top:10px;padding-left:18px;display:flex;flex-direction:column;gap:8px;font-size:.88rem;color:var(--muted)">
+          <li>Call the provider</li>
+          <li>Execute tool calls</li>
+          <li>Append events to the session</li>
+        </ol>
+        <p style="margin-top:10px">Everything else (retries, token counting, event formatting) lives in sibling modules.</p>
+      </div>
+      <div class="card green">
+        <h3>Event order matters</h3>
+        <p><code>ToolCall</code> is emitted <strong>before</strong> <code>AssistantMessage</code> in the same step. This lets <code>session.to_messages()</code> bundle tool-use blocks correctly for the next API call — matching Anthropic's expected message format.</p>
+      </div>
+      <div class="card orange">
+        <h3>Streaming teardown</h3>
+        <p>The stream loop runs inside <code>try/finally</code> — always emitting <code>StreamChunk(finished=True)</code> even if the provider throws. TUI and SSE consumers never hang.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     6 · STATE MACHINE
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s6">
+  <div class="slide-tag">State Machine · 03</div>
+  <h2>Agent State Transitions</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="diag" style="flex:1"><span class="dd">start</span>
+  │
+  ▼
+<span class="da">RUNNING</span>  ──────────────────────────────► <span class="dg">COMPLETED</span>
+  │
+  ├── cancel_event.is_set() ──────────► <span class="do">CANCELLED</span>
+  │
+  ├── elapsed > timeout > 0 ──────────► <span class="do">TIMED_OUT</span>
+  │
+  ├── step_count ≥ max_steps ─────────► <span class="do">MAX_STEPS</span>
+  │
+  ├── token / cost budget hit ────────► <span class="do">BUDGET_EXCEEDED</span>
+  │
+  ├── repetition guard fired ─────────► <span class="dr">ERROR</span>
+  │
+  ├── provider error (fatal) ─────────► <span class="dr">ERROR</span>
+  │
+  ├────► <span class="dp">WAITING_FOR_TOOL</span> ◄────────────┐
+  │       (tool is executing)         │
+  └───────────────────────────────────┘
+  │
+  └────► <span class="dp">WAITING_FOR_INPUT</span>
+          (interactive transports)
+</div>
+    </div>
+    <div class="col">
+      <div class="state-grid">
+        <div class="sn blue">RUNNING<div class="sn-sub">Active loop iteration</div></div>
+        <div class="sn green">COMPLETED<div class="sn-sub">end_turn, all done</div></div>
+        <div class="sn orange">CANCELLED<div class="sn-sub">cancel_event set</div></div>
+        <div class="sn orange">TIMED_OUT<div class="sn-sub">wall-clock expired</div></div>
+        <div class="sn orange">MAX_STEPS<div class="sn-sub">step limit reached</div></div>
+        <div class="sn orange">BUDGET_EXCEEDED<div class="sn-sub">tokens or cost hit</div></div>
+        <div class="sn red">ERROR<div class="sn-sub">fatal error or stuck</div></div>
+        <div class="sn purple">WAITING_FOR_TOOL<div class="sn-sub">tool executing</div></div>
+        <div class="sn purple">WAITING_FOR_INPUT<div class="sn-sub">awaiting user</div></div>
+        <div class="sn muted">IDLE<div class="sn-sub">before first run()</div></div>
+      </div>
+      <div class="card blue" style="margin-top:12px">
+        <h3>Persistence</h3>
+        <p>State is set on the <code>Session</code> object before returning, and persisted to JSONL. Sessions can be resumed — they restart at <strong>RUNNING</strong> from the last event.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     7 · GUARDRAILS
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s7">
+  <div class="slide-tag">Guardrails · 04</div>
+  <h2>Mechanical Safety Nets</h2>
+  <p class="lead" style="margin-bottom:18px">Catch runaway loops and truncated responses <strong>without relying on the LLM to self-regulate</strong>. Purely mechanical — no prompt heuristics, no dynamic system-prompt mutation.</p>
+  <div class="cols">
+    <div class="col">
+      <div class="card blue" style="flex:1">
+        <h3>① Max-tokens Recovery</h3>
+        <p>When the provider truncates output (<code>stop_reason = "max_tokens"</code>), the loop injects a continuation prompt and loops again — up to a configurable limit.</p>
+        <hr style="margin:12px 0">
+        <pre style="font-size:.76rem">stop_reason = <span class="st">"max_tokens"</span>
+└─ recovery_count &lt; max_tokens_recoveries?
+     YES → inject <span class="st">"Continue from where you left off…"</span>
+           (tagged: internal, not shown in UI)
+           loop again
+     NO  → treat as END_TURN → exit loop</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card red" style="flex:1">
+        <h3>② Repetition Circuit-Breaker</h3>
+        <p>Detects identical tool-call patterns repeating and aborts before burning budget in an infinite spin.</p>
+        <hr style="margin:12px 0">
+        <pre style="font-size:.76rem">each step: <span class="fn">observe_tool_calls</span>(session, tool_calls)
+  → build signature: sorted names + args
+    (values truncated at 200 chars)
+  → same as last step?
+      repeated_tool_steps += 1
+  → different?
+      repeated_tool_steps = 0
+
+<span class="fn">is_stuck</span>()?
+  repeated_tool_steps ≥ max_repeated_tool_steps
+    YES → emit <span class="ty">ErrorEvent</span>, state = ERROR</pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card green">
+        <h3>③ Budget Proximity</h3>
+        <p><code>near_budget()</code> fires <em>before</em> hard limits. Transports use it for visual warnings. Hard enforcement is in the loop itself.</p>
+        <table style="margin-top:10px">
+          <tr><td>tokens</td><td>remaining ≤ reserve_tokens (512)</td></tr>
+          <tr><td>cost</td><td>remaining ≤ cost_limit × 0.1</td></tr>
+        </table>
+      </div>
+      <div class="card orange" style="margin-top:0">
+        <h3>Config</h3>
+        <pre style="font-size:.76rem"><span class="st">"guardrails"</span>: {
+  <span class="pr">"max_tokens_recoveries"</span>:   <span class="nm">2</span>,
+  <span class="pr">"max_repeated_tool_steps"</span>: <span class="nm">3</span>,
+  <span class="pr">"reserve_tokens"</span>:          <span class="nm">512</span>,
+  <span class="pr">"reserve_cost_fraction"</span>:   <span class="nm">0.1</span>
+}</pre>
+        <p style="margin-top:8px">Counters live in <code>session.metadata["guardrails"]</code> — persisted and restored on session reload.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     8 · GUARDRAILS TUNING
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s8">
+  <div class="slide-tag">Guardrails · 04b</div>
+  <h2>Tuning by Use Case</h2>
+  <div class="cols">
+    <div class="col col-2">
+      <div class="card" style="margin-bottom:14px">
+        <table>
+          <tr><th>Use case</th><th>Suggested adjustment</th></tr>
+          <tr><td>Cloud provider, tight budget</td><td>Raise <code>reserve_cost_fraction</code> to <code>0.15–0.20</code> to warn earlier</td></tr>
+          <tr><td>Long-reasoning models (DeepSeek, o3)</td><td>Raise <code>max_tokens_recoveries</code> to <code>3–4</code> — truncation is more likely</td></tr>
+          <tr><td>Autonomous / high-step runs</td><td>Keep <code>max_repeated_tool_steps</code> at <code>3</code>; lower only if you trust the model</td></tr>
+          <tr><td>Headless / unattended</td><td>Lower <code>max_repeated_tool_steps</code> to <code>2</code> for faster abort</td></tr>
+          <tr><td>Local models, no cost limit</td><td><code>reserve_cost_fraction</code> has no effect when <code>cost_limit = 0</code></td></tr>
+          <tr><td>Interactive TUI</td><td>Defaults are good — user can observe and intervene</td></tr>
+        </table>
+      </div>
+      <div class="card blue">
+        <h3>Continuation prompt (internal)</h3>
+        <p>The injected prompt on max-tokens recovery is tagged <code>data["reason"] = "max_tokens_recovery"</code> and is <strong>not shown in the UI</strong>. The counter is bumped; if it reaches the recovery limit, the loop exits normally as if it were end_turn.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card red" style="margin-bottom:14px">
+        <h3>Why the signature includes values</h3>
+        <p>The repetition signature hashes tool names <em>and</em> argument key=value pairs (truncated at 200 chars). Calling <code>read_file</code> on different paths is <strong>not</strong> repetition — only truly identical call sets trigger the guard.</p>
+      </div>
+      <div class="card green">
+        <h3>Why mechanical, not prompt-based?</h3>
+        <p>Prompt instructions like "don't loop forever" fail when the model is confused or hallucinating. Mechanical guardrails are deterministic — they fire regardless of model behavior, every single time, with no exceptions.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     9 · TOOL SYSTEM
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s9">
+  <div class="slide-tag">Tool System · 05</div>
+  <h2>Tool Registry &amp; Execution Pipeline</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="card blue">
+        <h3>Registration</h3>
+        <pre><span class="cm"># decorator</span>
+<span class="kw">@</span>registry.<span class="fn">register</span>(
+    name=<span class="st">"read_file"</span>,
+    description=<span class="st">"Read a file"</span>,
+    side_effects=[<span class="ty">SideEffect</span>.READ]
+)
+<span class="kw">async def</span> <span class="fn">read_file</span>(path: <span class="ty">str</span>) -> <span class="ty">str</span>: ...
+
+<span class="cm"># MCP: auto-register all remote tools</span>
+bridge.<span class="fn">register_all</span>(registry)</pre>
+      </div>
+      <div class="card green">
+        <h3>Side effects drive policy</h3>
+        <table>
+          <tr><td><span class="badge b-blue">READ</span></td><td>Reads files or data</td></tr>
+          <tr><td><span class="badge b-orange">WRITE</span></td><td>Modifies files or state</td></tr>
+          <tr><td><span class="badge b-red">EXECUTE</span></td><td>Runs a shell command</td></tr>
+          <tr><td><span class="badge b-purple">NETWORK</span></td><td>Makes network requests</td></tr>
+          <tr><td><span class="badge b-grey">EXTERNAL</span></td><td>Interacts with external services</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card orange">
+        <h3>Execution pipeline</h3>
+        <div style="font-family:var(--mono);font-size:.78rem;line-height:1.7;color:var(--muted)">
+          <span style="color:var(--accent)">ToolCall</span><br>
+          &nbsp; ↓<br>
+          <span style="color:var(--orange)">SafetyPolicy.check_tool()</span><br>
+          &nbsp; ├─ <span style="color:var(--green)">ALLOW</span> → sandbox.run() → ToolResult<br>
+          &nbsp; ├─ <span style="color:var(--red)">DENY</span> &nbsp; → error ToolResult<br>
+          &nbsp; │&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted);font-style:italic">Error [blocked]: …</span><br>
+          &nbsp; └─ <span style="color:var(--orange)">ASK</span> &nbsp; → ApprovalCallback<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ├─ approved → sandbox.run()<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; └─ denied &nbsp;→ Error [denied]: …
+        </div>
+      </div>
+      <div class="card red">
+        <h3>Built-in tools</h3>
+        <table>
+          <tr><th>Tool</th><th>Side effects</th></tr>
+          <tr><td>read_file</td><td><span class="badge b-blue">READ</span></td></tr>
+          <tr><td>write_file</td><td><span class="badge b-orange">WRITE</span></td></tr>
+          <tr><td>edit_file</td><td><span class="badge b-orange">WRITE</span></td></tr>
+          <tr><td>list_directory</td><td><span class="badge b-blue">READ</span></td></tr>
+          <tr><td>bash</td><td><span class="badge b-red">EXECUTE</span></td></tr>
+        </table>
+        <p style="margin-top:8px">Opt-in via <code>ToolConfig.enabled_builtins</code>.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     10 · TOOL ERROR CATEGORIES
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s10">
+  <div class="slide-tag">Tool System · 05b</div>
+  <h2>Tool Error Result Format</h2>
+  <p class="lead" style="margin-bottom:18px">Every error path returns a <code>ToolResult</code> with a stable, machine-readable category tag in the output.</p>
+  <div class="cols">
+    <div class="col col-2">
+      <pre style="margin-bottom:14px"><span class="ty">Error [&lt;category&gt;]</span>: human-readable message</pre>
+      <div class="card">
+        <table>
+          <tr><th>Category</th><th>When it fires</th></tr>
+          <tr><td><span class="badge b-grey">unknown_tool</span></td><td>Tool name not found in the registry</td></tr>
+          <tr><td><span class="badge b-grey">no_handler</span></td><td>Tool registered without a callable handler</td></tr>
+          <tr><td><span class="badge b-orange">invalid_arguments</span></td><td>Arguments fail JSON-schema validation</td></tr>
+          <tr><td><span class="badge b-red">blocked</span></td><td>Safety policy returned DENY</td></tr>
+          <tr><td><span class="badge b-red">denied</span></td><td>Human declined an approval-gated call</td></tr>
+          <tr><td><span class="badge b-orange">timeout</span></td><td>Handler exceeded <code>ToolConfig.command_timeout</code></td></tr>
+          <tr><td><span class="badge b-red">exception</span></td><td>Handler raised an unhandled exception</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card blue" style="margin-bottom:14px">
+        <h3>Match on category, not message</h3>
+        <pre><span class="cm"># ✅ stable across versions</span>
+<span class="kw">if</span> result.output.<span class="fn">startswith</span>(<span class="st">"Error [blocked]"</span>):
+    ...
+
+<span class="cm"># ❌ fragile — message text changes</span>
+<span class="kw">if</span> <span class="st">"policy denied"</span> <span class="kw">in</span> result.output:
+    ...</pre>
+      </div>
+      <div class="card green">
+        <h3>Executor wraps everything</h3>
+        <p><code>ToolExecutor</code> adds <code>duration_ms</code> and enforces <code>max_output_chars</code> on <em>every</em> result — success or error. The loop never receives raw exceptions from tool execution.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     11 · SAFETY LAYERS
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s11">
+  <div class="slide-tag">Safety · 06</div>
+  <h2>Safety: Three Layers</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="safety-flow">
+        <div class="safety-step">
+          <div class="safety-line">
+            <div class="safety-dot">1</div>
+            <div class="safety-connector"></div>
+          </div>
+          <div class="safety-content">
+            <div class="safety-title">SafetyPolicy.check_tool()</div>
+            <div class="safety-desc">Evaluates in order: read-only mode → approval requirements → path rules → denied_paths → allowed_paths → command rules → denied_commands → default ALLOW</div>
+          </div>
+        </div>
+        <div class="safety-step">
+          <div class="safety-line">
+            <div class="safety-dot">2</div>
+            <div class="safety-connector"></div>
+          </div>
+          <div class="safety-content">
+            <div class="safety-title">PermissionManager</div>
+            <div class="safety-desc">Handles ASK decisions via the ApprovalCallback. Caches APPROVED_ALWAYS so the user isn't prompted twice for the same tool.</div>
+          </div>
+        </div>
+        <div class="safety-step">
+          <div class="safety-line">
+            <div class="safety-dot">3</div>
+            <div style="width:2px;flex:1"></div>
+          </div>
+          <div class="safety-content">
+            <div class="safety-title">Sandbox</div>
+            <div class="safety-desc">OS-level isolation for shell commands. Local / Linux Landlock / Windows Job Object / WSL2 distro.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card red" style="margin-bottom:12px">
+        <h3>Always-denied paths</h3>
+        <div class="pills">
+          <span class="pill">/etc/shadow</span><span class="pill">**/.env</span>
+          <span class="pill">**/credentials</span><span class="pill">**/*.pem</span>
+          <span class="pill">**/.ssh/**</span><span class="pill">**/.aws/**</span>
+          <span class="pill">**/.npmrc</span><span class="pill">**/.pypirc</span>
+        </div>
+      </div>
+      <div class="card red" style="margin-bottom:12px">
+        <h3>Always-denied commands</h3>
+        <div class="pills">
+          <span class="pill">rm -rf /</span><span class="pill">mkfs</span>
+          <span class="pill">shutdown</span><span class="pill">:(){:\|:&amp;};:</span>
+          <span class="pill">chmod 777</span><span class="pill">curl|sh</span>
+          <span class="pill">nc -e</span><span class="pill">history -c</span>
+        </div>
+        <p style="margin-top:8px">Can be extended via config — never reduced via CLI flags alone.</p>
+      </div>
+      <div class="card orange">
+        <h3>Approval results</h3>
+        <table>
+          <tr><td>APPROVED</td><td>This specific call only</td></tr>
+          <tr><td>DENIED</td><td>This call is blocked</td></tr>
+          <tr><td>APPROVED_ALWAYS</td><td>Cached — all future calls to this tool</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     12 · PER-TRANSPORT SAFETY DEFAULTS
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s12">
+  <div class="slide-tag">Safety · 06b</div>
+  <h2>Per-Transport Safety Defaults</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="card green" style="margin-bottom:12px">
+        <h3><code>aar chat</code> / <code>aar tui</code> — Interactive</h3>
+        <p>Workspace sandbox <strong>ON by default</strong>:</p>
+        <table style="margin-top:10px">
+          <tr><th>Setting</th><th>Default</th><th>Effect</th></tr>
+          <tr><td>--require-approval</td><td><span class="badge b-green">on</span></td><td>Prompts before every write or shell cmd</td></tr>
+          <tr><td>--restrict-to-cwd</td><td><span class="badge b-green">on</span></td><td>File tools can only access <code>cwd/**</code></td></tr>
+        </table>
+        <hr style="margin:10px 0">
+        <p style="font-size:.82rem">Two-layer defense: file tools restricted by <code>allowed_paths</code>; bash bypasses that restriction so it requires human approval instead.</p>
+      </div>
+      <div class="card orange">
+        <h3><code>aar run</code> — Automation</h3>
+        <p>Permissive by default — designed for trusted, scripted workflows:</p>
+        <table style="margin-top:10px">
+          <tr><th>Setting</th><th>Default</th></tr>
+          <tr><td>--require-approval</td><td><span class="badge b-red">off</span></td></tr>
+          <tr><td>--restrict-to-cwd</td><td><span class="badge b-red">off</span></td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card red" style="margin-bottom:12px">
+        <h3><code>aar serve</code> — Web API</h3>
+        <p>No approval callback by default — any <code>ASK</code> decision is <strong>auto-denied</strong> (no human present). Override per-request via the body:</p>
+        <pre style="margin-top:10px;font-size:.76rem">{
+  <span class="pr">"prompt"</span>: <span class="st">"do something"</span>,
+  <span class="pr">"safety"</span>: { <span class="pr">"read_only"</span>: <span class="kw">true</span> }
+}</pre>
+      </div>
+      <div class="card blue">
+        <h3>Config file precedence</h3>
+        <div style="font-family:var(--mono);font-size:.8rem;line-height:1.9;color:var(--muted)">
+          <span style="color:var(--muted)">lowest</span>&nbsp;&nbsp; PolicyConfig defaults<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↓<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; config file (--config)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↓<br>
+          <span style="color:var(--green)">highest</span>&nbsp; explicit CLI flags
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     13 · SANDBOXES
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s13">
+  <div class="slide-tag">Sandboxes · 07</div>
+  <h2>Sandbox Modes</h2>
+  <p class="lead" style="margin-bottom:18px">Selected by <code>SafetyConfig.sandbox.mode</code>. All sandboxes return stdout+stderr capped at <code>max_output_chars</code>.</p>
+  <div class="cols">
+    <div class="col">
+      <div class="card" style="border-left:3px solid var(--muted);margin-bottom:12px">
+        <h3><span class="badge b-grey">local</span> LocalSandbox</h3>
+        <p>Direct <code>asyncio.create_subprocess_exec</code>. No isolation at all — for trusted environments only. Maximum compatibility.</p>
+      </div>
+      <div class="card green" style="margin-bottom:12px">
+        <h3><span class="badge b-green">linux</span> LinuxSandbox</h3>
+        <p><strong>Landlock LSM</strong> restricts writes to the workspace directory. <code>ulimit -v</code> memory cap. Restricted environment variables. Kernel-enforced, no root required.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card blue" style="margin-bottom:12px">
+        <h3><span class="badge b-blue">windows</span> WindowsSubprocessSandbox</h3>
+        <p><strong>Windows Job Object</strong> enforces memory and process count caps. Process runs at <strong>Low Integrity Level</strong> — blocked from writing to most system locations by the OS.</p>
+      </div>
+      <div class="card purple">
+        <h3><span class="badge b-purple">wsl</span> WslDistroSandbox</h3>
+        <p>Runs commands inside a dedicated <strong>WSL2 distro</strong>: <code>wsl -d &lt;distro&gt; -- sh -c &lt;cmd&gt;</code>. Strongest isolation on Windows. Distro lifecycle managed by <code>wsl_manager.py</code>.</p>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card orange">
+        <h3><span class="badge b-orange">auto</span> Auto Mode</h3>
+        <p>Detects the platform at runtime:</p>
+        <table style="margin-top:10px">
+          <tr><td>Linux</td><td>→ linux (Landlock)</td></tr>
+          <tr><td>Windows + WSL config</td><td>→ wsl</td></tr>
+          <tr><td>Windows</td><td>→ windows (Job Object)</td></tr>
+          <tr><td>Fallback</td><td>→ local</td></tr>
+        </table>
+        <p style="margin-top:8px">Recommended for cross-platform configs.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     14 · PROVIDERS
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s14">
+  <div class="slide-tag">Providers · 08</div>
+  <h2>Provider System</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="card blue" style="margin-bottom:12px">
+        <h3>Provider ABC</h3>
+        <pre><span class="kw">class</span> <span class="ty">Provider</span>(ABC):
+    <span class="kw">async def</span> <span class="fn">complete</span>(
+        self,
+        messages: list,
+        tools: list[<span class="ty">ToolSpec</span>],
+        system_prompt: str
+    ) -> <span class="ty">ProviderResponse</span>
+
+    <span class="kw">def</span> <span class="fn">capabilities</span>(self) -> <span class="ty">ProviderCapabilities</span>
+
+    <span class="cm"># optional streaming:</span>
+    <span class="kw">async def</span> <span class="fn">stream</span>(...) -> AsyncIterator[Delta]</pre>
+      </div>
+      <div class="card green">
+        <h3>ProviderResponse fields</h3>
+        <table>
+          <tr><td>text</td><td>The model's text output</td></tr>
+          <tr><td>tool_calls</td><td>List of requested tool calls</td></tr>
+          <tr><td>stop_reason</td><td><code>end_turn</code> or <code>max_tokens</code></td></tr>
+          <tr><td>meta</td><td>timing + token usage (ProviderMeta)</td></tr>
+          <tr><td>reasoning_blocks</td><td>Extended thinking content (optional)</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card">
+        <table>
+          <tr><th>Provider</th><th>SDK</th><th>Notable features</th></tr>
+          <tr>
+            <td><span class="badge b-orange">anthropic</span></td>
+            <td><code>anthropic</code></td>
+            <td>Tools, streaming, extended thinking</td>
+          </tr>
+          <tr>
+            <td><span class="badge b-green">openai</span></td>
+            <td><code>openai</code></td>
+            <td>Tools, streaming, Azure &amp; Together via <code>base_url</code></td>
+          </tr>
+          <tr>
+            <td><span class="badge b-blue">ollama</span></td>
+            <td><code>httpx</code></td>
+            <td>Tools, DeepSeek-r1 reasoning extraction</td>
+          </tr>
+          <tr>
+            <td><span class="badge b-grey">generic</span></td>
+            <td><code>httpx</code></td>
+            <td>Tools, streaming, any OpenAI-compatible endpoint</td>
+          </tr>
+        </table>
+      </div>
+      <div class="card blue" style="margin-top:0">
+        <h3>Streaming fallback</h3>
+        <p>If a stream closes without a terminal <code>done=True</code> delta, <code>_consume_stream()</code> logs at WARNING and falls back to <code>END_TURN</code> or <code>TOOL_USE</code>. SSE transports never hang.</p>
+      </div>
+      <div class="card orange">
+        <h3>Selection</h3>
+        <pre><span class="ty">ProviderConfig</span>(
+  name=<span class="st">"anthropic"</span>,
+  model=<span class="st">"claude-sonnet-4-6"</span>
+)</pre>
+        <p style="margin-top:8px"><code>PROVIDER_REGISTRY</code> maps names to classes via lazy import. Never import providers from outside <code>agent/providers/</code>.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     15 · EVENTS & SESSION
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s15">
+  <div class="slide-tag">Events &amp; Session · 09</div>
+  <h2>Event Model &amp; Session Persistence</h2>
+  <div class="cols">
+    <div class="col col-2">
+      <div class="card" style="margin-bottom:14px">
+        <table>
+          <tr><th>Event class</th><th>type</th><th>Key fields</th></tr>
+          <tr><td>AssistantMessage</td><td><code>assistant_message</code></td><td>content</td></tr>
+          <tr><td>ToolCall</td><td><code>tool_call</code></td><td>tool_name, arguments, call_id</td></tr>
+          <tr><td>ToolResult</td><td><code>tool_result</code></td><td>tool_name, output, is_error, duration_ms</td></tr>
+          <tr><td>ReasoningBlock</td><td><code>reasoning</code></td><td>content</td></tr>
+          <tr><td>ProviderMeta</td><td><code>provider_meta</code></td><td>usage, duration_ms, model, provider</td></tr>
+          <tr><td>ErrorEvent</td><td><code>error</code></td><td>message</td></tr>
+          <tr><td>StreamChunk</td><td><code>stream_chunk</code></td><td>text, reasoning_text, finished</td></tr>
+          <tr><td>SessionEvent</td><td><code>session</code></td><td>action</td></tr>
+        </table>
+      </div>
+      <div class="card blue">
+        <h3>session.to_messages()</h3>
+        <div style="font-family:var(--mono);font-size:.8rem;line-height:1.8;color:var(--muted)">
+          Pending <span style="color:var(--accent)">ToolCall</span> events<br>
+          &nbsp; → bundled as <code>tool_use</code> blocks in assistant message<br><br>
+          <span style="color:var(--accent)">ToolResult</span> events<br>
+          &nbsp; → flushed as <code>tool_result</code> blocks in user message<br><br>
+          Result: <span style="color:var(--green)">assistant[text + tool_use] → user[tool_result]</span><br>
+          This matches the Anthropic API's expected message structure.
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card green" style="margin-bottom:14px">
+        <h3>Session identifiers</h3>
+        <table>
+          <tr><td>session_id</td><td>Stable across reloads</td></tr>
+          <tr><td>run_id</td><td>Refreshed on each <code>agent.run()</code></td></tr>
+          <tr><td>trace_id</td><td>Stable for object lifetime (distributed tracing)</td></tr>
+        </table>
+      </div>
+      <div class="card orange" style="margin-bottom:14px">
+        <h3>JSONL persistence</h3>
+        <p>One JSON line per event. Session metadata in the first line. Resumable from any point.</p>
+        <pre style="margin-top:10px;font-size:.76rem">store.<span class="fn">compact</span>(session_id, max_events=<span class="nm">200</span>)
+<span class="cm"># trims old events to keep file small</span></pre>
+      </div>
+      <div class="card purple">
+        <h3>Subscribe to events</h3>
+        <pre style="font-size:.76rem"><span class="kw">def</span> <span class="fn">on_event</span>(event: <span class="ty">Event</span>):
+    <span class="kw">if</span> <span class="fn">isinstance</span>(event, <span class="ty">ToolCall</span>):
+        print(event.tool_name)
+
+agent.<span class="fn">on_event</span>(on_event)</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     16 · TRANSPORTS & ACP
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s16">
+  <div class="slide-tag">Transports · 10</div>
+  <h2>Transport Layer &amp; ACP</h2>
+  <p class="lead" style="margin-bottom:16px">Thin I/O adapters. Same <code>Agent</code> class and <code>AgentConfig</code> everywhere.</p>
+  <div class="cols">
+    <div class="col col-2">
+      <div class="card" style="margin-bottom:12px">
+        <table>
+          <tr><th>Transport</th><th>Entry point</th><th>Notes</th></tr>
+          <tr><td>CLI</td><td><code>aar chat / run</code></td><td>Typer app, terminal approval callback</td></tr>
+          <tr><td>TUI</td><td><code>aar tui</code></td><td>Rich inline, scrollable</td></tr>
+          <tr><td>TUI Fixed</td><td><code>aar tui --fixed</code></td><td>Textual full-screen, fixed header/footer</td></tr>
+          <tr><td>Web</td><td><code>aar serve</code></td><td>ASGI + SSE, per-request safety override</td></tr>
+          <tr><td>ACP stdio</td><td><code>aar acp</code></td><td>SDK transport for Zed (stdin/stdout)</td></tr>
+          <tr><td>ACP HTTP</td><td><code>aar acp --http</code></td><td>ACP v0.2 REST/SSE server (uvicorn)</td></tr>
+        </table>
+      </div>
+      <div class="card blue">
+        <h3>ACP endpoints</h3>
+        <pre style="font-size:.76rem"><span class="ty">GET</span>  /agents               <span class="cm">list agents (manifest)</span>
+<span class="ty">GET</span>  /agents/{name}        <span class="cm">single agent manifest</span>
+<span class="ty">POST</span> /runs                 <span class="cm">create run (sync/async/stream)</span>
+<span class="ty">GET</span>  /runs/{id}            <span class="cm">status &amp; output</span>
+<span class="ty">POST</span> /runs/{id}/cancel    <span class="cm">cancel in-progress run</span>
+<span class="ty">GET</span>  /runs/{id}/events    <span class="cm">full ACP event log</span>
+<span class="ty">GET</span>  /sessions/{id}       <span class="cm">session metadata</span>
+<span class="ty">GET</span>  /ping                <span class="cm">health check</span></pre>
+      </div>
+    </div>
+    <div class="col">
+      <div class="card green" style="margin-bottom:12px">
+        <h3>Run modes</h3>
+        <table>
+          <tr><td><span class="badge b-blue">sync</span></td><td>Block until complete, return Run</td></tr>
+          <tr><td><span class="badge b-orange">async</span></td><td>Return 202, poll GET /runs/{id}</td></tr>
+          <tr><td><span class="badge b-purple">stream</span></td><td>SSE — <code>data: &lt;json&gt;\n\n</code> per event</td></tr>
+        </table>
+      </div>
+      <div class="card orange" style="margin-bottom:12px">
+        <h3>Zed local dev</h3>
+        <pre style="font-size:.74rem"><span class="cm">// ~/.config/zed/settings.json</span>
+{
+  <span class="pr">"agent_servers"</span>: {
+    <span class="pr">"Aar (local)"</span>: {
+      <span class="pr">"type"</span>: <span class="st">"custom"</span>,
+      <span class="pr">"command"</span>: <span class="st">"aar"</span>,
+      <span class="pr">"args"</span>: [<span class="st">"acp"</span>]
+    }
+  }
+}</pre>
+      </div>
+      <div class="card purple">
+        <h3>Embeddable</h3>
+        <pre style="font-size:.74rem"><span class="kw">from</span> agent.transports.acp <span class="kw">import</span> <span class="fn">create_acp_asgi_app</span>
+app = <span class="fn">create_acp_asgi_app</span>(
+    config=my_config, agent_name=<span class="st">"aar"</span>
+)</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     17 · FULL DATA FLOW
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s17">
+  <div class="slide-tag">End to End</div>
+  <h2>Complete Data Flow</h2>
+  <div class="diag" style="flex:1;font-size:.76rem"><span class="dd">User / Transport</span>
+       │  (string or multimodal content)
+       ▼
+<span class="da">Agent.run()</span>
+       ├─ Session.append(UserMessage)
+       ▼
+<span class="do">───── LOOP ITERATION ─────────────────────────────────────────────────────────────────</span>
+       │
+       ├─ <span class="da">① Guard checks</span>    cancel / timeout / max_steps  →  exit early if triggered
+       │
+       ├─ <span class="da">② Context trim</span>    sliding_window: trim_to_token_budget(messages)
+       │
+       ├─ <span class="da">③ Provider</span>         (provider_runner.py)
+       │     provider.complete()  or  provider.stream()
+       │     retry with exponential back-off on recoverable errors
+       │     emit ProviderMeta (timing + token usage)
+       │
+       ├─ <span class="da">④ Budget check</span>    token_budget / cost_limit  →  BUDGET_EXCEEDED if exceeded
+       │
+       ├─ <span class="da">⑤ tool_calls?</span>
+       │   YES ─┬─ observe_tool_calls() → is_stuck()? → <span class="dr">ERROR</span> if repeated ≥ threshold
+       │        ├─ for each tool_call:
+       │        │     emit ToolCall
+       │        │     SafetyPolicy.check_tool() → ALLOW / DENY / ASK
+       │        │     if ASK → ApprovalCallback (terminal prompt or auto-deny)
+       │        │     sandbox.run() → emit ToolResult (duration_ms + truncated output)
+       │        └─ emit AssistantMessage (bundles tool_use blocks)  → loop back to ①
+       │
+       │   NO  ─┬─ max_tokens + recovery budget left?
+       │        │   → inject internal continuation prompt → loop back to ①
+       │        └─ end_turn (or max_tokens, no budget)
+       │             emit AssistantMessage → <span class="dg">done = True</span>
+<span class="do">───── END ITERATION ──────────────────────────────────────────────────────────────────</span>
+       │
+       ▼
+<span class="dg">Session.state = COMPLETED  (or CANCELLED / ERROR / MAX_STEPS / TIMED_OUT / BUDGET_EXCEEDED)</span>
+       │
+       ├─ JSONL persisted: one line per event
+       │
+       └─ Transport event callbacks received every event in real time</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     18 · CONFIG REFERENCE
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s18">
+  <div class="slide-tag">Reference</div>
+  <h2>Key Config Fields</h2>
+  <div class="cols">
+    <div class="col col-2">
+      <pre class="grow"><span class="cm">// AgentConfig JSON (load with: aar chat --config aar.json)</span>
+{
+  <span class="pr">"provider"</span>: {
+    <span class="pr">"name"</span>: <span class="st">"anthropic"</span>,              <span class="cm">// anthropic | openai | ollama | generic</span>
+    <span class="pr">"model"</span>: <span class="st">"claude-sonnet-4-6"</span>
+  },
+
+  <span class="pr">"max_steps"</span>: <span class="nm">30</span>,                    <span class="cm">// steps before MAX_STEPS exit</span>
+  <span class="pr">"timeout"</span>: <span class="nm">120.0</span>,                  <span class="cm">// seconds; 0 = disabled</span>
+  <span class="pr">"token_budget"</span>: <span class="nm">100000</span>,            <span class="cm">// BUDGET_EXCEEDED if exceeded</span>
+  <span class="pr">"cost_limit"</span>: <span class="nm">0.50</span>,               <span class="cm">// USD; 0 = disabled</span>
+  <span class="pr">"streaming"</span>: <span class="kw">false</span>,
+
+  <span class="pr">"guardrails"</span>: {
+    <span class="pr">"max_tokens_recoveries"</span>:   <span class="nm">2</span>,    <span class="cm">// auto-retry truncated responses</span>
+    <span class="pr">"max_repeated_tool_steps"</span>: <span class="nm">3</span>,    <span class="cm">// identical tool-call sets before abort</span>
+    <span class="pr">"reserve_tokens"</span>:          <span class="nm">512</span>,  <span class="cm">// near_budget() headroom</span>
+    <span class="pr">"reserve_cost_fraction"</span>:   <span class="nm">0.1</span>   <span class="cm">// fraction of cost_limit as reserve</span>
+  },
+
+  <span class="pr">"tools"</span>: {
+    <span class="pr">"enabled_builtins"</span>: [<span class="st">"read_file"</span>, <span class="st">"bash"</span>],
+    <span class="pr">"command_timeout"</span>: <span class="nm">30</span>,          <span class="cm">// seconds per bash call</span>
+    <span class="pr">"max_output_chars"</span>: <span class="nm">10000</span>       <span class="cm">// truncation limit for tool output</span>
+  },
+
+  <span class="pr">"safety"</span>: {
+    <span class="pr">"read_only"</span>: <span class="kw">false</span>,
+    <span class="pr">"require_approval_for_writes"</span>: <span class="kw">true</span>,
+    <span class="pr">"require_approval_for_execute"</span>: <span class="kw">true</span>,
+    <span class="pr">"allowed_paths"</span>: [<span class="st">"/home/user/project/**"</span>],
+    <span class="pr">"denied_paths"</span>: [<span class="st">"**/secrets/**"</span>],
+    <span class="pr">"sandbox"</span>: { <span class="pr">"mode"</span>: <span class="st">"auto"</span> }   <span class="cm">// local | linux | windows | wsl | auto</span>
+  }
+}</pre>
+    </div>
+    <div class="col">
+      <div class="card blue" style="margin-bottom:12px">
+        <h3>CLI quick reference</h3>
+        <pre><span class="cm"># interactive (sandbox on)</span>
+aar chat
+aar tui
+aar tui --fixed
+
+<span class="cm"># one-shot (permissive)</span>
+aar run <span class="st">"do something"</span>
+
+<span class="cm"># with config file</span>
+aar chat --config aar.json
+
+<span class="cm"># web + ACP</span>
+aar serve
+aar acp
+aar acp --http</pre>
+      </div>
+      <div class="card green" style="margin-bottom:12px">
+        <h3>Observability</h3>
+        <pre><span class="kw">from</span> agent.extensions.observability \
+  <span class="kw">import</span> <span class="fn">session_metrics</span>
+
+m = <span class="fn">session_metrics</span>(session)
+<span class="cm"># steps, tokens, cost, tool calls</span>
+<span class="cm"># per-step breakdown — no agent needed</span></pre>
+      </div>
+      <div class="card orange">
+        <h3>Tests</h3>
+        <pre><span class="cm"># unit tests (no API keys)</span>
+pytest tests/ -v
+
+<span class="cm"># live provider tests</span>
+pytest tests/ -m live --live -v</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     19 · CLOSING
+════════════════════════════════════════════════════════ -->
+<div class="slide" id="s19">
+  <div class="hero">
+    <div class="slide-tag">Done</div>
+    <h1>That's the <span>Aar</span> Loop</h1>
+    <p class="lead" style="max-width:560px;margin-top:14px">
+      Thin core, typed events, mechanical guardrails, layered safety, pluggable everything. The loop does exactly three things — the rest is delegation.
+    </p>
+    <div class="hero-stats">
+      <div><div class="stat-val" style="font-size:1rem;color:var(--muted);font-family:var(--mono)">loop.py</div><div class="stat-lbl">control flow only</div></div>
+      <div><div class="stat-val" style="font-size:1rem;color:var(--muted);font-family:var(--mono)">guardrails.py</div><div class="stat-lbl">mechanical safety nets</div></div>
+      <div><div class="stat-val" style="font-size:1rem;color:var(--muted);font-family:var(--mono)">safety/policy.py</div><div class="stat-lbl">ALLOW / DENY / ASK</div></div>
+      <div><div class="stat-val" style="font-size:1rem;color:var(--muted);font-family:var(--mono)">events.py</div><div class="stat-lbl">Pydantic — fully typed</div></div>
+    </div>
+    <div style="margin-top:36px">
+      <p style="font-size:.82rem;margin-bottom:10px;color:var(--muted)">Read the docs:</p>
+      <div class="pills">
+        <span class="pill">docs/agent_loop.md</span>
+        <span class="pill">docs/architecture.md</span>
+        <span class="pill">docs/safety.md</span>
+        <span class="pill">docs/sandbox_architecture.md</span>
+        <span class="pill">docs/tokens.md</span>
+        <span class="pill">config/samples/</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- #deck -->
+
+<!-- ── NAV ── -->
+<div id="progress"></div>
+<div id="nav">
+  <button class="nbtn" id="btnPrev" title="Previous (←)">&#8592;</button>
+  <span id="counter">1 / 19</span>
+  <button class="nbtn" id="btnNext" title="Next (→)">&#8594;</button>
+</div>
+<div id="hint">← → arrow keys &nbsp;·&nbsp; space</div>
+<div class="wmark">Aar Agent Framework</div>
+
+<script>
+/* ── SLIDE NAVIGATION ── */
+const slides = document.querySelectorAll('.slide');
+const TOTAL = slides.length;
+let cur = 0;
+
+function goTo(idx) {
+  if (idx < 0 || idx >= TOTAL) return;
+  slides[cur].classList.remove('active');
+  slides[cur].classList.add('exit-l');
+  cur = idx;
+  slides[cur].classList.add('active');
+  slides[cur].classList.remove('exit-l');
+  setTimeout(() => slides.forEach(s => s.classList.remove('exit-l')), 400);
+  document.getElementById('progress').style.width = (cur / (TOTAL - 1) * 100) + '%';
+  document.getElementById('counter').textContent = (cur + 1) + ' / ' + TOTAL;
+  document.getElementById('btnPrev').disabled = cur === 0;
+  document.getElementById('btnNext').disabled = cur === TOTAL - 1;
+
+  // start/stop loop animation when on slide 4 (index 3)
+  if (cur === 3) startLoop(); else stopLoop();
+}
+
+document.getElementById('btnNext').addEventListener('click', () => goTo(cur + 1));
+document.getElementById('btnPrev').addEventListener('click', () => goTo(cur - 1));
+document.addEventListener('keydown', e => {
+  if (['ArrowRight','ArrowDown',' '].includes(e.key)) { e.preventDefault(); goTo(cur + 1); }
+  else if (['ArrowLeft','ArrowUp'].includes(e.key))   { e.preventDefault(); goTo(cur - 1); }
+  else if (e.key === 'Home') goTo(0);
+  else if (e.key === 'End')  goTo(TOTAL - 1);
+});
+let touchX = null;
+document.addEventListener('touchstart', e => touchX = e.touches[0].clientX);
+document.addEventListener('touchend', e => {
+  if (touchX === null) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  if (Math.abs(dx) > 50) dx < 0 ? goTo(cur + 1) : goTo(cur - 1);
+  touchX = null;
+});
+
+/* ── LOOP ANIMATION ── */
+const PHASES = [
+  {
+    id: 'lp0', arrowAfter: 'la0', loopback: false,
+    badge: '① Pre-flight', title: 'Guard Checks',
+    body: 'At the very start of every iteration, three safety checks run before anything else. If any one fires, the loop exits immediately — no LLM call is made.',
+    exits: [
+      { cond: 'cancel_event set',       what: '→ exit with CANCELLED' },
+      { cond: 'elapsed > timeout',      what: '→ exit with TIMED_OUT  (skipped when timeout = 0)' },
+      { cond: 'step ≥ max_steps',       what: '→ exit with MAX_STEPS' },
+    ]
+  },
+  {
+    id: 'lp1', arrowAfter: 'la1', loopback: false,
+    badge: '② Context', title: 'Trim Messages',
+    body: 'When the sliding_window context strategy is enabled, old messages are dropped from the start of the conversation to keep the total token count within the configured context_window budget.',
+    exits: [
+      { cond: 'context_window = 0',   what: '→ skip this step (default)' },
+      { cond: 'messages over budget', what: '→ trim_to_token_budget() removes oldest' },
+    ]
+  },
+  {
+    id: 'lp2', arrowAfter: 'la2', loopback: false,
+    badge: '③ Provider', title: 'Call the LLM',
+    body: 'The core action: send all messages, available tool specs, and the system prompt to the LLM. Retries with exponential back-off on recoverable errors. Supports both streaming (chunk-by-chunk) and non-streaming modes.',
+    exits: [
+      { cond: 'recoverable error',    what: '→ retry (exponential back-off)' },
+      { cond: 'max_retries reached',  what: '→ exit with ERROR' },
+      { cond: 'success',              what: '→ emit ProviderMeta, continue' },
+    ]
+  },
+  {
+    id: 'lp3', arrowAfter: 'la3', loopback: false,
+    badge: '④ Budget', title: 'Token & Cost Check',
+    body: 'After each LLM call, accumulated token usage and cost are updated on the session. If either hard limit is exceeded, the loop stops before executing any tool calls — protecting against runaway costs.',
+    exits: [
+      { cond: 'tokens > token_budget', what: '→ exit with BUDGET_EXCEEDED' },
+      { cond: 'cost > cost_limit',     what: '→ exit with BUDGET_EXCEEDED' },
+      { cond: 'within limits',         what: '→ continue to response handling' },
+    ]
+  },
+  {
+    id: 'lp4', arrowAfter: null, loopback: true,
+    badge: '⑤A Tools', title: 'Guardrail + Execute',
+    body: 'When the LLM requests tool calls: first check for repetition (same calls 3× in a row = stuck loop → abort). Then run each tool through SafetyPolicy → ApprovalCallback → Sandbox, collecting results. Then loop back to ①.',
+    exits: [
+      { cond: 'repeated ≥ threshold',  what: '→ exit with ERROR (repetition guard)' },
+      { cond: 'policy DENY',           what: '→ ToolResult Error [blocked]' },
+      { cond: 'human denies',          what: '→ ToolResult Error [denied]' },
+      { cond: 'success',               what: '→ loop back to ① with results' },
+    ]
+  },
+  {
+    id: 'lp5', arrowAfter: null, loopback: false,
+    badge: '⑤B Recovery', title: 'Max-tokens Recovery',
+    body: 'No tool calls and stop_reason = "max_tokens": the model was cut off mid-response. Inject a hidden continuation message ("Continue from where you left off…") and loop back to ①. Limited by max_tokens_recoveries.',
+    exits: [
+      { cond: 'recovery count < limit',  what: '→ inject continuation → back to ①' },
+      { cond: 'recovery limit reached',  what: '→ treat as end_turn' },
+    ]
+  },
+  {
+    id: 'lp6', arrowAfter: null, loopback: false,
+    badge: '✓ Done', title: 'Completed',
+    body: 'stop_reason = "end_turn": the model finished its response naturally. Emit the AssistantMessage, set session.state = COMPLETED, and return. The full event history is persisted to JSONL.',
+    exits: [
+      { cond: 'always', what: '→ session.state = COMPLETED' },
+    ]
+  },
+];
+
+let loopPhase = 0;
+let loopTimer = null;
+let loopRunning = true;
+const INTERVAL = 2500;
+
+// Build dots
+const dotsEl = document.getElementById('ppDots');
+PHASES.forEach((_, i) => {
+  const d = document.createElement('div');
+  d.className = 'pp-dot' + (i === 0 ? ' active' : '');
+  d.dataset.i = i;
+  d.addEventListener('click', () => { setLoopPhase(i); if (!loopRunning) {} });
+  dotsEl.appendChild(d);
+});
+
+function setLoopPhase(idx) {
+  // clear all active
+  PHASES.forEach(p => {
+    const el = document.getElementById(p.id);
+    if (el) el.classList.remove('lc-active');
+    if (p.arrowAfter) {
+      const a = document.getElementById(p.arrowAfter);
+      if (a) a.classList.remove('arr-active');
+    }
+  });
+  document.getElementById('loopback').classList.remove('lb-active');
+
+  const phase = PHASES[idx];
+  const node  = document.getElementById(phase.id);
+  if (node) node.classList.add('lc-active');
+  if (phase.arrowAfter) {
+    const a = document.getElementById(phase.arrowAfter);
+    if (a) a.classList.add('arr-active');
+  }
+  if (phase.loopback) {
+    document.getElementById('loopback').classList.add('lb-active');
+  }
+
+  // update description
+  document.getElementById('ldBadge').textContent = phase.badge;
+  document.getElementById('ldTitle').textContent = phase.title;
+  document.getElementById('ldBody').textContent  = phase.body;
+  const exitsEl = document.getElementById('ldExits');
+  exitsEl.innerHTML = phase.exits.map(e =>
+    `<div class="ld-exit-row"><span class="ld-exit-cond">${e.cond}</span><span class="ld-exit-what">${e.what}</span></div>`
+  ).join('');
+
+  // dots
+  document.querySelectorAll('.pp-dot').forEach((d, i) => {
+    d.classList.toggle('active', i === idx);
+  });
+
+  loopPhase = idx;
+}
+
+function advanceLoop() {
+  setLoopPhase((loopPhase + 1) % PHASES.length);
+}
+
+function startLoop() {
+  setLoopPhase(0);
+  if (loopRunning && !loopTimer) {
+    loopTimer = setInterval(advanceLoop, INTERVAL);
+  }
+}
+
+function stopLoop() {
+  clearInterval(loopTimer);
+  loopTimer = null;
+}
+
+const ppBtn = document.getElementById('ppBtn');
+ppBtn.addEventListener('click', () => {
+  loopRunning = !loopRunning;
+  ppBtn.textContent = loopRunning ? '⏸ Pause' : '▶ Play';
+  if (loopRunning) {
+    loopTimer = setInterval(advanceLoop, INTERVAL);
+  } else {
+    stopLoop();
+  }
+});
+
+// init
+goTo(0);
+</script>
+</body>
+</html>

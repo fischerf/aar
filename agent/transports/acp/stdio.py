@@ -13,7 +13,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 from agent.core.agent import Agent as AarAgent
-from agent.core.config import AgentConfig
+from agent.core.config import AgentConfig, ProviderConfig
 from agent.core.events import (
     AssistantMessage,
     Event,
@@ -97,6 +97,9 @@ class AarAcpAgent:
         # session_update, etc). Without this set the tasks can be GC'd
         # mid-flight; the done-callback also surfaces silent exceptions.
         self._background_tasks: set[asyncio.Task] = set()
+        # Per-session extension managers — loaded at session creation so that
+        # extension slash-commands are available before the agent loop runs.
+        self._extension_managers: dict[str, Any] = {}
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_id)
@@ -162,10 +165,14 @@ class AarAcpAgent:
         from acp.schema import AvailableCommandsUpdate
 
         if self._conn:
+            ext_mgr = self._extension_managers.get(session_id)
+            ext_extra = (
+                {name: desc for name, (desc, _) in ext_mgr.commands.items()} if ext_mgr else None
+            )
             await self._conn.session_update(
                 session_id=session_id,
                 update=AvailableCommandsUpdate(
-                    available_commands=_available_commands(),
+                    available_commands=_available_commands(ext_extra),
                     session_update="available_commands_update",
                 ),
                 source=self._agent_name,
@@ -223,6 +230,7 @@ class AarAcpAgent:
             self._sessions[sid] = session
             self._store.save(session)
             await self._setup_mcp(sid, mcp_servers or [])
+            await self._setup_extensions(sid, session)
         # Fire-and-forget: try to push commands early. The notification may
         # arrive before the client acknowledges the session, so prompt() is
         # the guaranteed delivery point.
@@ -233,7 +241,10 @@ class AarAcpAgent:
             session_id=sid,
             modes=_build_mode_state(cfg.safety, self._session_modes.get(sid)),
             config_options=_build_config_options(
-                cfg.safety, cfg.provider, self._session_modes.get(sid)
+                cfg.safety,
+                cfg.resolve_provider(),
+                self._session_modes.get(sid),
+                providers=cfg.providers,
             ),
         )
         logger.debug(
@@ -273,6 +284,7 @@ class AarAcpAgent:
                     session.metadata["cwd"] = cwd
                 self._sessions[session_id] = session
                 await self._setup_mcp(session_id, mcp_servers or [])
+                await self._setup_extensions(session_id, session)
 
             # Replay conversation history per ACP spec.
             # The Agent MUST replay the entire conversation via session/update
@@ -307,7 +319,10 @@ class AarAcpAgent:
             resp = LoadSessionResponse(
                 modes=_build_mode_state(cfg.safety, self._session_modes.get(session_id)),
                 config_options=_build_config_options(
-                    cfg.safety, cfg.provider, self._session_modes.get(session_id)
+                    cfg.safety,
+                    cfg.resolve_provider(),
+                    self._session_modes.get(session_id),
+                    providers=cfg.providers,
                 ),
             )
             logger.debug(
@@ -401,6 +416,7 @@ class AarAcpAgent:
             self._session_configs.pop(session_id, None)
             self._session_modes.pop(session_id, None)
             self._commands_pushed.discard(session_id)
+            self._extension_managers.pop(session_id, None)
         self._session_locks.pop(session_id, None)
         logger.info("ACP: closed session %s", session_id)
         return CloseSessionResponse()
@@ -441,11 +457,31 @@ class AarAcpAgent:
         from acp.schema import SetSessionModelResponse
 
         validate_session_id(session_id)
-        provider_name, model = _model_id_to_provider(model_id)
         base_cfg = self._session_configs.get(session_id, self._config)
-        new_provider = base_cfg.provider.model_copy(update={"name": provider_name, "model": model})
-        self._session_configs[session_id] = base_cfg.model_copy(update={"provider": new_provider})
-        logger.info("ACP: session %s model → %s/%s", session_id, provider_name, model)
+
+        # Check if model_id is a named provider key in the config registry
+        if model_id in base_cfg.providers:
+            new_provider = base_cfg.providers[model_id]
+        else:
+            provider_name, model = _model_id_to_provider(model_id)
+            new_provider = (
+                base_cfg.provider
+                if isinstance(base_cfg.provider, ProviderConfig)
+                else base_cfg.resolve_provider()
+            )
+            new_provider = new_provider.model_copy(
+                update={"name": provider_name, "model": model},
+            )
+
+        self._session_configs[session_id] = base_cfg.model_copy(
+            update={"provider": new_provider},
+        )
+        logger.info(
+            "ACP: session %s model → %s/%s",
+            session_id,
+            new_provider.name,
+            new_provider.model,
+        )
         return SetSessionModelResponse()
 
     async def authenticate(self, method_id: str, **kwargs: Any) -> Any:
@@ -534,7 +570,12 @@ class AarAcpAgent:
                     session_id=session_id,
                     update=ConfigOptionUpdate(
                         session_update="config_option_update",
-                        config_options=_build_config_options(cfg.safety, cfg.provider, mode_id),
+                        config_options=_build_config_options(
+                            cfg.safety,
+                            cfg.resolve_provider(),
+                            mode_id,
+                            providers=cfg.providers,
+                        ),
                     ),
                     source=self._agent_name,
                 ),
@@ -566,12 +607,18 @@ class AarAcpAgent:
         validate_session_id(session_id)
         base_cfg = self._session_configs.get(session_id, self._config)
         safety = base_cfg.safety
-        provider = base_cfg.provider
+        provider = base_cfg.resolve_provider()
 
         if config_id == "model":
             model_id = str(value)
-            provider_name, model = _model_id_to_provider(model_id)
-            new_provider = provider.model_copy(update={"name": provider_name, "model": model})
+            # Check if model_id is a named provider key in the config registry
+            if model_id in base_cfg.providers:
+                new_provider = base_cfg.providers[model_id]
+            else:
+                p_name, p_model = _model_id_to_provider(model_id)
+                new_provider = provider.model_copy(
+                    update={"name": p_name, "model": p_model},
+                )
             self._session_configs[session_id] = base_cfg.model_copy(
                 update={"provider": new_provider}
             )
@@ -579,8 +626,8 @@ class AarAcpAgent:
             logger.info(
                 "ACP: session %s model → %s/%s (via set_config_option)",
                 session_id,
-                provider_name,
-                model,
+                new_provider.name,
+                new_provider.model,
             )
         elif config_id == "mode":
             mode_id = str(value)
@@ -617,7 +664,12 @@ class AarAcpAgent:
         else:
             raise ValueError(f"Unknown config option: {config_id!r}")
 
-        config_opts = _build_config_options(safety, provider, self._session_modes.get(session_id))
+        config_opts = _build_config_options(
+            safety,
+            provider,
+            self._session_modes.get(session_id),
+            providers=base_cfg.providers,
+        )
         return SetSessionConfigOptionResponse(config_options=config_opts)
 
     async def fork_session(
@@ -663,6 +715,7 @@ class AarAcpAgent:
                 self._session_modes[new_sid] = self._session_modes[session_id]
             self._store.save(forked)
             await self._setup_mcp(new_sid, mcp_servers or [])
+            await self._setup_extensions(new_sid, forked)
 
         self._spawn(self._push_available_commands(new_sid), name=f"push-cmds-{new_sid}")
         logger.info(
@@ -696,6 +749,7 @@ class AarAcpAgent:
                     session.metadata["cwd"] = cwd
                 self._sessions[session_id] = session
                 await self._setup_mcp(session_id, mcp_servers or [])
+                await self._setup_extensions(session_id, session)
             self._spawn(
                 self._push_available_commands(session_id),
                 name=f"push-cmds-{session_id}",
@@ -750,6 +804,10 @@ class AarAcpAgent:
                     logger.info("ACP: creating fresh session for id %s", session_id)
                     session = Session(session_id=session_id)
                     self._sessions[session_id] = session
+
+            # Lazily initialize extensions if session was created without new_session().
+            if session_id not in self._extension_managers:
+                await self._setup_extensions(session_id, session)
 
             cancel_event = asyncio.Event()
             self._cancel_events[session_id] = cancel_event
@@ -881,13 +939,40 @@ class AarAcpAgent:
 
         # Handle slash commands locally — no agent loop needed
         cmd = text.strip().split()[0].lower() if text.strip().startswith("/") else ""
-        if cmd in ("/status", "/tools", "/policy"):
-            reply = self._handle_slash_command(cmd, session_id, session)
+        if cmd in ("/status", "/tools", "/policy", "/model"):
+            cmd_args = (
+                text.strip().split(maxsplit=1)[1] if len(text.strip().split(maxsplit=1)) > 1 else ""
+            )
+            reply = self._handle_slash_command(cmd, session_id, session, args=cmd_args)
             _push(update_agent_message(text_block(reply)))
             if update_tasks:
                 await asyncio.gather(*update_tasks, return_exceptions=True)
             self._cancel_events.pop(session_id, None)
             return PromptResponse(stop_reason="end_turn")
+
+        # Handle extension slash commands
+        if cmd:
+            ext_mgr = self._extension_managers.get(session_id)
+            if ext_mgr is not None:
+                cmd_name = cmd[1:]  # strip leading "/"
+                ext_cmds = ext_mgr.commands
+                if cmd_name in ext_cmds:
+                    ext_mgr.update_session(session)
+                    args_str = text.strip()[len(cmd) :].strip()
+                    _, handler = ext_cmds[cmd_name]
+                    try:
+                        result = handler(args_str, ext_mgr._context)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                        reply = str(result) if result is not None else ""
+                    except Exception as exc:
+                        logger.error("ACP: extension command %r error: %s", cmd_name, exc)
+                        reply = f"Extension command error: {exc}"
+                    _push(update_agent_message(text_block(reply)))
+                    if update_tasks:
+                        await asyncio.gather(*update_tasks, return_exceptions=True)
+                    self._cancel_events.pop(session_id, None)
+                    return PromptResponse(stop_reason="end_turn")
 
         # Build the approval callback: use ACP request_permission when a client
         # is connected (Zed / stdio mode), fall back to the configured default.
@@ -953,16 +1038,69 @@ class AarAcpAgent:
             registry=registry,
         )
 
-    def _handle_slash_command(self, cmd: str, session_id: str, session: Session) -> str:
+    def _handle_slash_command(
+        self,
+        cmd: str,
+        session_id: str,
+        session: Session,
+        args: str = "",
+    ) -> str:
         """Return a plain-text reply for a built-in slash command."""
         cfg = self._session_configs.get(session_id, self._config)
         registry = self._session_registries.get(session_id, self._registry)
 
+        if cmd == "/model":
+            active = cfg.resolve_provider()
+            if not args:
+                lines = [
+                    f"**Active:** {active.name}/{active.model}",
+                ]
+                if cfg.providers:
+                    lines.append("")
+                    lines.append("**Available providers:**")
+                    for key, pcfg in cfg.providers.items():
+                        marker = (
+                            " *(active)*"
+                            if (pcfg.name == active.name and pcfg.model == active.model)
+                            else ""
+                        )
+                        lines.append(f"- `{key}` → {pcfg.name}/{pcfg.model}{marker}")
+                else:
+                    lines.append(
+                        "\nNo named providers configured. "
+                        "Use `/model <provider/model>` for ad-hoc switch."
+                    )
+                return "\n".join(lines)
+            # Switch
+            key = args.strip()
+            if key in cfg.providers:
+                new_provider = cfg.providers[key]
+            elif "/" in key:
+                provider_name, model = key.split("/", 1)
+                new_provider = active.model_copy(
+                    update={"name": provider_name, "model": model},
+                )
+            else:
+                provider_name, model = _model_id_to_provider(key)
+                new_provider = active.model_copy(
+                    update={"name": provider_name, "model": model},
+                )
+            self._session_configs[session_id] = cfg.model_copy(
+                update={"provider": new_provider},
+            )
+            logger.info(
+                "ACP: session %s model → %s/%s (via /model)",
+                session_id,
+                new_provider.name,
+                new_provider.model,
+            )
+            return f"Switched to **{new_provider.name}/{new_provider.model}**"
+
         if cmd == "/status":
             lines = [
                 f"**Session:** `{session_id}`",
-                f"**Provider:** {cfg.provider.name}",
-                f"**Model:** {cfg.provider.model}",
+                f"**Provider:** {cfg.resolve_provider().name}",
+                f"**Model:** {cfg.resolve_provider().model}",
                 f"**Steps this session:** {session.step_count}",
                 f"**Messages:** {len(session.events)}",
             ]
@@ -1016,6 +1154,29 @@ class AarAcpAgent:
             return "\n".join(lines)
 
         return f"Unknown command: {cmd}"
+
+    async def _setup_extensions(self, session_id: str, session: Session) -> None:
+        """Initialize an ExtensionManager for *session_id* so extension slash-commands work.
+
+        This runs at session creation (new/load/fork/resume) so that by the time the first
+        prompt arrives the extension manager is populated and its commands can be dispatched
+        and advertised to the client via ``AvailableCommandsUpdate``.
+        """
+        from agent.extensions.manager import ExtensionManager
+
+        cfg = self._session_configs.get(session_id, self._config)
+        mgr = ExtensionManager()
+        try:
+            await mgr.initialize(session, cfg, cancel_event=None)
+            logger.info(
+                "ACP: loaded %d extension(s) (%d command(s)) for session %s",
+                len(mgr.loaded_extensions),
+                len(mgr.commands),
+                session_id,
+            )
+        except Exception as exc:
+            logger.error("ACP: extension init failed for session %s: %s", session_id, exc)
+        self._extension_managers[session_id] = mgr
 
     async def _setup_mcp(self, session_id: str, mcp_servers: list) -> None:
         """Convert ACP mcp_servers → MCPServerConfig, start bridge, register tools.

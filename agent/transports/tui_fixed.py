@@ -39,7 +39,7 @@ from rich.text import Text
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Horizontal
+    from textual.containers import Horizontal, Vertical
     from textual.widgets import RichLog, Static
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -66,6 +66,7 @@ from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
+from agent.transports.companion_state import get_git_health  # noqa: F401
 from agent.transports.keybinds import KeyBinds
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
@@ -94,6 +95,7 @@ from agent.transports.tui_widgets.blocks import (  # noqa: F401
     _Block,
 )
 from agent.transports.tui_widgets.chat_body import ChatBody  # noqa: F401
+from agent.transports.tui_widgets.companion import CompanionPanel, KaomojiCompanion  # noqa: F401
 from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
@@ -120,6 +122,7 @@ class FixedTUIRenderer:
         log: "RichLog | SelectableRichLog | None" = None,
         chat_body: ChatBody | None = None,
         thinking_panel: "ThinkingPanel | None" = None,
+        companion: "CompanionPanel | None" = None,
         verbose: bool = False,
         theme: Theme | None = None,
         layout: LayoutConfig | None = None,
@@ -128,6 +131,7 @@ class FixedTUIRenderer:
         self._log = log
         self._chat_body = chat_body
         self._thinking_panel: ThinkingPanel | None = thinking_panel
+        self._companion: "KaomojiCompanion | None" = None
         self._header = header
         self._footer = footer
         self._verbose = verbose
@@ -209,9 +213,18 @@ class FixedTUIRenderer:
         """Toggle the thinking side panel. Returns the new visibility state."""
         self._thinking_visible = not self._thinking_visible
         self._header.thinking_enabled = self._thinking_visible
-        self._header.refresh()
+        self._header.refresh_info()
         if self._thinking_panel is not None:
-            self._thinking_panel.styles.display = "block" if self._thinking_visible else "none"
+            display = "block" if self._thinking_visible else "none"
+            self._thinking_panel.styles.display = display
+            # Also hide the parent right-column container so its fixed width
+            # (typ. 40 cols) is released back to the ChatBody's ``1fr`` track
+            # when the panel is hidden. Hiding only the panel leaves an empty
+            # 40-column gutter because the Vertical parent still participates
+            # in the Horizontal split's layout.
+            parent = getattr(self._thinking_panel, "parent", None)
+            if parent is not None and getattr(parent, "id", None) == "right-col":
+                parent.styles.display = display
         label = "shown" if self._thinking_visible else "hidden"
         self._write(
             Text(f"Thinking panel {label}", style=self.theme.dim_text),
@@ -235,16 +248,15 @@ class FixedTUIRenderer:
                     self._streaming_active = True
                     self._stream_in_reasoning = True
                     self._header.streaming = True
-                    try:
-                        self._header.update(self._header.render())
-                    except Exception:
-                        self._header.refresh()
+                    self._header.refresh_info()
                 if self._thinking_panel is not None:
                     # Route reasoning to the side panel
                     if not self._panel_thinking_active:
                         self._panel_thinking_active = True
                         self._thinking_panel.begin_step(self._step_count + 1)
                     self._thinking_panel.append(event.reasoning_text)
+                    if self._companion is not None:
+                        self._companion.agent_thinking()
                 elif self._thinking_visible:
                     # Fallback: no panel — stream inline to chat body (test mode)
                     if self._current_thinking is None:
@@ -256,10 +268,7 @@ class FixedTUIRenderer:
                 if not self._streaming_active:
                     self._streaming_active = True
                     self._header.streaming = True
-                    try:
-                        self._header.update(self._header.render())
-                    except Exception:
-                        self._header.refresh()
+                    self._header.refresh_info()
                 if self._stream_in_reasoning:
                     self._stream_in_reasoning = False
                     # Finalize inline thinking block if panel is not in use
@@ -269,6 +278,8 @@ class FixedTUIRenderer:
                     self._current_answer = AnswerBlock(self.theme)
                     self._mount_streaming(self._current_answer)
                 self._current_answer.append(event.text)
+                if self._companion is not None:
+                    self._companion.agent_streaming()
 
             if event.finished:
                 self._stream_in_reasoning = False
@@ -282,10 +293,7 @@ class FixedTUIRenderer:
                 # _streaming_active stays True until AssistantMessage arrives
                 # so we know to finalize (not re-create) the answer block.
                 self._header.streaming = False
-                try:
-                    self._header.update(self._header.render())
-                except Exception:
-                    self._header.refresh()
+                self._header.refresh_info()
             return
 
         # --- Final assistant message ------------------------------------------
@@ -319,6 +327,8 @@ class FixedTUIRenderer:
                     raw=event.content,
                     kind="assistant",
                 )
+            if self._companion is not None:
+                self._companion.agent_idle()
             return
 
         # --- Tool call --------------------------------------------------------
@@ -359,6 +369,8 @@ class FixedTUIRenderer:
                 raw=f"Tool: {event.tool_name}\n{raw_args}",
                 kind="tool_call",
             )
+            if self._companion is not None:
+                self._companion.agent_step()
 
         # --- Tool result ------------------------------------------------------
         elif isinstance(event, ToolResult):
@@ -380,6 +392,8 @@ class FixedTUIRenderer:
                 raw=output,
                 kind="tool_result",
             )
+            if event.is_error and self._companion is not None:
+                self._companion.agent_error()
 
         # --- Reasoning block (non-streaming) ----------------------------------
         elif isinstance(event, ReasoningBlock) and event.content:
@@ -423,6 +437,8 @@ class FixedTUIRenderer:
                 raw=event.message,
                 kind="error",
             )
+            if self._companion is not None:
+                self._companion.agent_error()
 
         # --- Provider metadata -----------------------------------------------
         elif isinstance(event, ProviderMeta):
@@ -458,10 +474,7 @@ class FixedTUIRenderer:
             # Static.update() requires a running Textual app context.  In test
             # mode (no app) we fall back to refresh() which is a no-op outside
             # an active message pump.
-            try:
-                self._header.update(self._header.render())
-            except Exception:
-                self._header.refresh()
+            self._header.refresh_info()
 
             if not self.layout.token_usage.visible:
                 return
@@ -478,17 +491,19 @@ class FixedTUIRenderer:
                 kind="usage",
             )
 
-    def render_welcome(self) -> None:
+    def render_welcome(self, extra_commands: list[str] | None = None) -> None:
         if not self.layout.welcome.visible:
             return
         t = self.theme
+        builtin = ["help", "quit", "model", "status", "tools", "policy", "theme", "think", "clear"]
+        cmds = builtin + list(extra_commands or [])
+        cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
             "Type your message and press Ctrl+S to send.\n"
             "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
-            "Commands: [bold]/quit[/] [bold]/status[/] [bold]/tools[/] "
-            "[bold]/policy[/] [bold]/theme[/] [bold]/think[/] [bold]/clear[/]\n\n"
+            f"Commands: {cmds_markup}\n\n"
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
@@ -508,6 +523,9 @@ _KB = KeyBinds()
 
 class AarFixedApp(App):
     """Full-screen Textual application for the Textual TUI mode."""
+
+    # ext_cmds is injected by run_tui_fixed after eager extension init.
+    _ext_cmds: list[str] = []
 
     # Keys come from _KB so that keybinds.py remains the single source of
     # truth.  Only Textual-specific attrs (action name, priority, show) live
@@ -539,8 +557,12 @@ class AarFixedApp(App):
         height: 100%;
         min-height: 4;
     }
-    ThinkingPanel {
+    #right-col {
         height: 100%;
+        width: 40;
+    }
+    ThinkingPanel {
+        height: 1fr;
     }
     #input-sep {
         height: 1;
@@ -584,15 +606,20 @@ class AarFixedApp(App):
     # ------------------------------------------------------------------
 
     def _make_body_split(self) -> Horizontal:
-        """Build the horizontal body container: ChatBody + ThinkingPanel side by side."""
+        """Build the horizontal body container: ChatBody + right column (companion + thinking panel)."""
         tp_cfg = self._theme.fixed_layout.thinking_panel
         panel = ThinkingPanel(self._theme, tp_cfg)
         if tp_cfg.side == "left":
             panel.add_class("_left_side")
         body = ChatBody(id="chat-body")
+
+        # Companion now lives in the header bar as KaomojiCompanion.
+        # The right column only holds the ThinkingPanel.
+        right_col = Vertical(panel, id="right-col")
+
         if tp_cfg.side == "left":
-            return Horizontal(panel, body, id="body-split")
-        return Horizontal(body, panel, id="body-split")
+            return Horizontal(right_col, body, id="body-split")
+        return Horizontal(body, right_col, id="body-split")
 
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
@@ -663,8 +690,9 @@ class AarFixedApp(App):
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
 
-        header.provider_name = self._config.provider.name
-        header.model_name = self._config.provider.model
+        _active = self._config.resolve_provider()
+        header.provider_name = _active.name
+        header.model_name = _active.model
 
         # Apply selected block highlight style from theme to ChatBody CSS
         fl = self._theme.fixed_layout
@@ -681,12 +709,30 @@ class AarFixedApp(App):
             config=self._config,
         )
 
+        # Mount kaomoji companion into the header bar (right side) if enabled.
+        cp_cfg = fl.companion
+        if cp_cfg.enabled:
+            try:
+                from agent.transports.tui_widgets.companion import KaomojiCompanion
+
+                header = self.query_one(HeaderBar)
+                companion = KaomojiCompanion(self._theme, cp_cfg)
+                header.mount(companion)
+                self._renderer._companion = companion
+            except Exception:
+                pass
+
         self._agent.on_event(self._renderer.render_event)
 
         # Apply thinking panel styles from theme
         tp_cfg = fl.thinking_panel
         thinking_panel.styles.background = tp_cfg.background
         thinking_panel.styles.width = tp_cfg.width
+        try:
+            right_col = self.query_one("#right-col")
+            right_col.styles.width = tp_cfg.width
+        except Exception:
+            pass
         sb = tp_cfg.scrollbar
         thinking_panel.styles.scrollbar_color = sb.color
         thinking_panel.styles.scrollbar_color_hover = sb.color_hover
@@ -718,7 +764,13 @@ class AarFixedApp(App):
             try:
                 self._session = self._store.load(self._session_id)
                 header.session_id = self._session.session_id
-                header.refresh()
+                header.refresh_info()
+                # Restore companion progress derived from the session's event history.
+                # No separate save-file is needed: tool-call and error counts are
+                # counted from session.events plus the companion_baseline watermark
+                # that SessionStore.compact() writes before pruning old events.
+                if cp_cfg.enabled and self._renderer and self._renderer._companion is not None:
+                    self._renderer._companion.bootstrap_from_session(self._session)
                 loop = asyncio.get_running_loop()
                 loop.create_task(
                     chat_body._mount_block(
@@ -747,7 +799,15 @@ class AarFixedApp(App):
                     )
                 )
 
-        self._renderer.render_welcome()
+        self._renderer.render_welcome(extra_commands=self._ext_cmds or None)
+
+        # Start periodic git health polling for the companion
+        if cp_cfg.enabled:
+            self.run_worker(
+                self._companion_git_poll(),
+                exclusive=False,
+                name="companion-git-poll",
+            )
 
         self.query_one("#user-input", HistoryTextArea).focus()
 
@@ -831,6 +891,18 @@ class AarFixedApp(App):
                 panel.styles.display = "none"
         except Exception:
             pass
+        try:
+            right_col = self.query_one("#right-col")
+            right_col.styles.width = theme.fixed_layout.thinking_panel.width
+        except Exception:
+            pass
+
+        # Kaomoji companion (lives inside HeaderBar)
+        try:
+            companion = self.query_one(KaomojiCompanion)
+            companion.apply_theme(theme)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Key binding actions
@@ -874,7 +946,7 @@ class AarFixedApp(App):
         header.output_tokens = 0
         header.state = "idle"
         header.streaming = False
-        header.refresh()
+        header.refresh_info()
         footer.step_count = 0
         footer.refresh()
         self._renderer._step_count = 0
@@ -890,7 +962,13 @@ class AarFixedApp(App):
             await thinking_panel.clear_log()
         except Exception:
             pass
-        self._renderer.render_welcome()
+        _ext_mgr_clear = getattr(self._agent, "_extension_manager", None)
+        _ext_cmds_now = (
+            list(_ext_mgr_clear.commands.keys())
+            if _ext_mgr_clear is not None
+            else list(self._ext_cmds)
+        )
+        self._renderer.render_welcome(extra_commands=_ext_cmds_now or None)
 
     async def action_cancel_agent(self) -> None:
         """Ctrl+X — cancel the running agent."""
@@ -917,7 +995,7 @@ class AarFixedApp(App):
                     header = self.query_one(HeaderBar)
                     header.streaming = False
                     header.state = "cancelled"
-                    header.refresh()
+                    header.refresh_info()
                 except Exception:
                     pass
                 self._restore_input()
@@ -1022,6 +1100,34 @@ class AarFixedApp(App):
         elif stripped.lower() == "/clear":
             await self.action_clear_screen()
             return
+        elif stripped.lower().startswith("/model"):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 1:
+                p = self._agent.provider
+                await _write(Text.from_markup(f"[bold]Active:[/] {p.name}/{p.config.model}"))
+                if self._agent.config.providers:
+                    await _write(Text.from_markup(f"[{t.dim_text}]Available providers:[/]"))
+                    for k, v in self._agent.config.providers.items():
+                        marker = (
+                            " *" if (v.name == p.config.name and v.model == p.config.model) else ""
+                        )
+                        await _write(
+                            Text.from_markup(f"  [{t.dim_text}]{k}[/] → {v.name}/{v.model}{marker}")
+                        )
+                else:
+                    await _write(
+                        Text.from_markup(
+                            f"[{t.dim_text}]No named providers configured. "
+                            f"Use /model <provider/model> for ad-hoc switch.[/]"
+                        )
+                    )
+            else:
+                try:
+                    desc = self._agent.switch_provider(parts[1].strip())
+                    await _write(Text.from_markup(f"[green]Switched to {desc}[/]"))
+                except (ValueError, Exception) as exc:
+                    await _write(Text(str(exc), style=t.error.border_style))
+            return
         elif stripped.lower().startswith("/theme"):
             parts = stripped.split(maxsplit=1)
             if len(parts) == 1:
@@ -1041,6 +1147,41 @@ class AarFixedApp(App):
             return
         elif stripped.lower() == "/think":
             self._renderer.toggle_thinking()
+            return
+        elif stripped.lower() in {"/help", "/h"}:
+            _ext_mgr_help = getattr(self._agent, "_extension_manager", None)
+            _ext_cmds_now = (
+                list(_ext_mgr_help.commands.keys())
+                if _ext_mgr_help is not None
+                else list(self._ext_cmds)
+            )
+            self._renderer.render_welcome(extra_commands=_ext_cmds_now or None)
+            return
+        # --- Extension slash-commands ------------------------------------
+        elif stripped.startswith("/"):
+            cmd_name = stripped[1:].split()[0].lower()
+            args_str = stripped[len(cmd_name) + 1 :].strip()
+            ext_mgr = getattr(self._agent, "_extension_manager", None)
+            if ext_mgr is not None:
+                cmds = ext_mgr.commands
+                if cmd_name in cmds:
+                    # Sync so commands see the current session (loaded or live),
+                    # not the empty bootstrap snapshot from _init_extensions.
+                    if self._session is not None:
+                        ext_mgr.update_session(self._session)
+                    _, handler = cmds[cmd_name]
+                    ctx = ext_mgr._context
+                    try:
+                        result = handler(args_str, ctx)
+                        if result is not None:
+                            for line in str(result).splitlines() or [str(result)]:
+                                await _write(Text(line), raw=line, kind="system")
+                    except Exception as exc:
+                        await _write(
+                            Text(f"Extension command error: {exc}", style=t.error.border_style)
+                        )
+                    return
+            await _write(Text(f"Unknown command: {stripped}", style=t.dim_text))
             return
         # --- Parse multimodal attachments --------------------------------
         content = parse_multimodal_input(stripped)
@@ -1063,7 +1204,7 @@ class AarFixedApp(App):
 
         # --- Run agent (in worker so the UI event loop stays responsive) ---
         header.state = "running"
-        header.refresh()
+        header.refresh_info()
         inp.disabled = True
         chat_body.auto_scroll = True
 
@@ -1101,6 +1242,8 @@ class AarFixedApp(App):
                     )
                 except Exception:
                     pass
+            if self._renderer and self._renderer._companion is not None:
+                self._renderer._companion.agent_idle()
             self._restore_input()
             return
 
@@ -1113,7 +1256,7 @@ class AarFixedApp(App):
         header = self.query_one(HeaderBar)
         header.state = self._session.state.value
         header.session_id = self._session.session_id
-        header.refresh()
+        header.refresh_info()
 
         if self._session.state == AgentState.ERROR:
             last_error = next(
@@ -1123,9 +1266,11 @@ class AarFixedApp(App):
             if last_error and last_error.recoverable:
                 self._session.state = AgentState.COMPLETED
                 header.state = "completed"
-                header.refresh()
+                header.refresh_info()
 
         self._store.save(self._session)
+        if self._renderer and self._renderer._companion is not None:
+            self._renderer._companion.agent_idle()
         self._restore_input()
 
     def _restore_input(self) -> None:
@@ -1136,6 +1281,25 @@ class AarFixedApp(App):
             inp.focus()
         except Exception:
             pass
+
+    async def _companion_git_poll(self) -> None:
+        """Periodically probe git health and update the companion's mood.
+
+        Sleeps *first* so the initial probe is deferred — this keeps app
+        startup fast and ensures Textual test teardown is never blocked by
+        subprocess creation before the app has fully mounted.
+        """
+        import asyncio as _asyncio
+
+        while True:
+            await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
+            try:
+                health = await get_git_health()
+                companion = self.query_one(KaomojiCompanion)
+                companion.apply_git_health(health)
+            except Exception:
+                pass
+            await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
 
     def on_unmount(self) -> None:
         if self._session:
@@ -1204,6 +1368,19 @@ async def run_tui_fixed(
 
     agent = agent or Agent(config=config)
 
+    # Eagerly initialise extensions before the Textual app launches so the
+    # welcome screen can list all slash-commands (including extension ones)
+    # from the very first render.
+    try:
+        from agent.core.session import Session as _Session
+
+        _bootstrap = _Session()
+        await agent._init_extensions(_bootstrap)
+    except Exception:
+        pass  # failures are logged inside _init_extensions
+
+    _ext_cmds = list(agent._extension_manager.commands.keys()) if agent._extension_manager else []
+
     app = AarFixedApp(
         agent=agent,
         config=config,
@@ -1213,4 +1390,5 @@ async def run_tui_fixed(
         verbose=verbose,
         session_id=session_id,
     )
+    app._ext_cmds = _ext_cmds
     await app.run_async()

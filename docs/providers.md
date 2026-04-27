@@ -2,6 +2,82 @@
 
 Aar is provider-agnostic — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint by changing one config field. No agent code changes required.
 
+## Runtime provider switching
+
+You can switch between providers mid-session without losing conversation history.
+
+### Configuration
+
+Define named providers in `config.json`:
+
+```json
+{
+  "provider": "claude",
+  "providers": {
+    "claude": {
+      "name": "anthropic", "model": "claude-sonnet-4-6",
+      "context_window": 1000000, "token_budget": 500000, "cost_limit": 5.0
+    },
+    "gpt4": {
+      "name": "openai", "model": "gpt-4o",
+      "context_window": 200000, "token_budget": 500000, "cost_limit": 5.0
+    },
+    "local": {
+      "name": "ollama", "model": "llama3", "base_url": "http://localhost:11434",
+      "context_window": 32768, "token_budget": 0, "cost_limit": 0.0
+    }
+  }
+}
+```
+
+Each provider profile can override `context_window`, `token_budget`, and `cost_limit`. These are model-coupled settings — context windows differ across models, and local models have no API cost. When a provider does not set these fields, the global values from `AgentConfig` apply as fallback.
+
+The `provider` field can be a string key referencing `providers`, or an inline object (backward compatible).
+
+### Slash command
+
+All interactive transports (CLI, TUI, TUI Fixed) support the `/model` command:
+
+| Command | Effect |
+|---------|--------|
+| `/model` | Show active provider and list available keys |
+| `/model gpt4` | Switch to a named provider key |
+| `/model openai/gpt-4o` | Ad-hoc switch by provider/model |
+
+Switching is instant — the next turn uses the new provider. Conversation history is preserved because the internal event model is provider-agnostic.
+
+### ACP
+
+ACP stdio already supports `set_session_model` — it now also resolves named provider keys from the config. ACP HTTP accepts `provider` in `POST /runs` to select a named key.
+
+### Web API
+
+Pass `"provider": "gpt4"` in the request body of `POST /chat` or `POST /chat/stream` to use a named provider for that request.
+
+### Programmatic
+
+```python
+from agent.core.agent import Agent
+from agent.core.config import AgentConfig, ProviderConfig
+
+config = AgentConfig(
+    provider="claude",
+    providers={
+        "claude": ProviderConfig(name="anthropic", model="claude-sonnet-4-6"),
+        "gpt4": ProviderConfig(name="openai", model="gpt-4o"),
+    },
+)
+agent = Agent(config=config)
+session = await agent.run("Hello from Claude", session=None)
+
+# Switch mid-session
+agent.switch_provider("gpt4")
+session = await agent.run("Now using GPT-4o", session=session)
+
+# Ad-hoc switch (no registry key needed)
+agent.switch_provider("ollama/llama3")
+```
+
 ## Anthropic
 
 ```python

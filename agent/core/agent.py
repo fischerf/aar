@@ -12,6 +12,7 @@ from agent.core.events import ContentBlock, Event, SessionEvent
 from agent.core.loop import run_loop
 from agent.core.session import Session
 from agent.core.state import AgentState
+from agent.extensions.manager import ExtensionManager
 from agent.providers.base import Provider
 from agent.safety.permissions import ApprovalCallback
 from agent.tools.builtin.filesystem import register_filesystem_tools
@@ -57,7 +58,7 @@ class Agent:
         approval_callback: ApprovalCallback | None = None,
     ) -> None:
         self.config = config or AgentConfig()
-        self.provider = provider or _create_provider(self.config.provider)
+        self.provider = provider or _create_provider(self.config.resolve_provider())
         self.registry = registry or ToolRegistry()
         self.executor = ToolExecutor(
             self.registry,
@@ -66,6 +67,7 @@ class Agent:
             approval_callback,
         )
         self._on_event: list[Callable[[Event], Any]] = []
+        self._extension_manager: ExtensionManager | None = None
 
         # Register built-in tools based on config
         self._register_builtins()
@@ -105,6 +107,57 @@ class Agent:
         """Remove a previously registered event callback."""
         self._on_event = [cb for cb in self._on_event if cb != callback]
 
+    def switch_provider(self, key_or_spec: str | ProviderConfig) -> str:
+        """Switch the active provider between turns.
+
+        Args:
+            key_or_spec: Either a key from ``config.providers`` or an
+                ad-hoc ``ProviderConfig``.
+
+        Returns:
+            Human-readable description of the new provider,
+            e.g. ``"anthropic/claude-sonnet-4-6"``.
+        """
+        if isinstance(key_or_spec, str):
+            if key_or_spec in self.config.providers:
+                cfg = self.config.providers[key_or_spec]
+            elif "/" in key_or_spec:
+                provider_name, model = key_or_spec.split("/", 1)
+                cfg = ProviderConfig(name=provider_name, model=model)
+            else:
+                raise ValueError(
+                    f"'{key_or_spec}' is not a known provider key and "
+                    f"doesn't match 'provider/model' format. "
+                    f"Available keys: "
+                    f"{', '.join(sorted(self.config.providers)) or '(none)'}"
+                )
+        else:
+            cfg = key_or_spec
+
+        self.provider = _create_provider(cfg)
+        return f"{cfg.name}/{cfg.model}"
+
+    async def _init_extensions(
+        self,
+        session: Session,
+        cancel_event: asyncio.Event | None = None,
+    ) -> None:
+        """Initialize the extension manager and register extension tools."""
+        mgr = ExtensionManager()
+        await mgr.initialize(session, self.config, cancel_event)
+
+        # Register extension tools
+        count = mgr.register_tools(self.registry)
+        if count:
+            logger.info("Registered %d extension tool(s)", count)
+
+        # Append system prompt additions
+        additions = mgr.get_system_prompt_additions()
+        if additions:
+            self.config.system_prompt = self.config.system_prompt + "\n---\n" + additions
+
+        self._extension_manager = mgr
+
     async def run(
         self,
         prompt: str | list[ContentBlock],
@@ -141,6 +194,14 @@ class Agent:
                 except Exception:
                     logger.exception("Event callback %r failed on %s", cb, event.type)
 
+        if self._extension_manager is None:
+            await self._init_extensions(session, cancel_event)
+
+        # Keep the extension context in sync with the live session so that
+        # extension slash-commands (e.g. /inspect) see current data.
+        if self._extension_manager is not None:
+            self._extension_manager.update_session(session)
+
         session = await run_loop(
             session=session,
             provider=self.provider,
@@ -148,6 +209,7 @@ class Agent:
             config=self.config,
             on_event=_dispatch if self._on_event else None,
             cancel_event=cancel_event,
+            extension_manager=self._extension_manager,
         )
 
         return session

@@ -75,10 +75,13 @@
         "use_low_integrity": true
       },
       "wsl": {
-        "profile": "~/.aar/distros/ubuntu.json",
         "distro": "aar-ubuntu",
+        "shell": "sh",
+        "wsl_user": null,
+        "restrict_to_workspace": true,
         "workspace": null,
-        "install_path": null
+        "install_path": null,
+        "profile": "~/.aar/distros/ubuntu.json"
       }
     },
     "log_all_commands": true,

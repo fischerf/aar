@@ -218,8 +218,8 @@ class AcpTransport:
             input_content_types=["text/plain"],
             output_content_types=["text/plain"],
             metadata={
-                "provider": self.config.provider.name,
-                "model": self.config.provider.model,
+                "provider": self.config.resolve_provider().name,
+                "model": self.config.resolve_provider().model,
                 "max_steps": self.config.max_steps,
             },
         )
@@ -384,9 +384,16 @@ class AcpTransport:
         except (FileNotFoundError, ValueError):
             return None
 
-    def _make_agent(self) -> AarAgent:
+    def _make_agent(self, provider_key: str | None = None) -> AarAgent:
+        config = self.config
+        if provider_key:
+            try:
+                provider_cfg = config.resolve_provider(provider_key)
+                config = config.model_copy(update={"provider": provider_cfg})
+            except ValueError:
+                pass  # fall through to default
         return AarAgent(
-            config=self.config,
+            config=config,
             approval_callback=self.approval_callback,
             registry=self.registry,
         )

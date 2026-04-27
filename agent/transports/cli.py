@@ -78,6 +78,11 @@ def _build_config(
     else:
         cfg = AgentConfig()
 
+    # Resolve string provider key to an inline ProviderConfig so the rest of
+    # _build_config (and downstream code) can mutate cfg.provider.* directly.
+    if isinstance(cfg.provider, str):
+        cfg.provider = cfg.resolve_provider()
+
     # Provider settings — only override when explicitly passed
     if provider is not None:
         cfg.provider.name = provider
@@ -321,6 +326,12 @@ async def _async_chat_loop(
         try:
             session = store.load(session_id)
             console.print(f"[dim]Resumed session {session_id}[/]")
+            # Keep extension context in sync with the resumed session so that
+            # slash-commands (e.g. /inspect) see the loaded history, not the
+            # empty bootstrap snapshot created during Agent.__init__.
+            ext_mgr = getattr(agent, "_extension_manager", None)
+            if ext_mgr is not None:
+                ext_mgr.update_session(session)
         except FileNotFoundError:
             console.print(f"[red]Session {session_id} not found[/]")
             raise typer.Exit(1)
@@ -342,8 +353,63 @@ async def _async_chat_loop(
 
             if not user_input.strip():
                 continue
-            if user_input.strip().lower() in {"/quit", "/exit", "/q"}:
+
+            stripped = user_input.strip()
+
+            if stripped.lower() in {"/quit", "/exit", "/q"}:
                 break
+
+            # --- Built-in slash-commands ---------------------------------
+            if stripped.lower().startswith("/model"):
+                parts = stripped.split(maxsplit=1)
+                if len(parts) == 1:
+                    p = agent.provider
+                    console.print(f"[bold]Active:[/] {p.name}/{p.config.model}")
+                    if agent.config.providers:
+                        console.print("[dim]Available providers:[/]")
+                        for k, v in agent.config.providers.items():
+                            marker = (
+                                " [bold]*[/]"
+                                if (v.name == p.config.name and v.model == p.config.model)
+                                else ""
+                            )
+                            console.print(f"  [dim]{k}[/] → {v.name}/{v.model}{marker}")
+                    else:
+                        console.print(
+                            "[dim]No named providers configured. "
+                            "Use /model <provider/model> for ad-hoc switch.[/]"
+                        )
+                else:
+                    try:
+                        desc = agent.switch_provider(parts[1].strip())
+                        console.print(f"[green]Switched to {desc}[/]")
+                    except (ValueError, Exception) as exc:
+                        console.print(f"[red]{exc}[/]")
+                continue
+
+            # --- Extension slash-commands --------------------------------
+            if stripped.startswith("/"):
+                cmd_name = stripped[1:].split()[0].lower()
+                if cmd_name not in {"quit", "exit", "q"}:
+                    args_str = stripped[len(cmd_name) + 1 :].strip()
+                    ext_mgr = getattr(agent, "_extension_manager", None)
+                    if ext_mgr is not None:
+                        cmds = ext_mgr.commands
+                        if cmd_name in cmds:
+                            # Sync session so commands see the latest state
+                            if session is not None:
+                                ext_mgr.update_session(session)
+                            _, handler = cmds[cmd_name]
+                            ctx = ext_mgr._context
+                            try:
+                                result = handler(args_str, ctx)
+                                if result is not None:
+                                    console.print(str(result))
+                            except Exception as exc:
+                                console.print(f"[red]Extension command error: {exc}[/]")
+                            continue
+                    console.print(f"[dim]Unknown command: {stripped}[/]")
+                    continue
 
             content = parse_multimodal_input(user_input)
             if isinstance(content, list):
@@ -953,6 +1019,134 @@ def acp(
 
 
 @app.command()
+def install(
+    package: str = typer.Argument(
+        ..., help="Package to install (e.g. aar-ext-permission-gate or ./local-ext/)"
+    ),
+) -> None:
+    """Install an Aar extension from PyPI or a local path."""
+    import subprocess
+    import sys
+
+    console.print(f"[dim]Installing {package}...[/]")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", package],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]pip install failed:[/]\n{result.stderr}")
+        raise typer.Exit(1)
+    console.print(result.stdout.strip())
+
+    # Validate it declares aar_extensions entry points
+    import importlib.metadata
+
+    try:
+        eps = importlib.metadata.entry_points(group="aar_extensions")
+        # Check if any entry point comes from a dist matching pkg_name
+        found = False
+        for ep in eps:
+            # ep.dist is available in newer Python
+            found = True
+            break
+        if found:
+            console.print("[green]✓[/] Extension installed with aar_extensions entry point(s)")
+        else:
+            console.print(
+                "[yellow]Warning:[/] Package installed but no 'aar_extensions' entry points found. "
+                "It may not be an Aar extension, or you may need to add entry points to its pyproject.toml."
+            )
+    except Exception:
+        console.print("[yellow]Warning:[/] Could not verify entry points.")
+
+
+extensions_app = typer.Typer(name="extensions", help="Manage Aar extensions", no_args_is_help=True)
+app.add_typer(extensions_app, name="extensions")
+
+
+@extensions_app.command("list")
+def extensions_list(
+    user_dir: Optional[str] = typer.Option(
+        None, "--user-dir", help="Custom user extensions directory"
+    ),
+    project_dir: Optional[str] = typer.Option(
+        None, "--project-dir", help="Custom project extensions directory"
+    ),
+) -> None:
+    """List all discovered extensions."""
+    from agent.extensions.loader import discover_extensions
+
+    infos = discover_extensions(
+        user_dir=Path(user_dir) if user_dir else None,
+        project_dir=Path(project_dir) if project_dir else None,
+    )
+    if not infos:
+        console.print("[dim]No extensions found.[/]")
+        return
+
+    from rich.table import Table
+
+    table = Table(title="Discovered Extensions")
+    table.add_column("Name", style="cyan")
+    table.add_column("Source", style="green")
+    table.add_column("Path")
+    for info in infos:
+        table.add_row(info.name, info.source, info.path or "—")
+    console.print(table)
+
+
+@extensions_app.command("inspect")
+def extensions_inspect(
+    name: str = typer.Argument(..., help="Extension name or package to inspect"),
+    user_dir: Optional[str] = typer.Option(None, "--user-dir"),
+    project_dir: Optional[str] = typer.Option(None, "--project-dir"),
+) -> None:
+    """Show what events, tools, and commands an extension registers."""
+    from agent.extensions.loader import discover_extensions, load_extension
+
+    infos = discover_extensions(
+        user_dir=Path(user_dir) if user_dir else None,
+        project_dir=Path(project_dir) if project_dir else None,
+    )
+
+    info = next((i for i in infos if i.name == name), None)
+    if info is None:
+        console.print(f"[red]Extension {name!r} not found.[/]")
+        raise typer.Exit(1)
+
+    try:
+        api = asyncio.run(load_extension(info))
+    except Exception as exc:
+        console.print(f"[red]Failed to load extension {name!r}: {exc}[/]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold cyan]{name}[/] ({info.source})")
+    if info.path:
+        console.print(f"  Path: {info.path}")
+
+    if api._event_handlers:
+        console.print("\n[bold]Event hooks:[/]")
+        for event_name, handlers in api._event_handlers.items():
+            console.print(f"  • {event_name} ({len(handlers)} handler(s))")
+
+    if api._tools:
+        console.print("\n[bold]Tools:[/]")
+        for spec in api._tools:
+            console.print(f"  • {spec.name} — {spec.description}")
+
+    if api._commands:
+        console.print("\n[bold]Commands:[/]")
+        for cmd_name, (desc, _) in api._commands.items():
+            console.print(f"  • /{cmd_name}" + (f" — {desc}" if desc else ""))
+
+    if api._system_prompt_parts:
+        console.print(
+            f"\n[bold]System prompt additions:[/] {len(api._system_prompt_parts)} part(s)"
+        )
+
+
+@app.command()
 def init(
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config files"),
 ) -> None:
@@ -1019,6 +1213,64 @@ def init(
     _USER_THEMES_DIR = _USER_DIR / "themes"
     _USER_THEMES_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Extensions directory and starter file
+    _USER_EXTENSIONS_DIR = _USER_DIR / "extensions"
+    _USER_EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _USER_EXTENSION_HELLO = _USER_EXTENSIONS_DIR / "hello.py"
+    _HELLO_EXTENSION_CONTENT = '''\
+"""hello — starter Aar extension.
+
+Generated by `aar init`. Edit or delete this file freely.
+Drop any *.py file into ~/.aar/extensions/ and Aar picks it up automatically.
+See ~/.aar/extensions/hello.py and docs/extensions.md for the full API.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agent.extensions.api import ExtensionAPI, ExtensionContext
+
+
+def register(api: ExtensionAPI) -> None:
+    """Wire up event hooks, tools, and slash-commands for this extension."""
+
+    # ── Lifecycle hook ────────────────────────────────────────────────────
+    # Called once when a new chat session starts.
+    @api.on("session_start")
+    def on_start(event: Any, ctx: ExtensionContext) -> None:
+        ctx.logger.debug("hello extension: session started")
+
+    # ── Custom tool ───────────────────────────────────────────────────────
+    # Uncomment and adapt to expose a new tool to the model.
+    #
+    # @api.tool(
+    #     name="greet",
+    #     description="Return a friendly greeting for the given name.",
+    #     input_schema={
+    #         "type": "object",
+    #         "properties": {"name": {"type": "string", "description": "Name to greet"}},
+    #         "required": ["name"],
+    #     },
+    # )
+    # def greet(name: str, ctx: ExtensionContext) -> str:
+    #     return f"Hello, {name}! 👋"
+
+    # ── Slash-command ─────────────────────────────────────────────────────
+    # Type /hello in the TUI or inline chat to trigger this.
+    #
+    # @api.command("hello", description="Say hello from the extension.")
+    # def cmd_hello(args: str, ctx: ExtensionContext) -> None:
+    #     ctx.logger.info("Hello from the extension! args=%r", args)
+
+    # ── System prompt append ──────────────────────────────────────────────
+    # Uncomment to inject extra context into every session\'s system prompt.
+    #
+    # api.append_system_prompt(
+    #     "You have access to a greeting tool. Use it when the user says hello."
+    # )
+'''
+
     _USER_THEME_EXAMPLE = _USER_THEMES_DIR / "example.json"
 
     from agent.transports.themes.builtin import DECKER_THEME
@@ -1060,6 +1312,17 @@ def init(
             created.append(str(path))
             console.print(f"[green]Created:[/] {path}")
 
+    # Extension starter file (plain Python, not JSON)
+    if _USER_EXTENSION_HELLO.is_file() and not force:
+        console.print(
+            f"[yellow]Warning:[/] {_USER_EXTENSION_HELLO} already exists — skipping (use --force to overwrite)"
+        )
+        skipped.append(str(_USER_EXTENSION_HELLO))
+    else:
+        _USER_EXTENSION_HELLO.write_text(_HELLO_EXTENSION_CONTENT, encoding="utf-8")
+        created.append(str(_USER_EXTENSION_HELLO))
+        console.print(f"[green]Created:[/] {_USER_EXTENSION_HELLO}")
+
     if created:
         console.print("\n[bold]Next steps:[/]")
         console.print(
@@ -1084,7 +1347,11 @@ def init(
             " Set [bold]safety.sandbox.wsl.profile[/] in config.json to point at one, then run"
             " [bold]aar sandbox setup[/]."
         )
-        console.print("  7. Run [bold]aar chat[/] — no flags needed.")
+        console.print(
+            f"  7. Edit or delete the starter extension at [bold]{_USER_EXTENSION_HELLO}[/]."
+            "  Any *.py in ~/.aar/extensions/ is auto-loaded. See docs/extensions.md for the full API."
+        )
+        console.print("  8. Run [bold]aar chat[/] — no flags needed.")
         console.print(
             "  Tip: run [bold]aar prompt --layers[/] to inspect the system prompt sources."
         )

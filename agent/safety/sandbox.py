@@ -771,11 +771,15 @@ class WslDistroSandbox(Sandbox):
         distro_name: str = "aar-sandbox",
         workspace: str | None = None,
         shell: str = "sh",
+        wsl_user: str | None = None,
+        restrict_to_workspace: bool = True,
         allowed_env_vars: list[str] | None = None,
     ) -> None:
         self.distro_name = distro_name
         self.workspace = workspace or os.getcwd()
         self.shell = shell
+        self.wsl_user = wsl_user
+        self.restrict_to_workspace = restrict_to_workspace
         self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
 
     # ------------------------------------------------------------------
@@ -857,17 +861,21 @@ class WslDistroSandbox(Sandbox):
         if env:
             env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " "
 
-        full_cmd = f"cd {shlex.quote(work_dir)} && {env_prefix}{command}"
+        # Build command: env prefix + raw command (no cd prefix when using --cd)
+        if self.restrict_to_workspace:
+            full_cmd = f"{env_prefix}{command}"
+            wsl_args = ["wsl", "-d", self.distro_name, "--cd", work_dir]
+        else:
+            full_cmd = f"cd {shlex.quote(work_dir)} && {env_prefix}{command}"
+            wsl_args = ["wsl", "-d", self.distro_name]
+
+        if self.wsl_user:
+            wsl_args += ["--user", self.wsl_user]
+        wsl_args += ["--", self.shell, "-c", full_cmd]
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "wsl",
-                "-d",
-                self.distro_name,
-                "--",
-                self.shell,
-                "-c",
-                full_cmd,
+                *wsl_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

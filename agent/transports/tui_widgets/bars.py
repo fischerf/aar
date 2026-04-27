@@ -21,13 +21,75 @@ from agent.transports.keybinds import KeyBinds
 from agent.transports.themes.models import Theme
 
 
-class HeaderBar(Static):
-    """Fixed header showing provider, tokens, session, and state."""
+class _HeaderInfoStatic(Static):
+    """Left-side info section of the header: provider / tokens / session / state.
+
+    Receives a direct reference to its :class:`HeaderBar` owner so it never
+    has to rely on ``self.parent`` (which may not be set during early renders).
+    """
+
+    DEFAULT_CSS = """
+    _HeaderInfoStatic {
+        width: 1fr;
+        height: 1;
+        content-align: left middle;
+    }
+    """
+
+    def __init__(self, bar: "HeaderBar") -> None:
+        super().__init__()
+        self._bar = bar
+
+    def render(self) -> Text:  # type: ignore[override]
+        bar = self._bar
+        h = bar.theme.header
+        provider = bar.provider_name
+        if bar.model_name:
+            provider += f" / {bar.model_name}"
+        session = f"{bar.session_id[:8]}..." if bar.session_id else ""
+        thinking_label = "think:on" if bar.thinking_enabled else "think:off"
+        tokens_style = h.tokens_warning_style if bar.warning_active else h.tokens_style
+        tokens_text = f"tokens: {bar.input_tokens}in / {bar.output_tokens}out"
+        if bar.total_cost > 0:
+            if bar.total_cost < 0.01:
+                tokens_text += f" (${bar.total_cost:.4f})"
+            else:
+                tokens_text += f" (${bar.total_cost:.2f})"
+        parts: list[tuple[str, str]] = [
+            (provider, h.provider_style),
+            ("  |  ", h.separator_style),
+            (tokens_text, tokens_style),
+            ("  |  ", h.separator_style),
+        ]
+        if session:
+            parts.append((session, h.session_style))
+            parts.append(("  |  ", h.separator_style))
+        state_label = "streaming…" if bar.streaming else bar.state
+        parts.append((state_label, h.state_style))
+        parts.append(("  |  ", h.separator_style))
+        parts.append((thinking_label, h.tokens_style))
+        return Text.assemble(*parts)
+
+
+class HeaderBar(Horizontal):
+    """Fixed header bar: left info section + optional right kaomoji companion.
+
+    Inherits from :class:`~textual.containers.Horizontal` so that ``1fr``
+    sizing on ``_HeaderInfoStatic`` and ``width: auto`` on
+    ``KaomojiCompanion`` resolve correctly — left section fills available
+    space, companion is pinned to the right edge.
+
+    All state attributes (``provider_name``, ``model_name``, ``streaming``,
+    etc.) are stored directly on this widget so that callers do not need to
+    know about the internal ``_HeaderInfoStatic`` child.  Call
+    ``refresh_info()`` after changing attributes to trigger a repaint of the
+    info section.
+    """
 
     DEFAULT_CSS = """
     HeaderBar {
         dock: top;
-        height: 3;
+        height: 1;
         padding: 0 1;
     }
     """
@@ -35,6 +97,7 @@ class HeaderBar(Static):
     def __init__(self, theme: Theme) -> None:
         super().__init__()
         self.theme = theme
+        # --- display state (read by _HeaderInfoStatic.render) ---
         self.provider_name: str = ""
         self.model_name: str = ""
         self.input_tokens: int = 0
@@ -46,42 +109,24 @@ class HeaderBar(Static):
         self.warning_active: bool = False
         self.streaming: bool = False
 
+    def compose(self) -> ComposeResult:
+        yield _HeaderInfoStatic(self)
+
     def update_tokens(
         self, usage: dict[str, int], step_cost: float = 0.0, warning: bool = False
     ) -> None:
+        """Accumulate token counts and refresh the info section."""
         self.input_tokens += usage.get("input_tokens", 0)
         self.output_tokens += usage.get("output_tokens", 0)
         self.total_cost += step_cost
         self.warning_active = warning
 
-    def render(self) -> Text:  # type: ignore[override]
-        h = self.theme.header
-        provider = f"{self.provider_name}"
-        if self.model_name:
-            provider += f" / {self.model_name}"
-        session = f"{self.session_id[:8]}..." if self.session_id else ""
-        thinking_label = "think:on" if self.thinking_enabled else "think:off"
-        tokens_style = h.tokens_warning_style if self.warning_active else h.tokens_style
-        tokens_text = f"tokens: {self.input_tokens}in / {self.output_tokens}out"
-        if self.total_cost > 0:
-            if self.total_cost < 0.01:
-                tokens_text += f" (${self.total_cost:.4f})"
-            else:
-                tokens_text += f" (${self.total_cost:.2f})"
-        parts = [
-            (provider, h.provider_style),
-            ("  |  ", h.separator_style),
-            (tokens_text, tokens_style),
-            ("  |  ", h.separator_style),
-        ]
-        if session:
-            parts.append((session, h.session_style))
-            parts.append(("  |  ", h.separator_style))
-        state_label = "streaming…" if self.streaming else self.state
-        parts.append((state_label, h.state_style))
-        parts.append(("  |  ", h.separator_style))
-        parts.append((thinking_label, h.tokens_style))
-        return Text.assemble(*parts)
+    def refresh_info(self) -> None:
+        """Trigger a repaint of the left info section."""
+        try:
+            self.query_one(_HeaderInfoStatic).refresh()
+        except Exception:
+            self.refresh()
 
 
 class FooterBar(Static):

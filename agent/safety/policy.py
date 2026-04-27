@@ -106,10 +106,29 @@ class PolicyConfig(BaseModel):
         ]
     )
 
-    # Sandbox mode — used to decide whether bash needs forced approval when
-    # allowed_paths is active. "local" means no OS-level isolation so the
-    # shell can reach any path; real sandboxes (wsl, linux, windows) enforce
-    # the boundary at the OS level, making forced-ASK redundant.
+    # Sandbox mode — used to decide whether bash commands need forced approval
+    # when allowed_paths is active.
+    #
+    # The policy engine enforces allowed_paths for *file tool calls* (read_file,
+    # write_file, etc.) regardless of sandbox mode, because those calls pass an
+    # explicit path argument that can be checked.
+    #
+    # Shell commands (bash tool) are different: the policy engine cannot inspect
+    # which paths the command will touch at runtime. The only protection is either
+    # OS-level write isolation (so the kernel/OS refuses out-of-scope writes) or
+    # forcing human approval for every shell call.
+    #
+    # Modes that provide OS-level write isolation (allowed_paths enforcement is
+    # meaningful for bash without forced ASK):
+    #   "linux"   — Landlock LSM: kernel refuses writes outside workspace
+    #   "windows" — Low Integrity Level: Windows ACL blocks writes outside workspace
+    #
+    # Modes that do NOT provide OS-level write isolation (forced ASK when
+    # allowed_paths is active):
+    #   "local"   — no isolation at all
+    #   "wsl"     — separate distro but commands run as root with full /mnt/ access;
+    #               allowed_paths cannot be enforced by the OS for shell commands
+    #   "auto"    — resolved before this config is built, so never seen here
     sandbox_mode: str = "local"
 
     # Logging
@@ -240,10 +259,19 @@ class SafetyPolicy:
                 return PolicyDecision.ASK
             # When allowed_paths is active and the sandbox provides no OS-level
             # write isolation, we cannot verify which paths a shell command will
-            # touch. Force ASK so the user can review the command before it runs.
-            # Only "linux" (Landlock) and "windows" (Low Integrity) actually
-            # enforce write restrictions at the kernel/OS level; "local", "wsl",
-            # and any unrecognised mode do not.
+            # touch at runtime. Force ASK so the user can review the command before
+            # it runs.
+            #
+            # "linux" (Landlock) and "windows" (Low Integrity Level) enforce write
+            # restrictions at the kernel/OS level — the OS refuses out-of-scope writes
+            # so forced ASK is not needed.
+            #
+            # "wsl" is intentionally excluded even though it uses a dedicated distro:
+            # commands run as root with full /mnt/<drive>/ access to the Windows host
+            # filesystem, so allowed_paths cannot be enforced at the OS level for shell
+            # commands. Forced ASK keeps the user in the loop.
+            #
+            # "local" provides no isolation whatsoever.
             _ISOLATED_MODES = {"linux", "windows"}
             if self.config.allowed_paths and self.config.sandbox_mode not in _ISOLATED_MODES:
                 logger.info(

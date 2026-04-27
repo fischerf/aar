@@ -1,4 +1,5 @@
 .venv_release/
+aar-extensions-registry/
 dist/
 build/
 .agent/*
@@ -16,5 +17,6 @@ CLAUDE.md
 tools/webclient/
 tools/sqllite_mcp/
 tools/mcp_chrome.json
-docs/agent_loop.md
 .vscode/
+tools/mcp_sqlite.json
+docs/loop_flow_explained.md

@@ -969,6 +969,75 @@ class TestSetSessionModel:
         assert session_cfg.provider.model == "claude-sonnet-4-6"
 
     @pytest.mark.asyncio
+    async def test_switches_model_by_registry_key(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "session_dir": tmp_path,
+                "providers": {
+                    "fast": ProviderConfig(name="openai", model="gpt-4o-mini", api_key="k1"),
+                    "smart": ProviderConfig(
+                        name="anthropic", model="claude-sonnet-4-6", api_key="k2"
+                    ),
+                },
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        await agent.set_session_model(model_id="fast", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "openai"
+        assert session_cfg.provider.model == "gpt-4o-mini"
+        assert session_cfg.provider.api_key == "k1"
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_model_by_registry_key(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "session_dir": tmp_path,
+                "providers": {
+                    "fast": ProviderConfig(name="openai", model="gpt-4o-mini", api_key="k1"),
+                    "smart": ProviderConfig(
+                        name="anthropic", model="claude-sonnet-4-6", api_key="k2"
+                    ),
+                },
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        resp = await agent.set_config_option(config_id="model", value="smart", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+        assert session_cfg.provider.api_key == "k2"
+        # Response should include updated config_options
+        assert resp is not None
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_model_fallback_to_prefix(self, tmp_path):
+        """When model_id is not a registry key, fall back to _model_id_to_provider."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        resp = await agent.set_config_option(
+            config_id="model", value="claude-sonnet-4-6", session_id=sid
+        )
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+
+    @pytest.mark.asyncio
     async def test_different_sessions_have_independent_models(self, tmp_path):
         config = _make_config()
         config = config.model_copy(update={"session_dir": tmp_path})
@@ -1008,11 +1077,11 @@ class TestAvailableCommands:
         assert "tools" in names
         assert "policy" in names
 
-    def test_no_model_or_clear_commands(self):
+    def test_model_command_present_clear_absent(self):
         from agent.transports.acp import _available_commands
 
         names = {c.name for c in _available_commands()}
-        assert "model" not in names
+        assert "model" in names
         assert "clear" not in names
 
     def test_all_commands_have_descriptions(self):
@@ -2608,3 +2677,181 @@ class TestCollectOutput:
         output = _collect_output(session)
         assert len(output) == 1
         assert output[0].text == "non-empty"
+
+
+class TestExtensionCommands:
+    """Extension slash commands are dispatched in the ACP transport (not sent to the LLM)."""
+
+    def test_available_commands_includes_extension_commands(self):
+        from agent.transports.acp import _available_commands
+
+        cmds = _available_commands({"inspect": "Inspect current state"})
+        names = {c.name for c in cmds}
+        assert "status" in names
+        assert "tools" in names
+        assert "policy" in names
+        assert "inspect" in names
+
+    def test_available_commands_description_preserved(self):
+        from agent.transports.acp import _available_commands
+
+        cmds = _available_commands({"mycommand": "Does something useful"})
+        by_name = {c.name: c for c in cmds}
+        assert by_name["mycommand"].description == "Does something useful"
+
+    def test_available_commands_empty_extra_unchanged(self):
+        from agent.transports.acp import _available_commands
+
+        baseline = {c.name for c in _available_commands()}
+        with_empty = {c.name for c in _available_commands({})}
+        assert baseline == with_empty
+
+    @pytest.mark.asyncio
+    async def test_extension_command_dispatched_without_agent_loop(self, tmp_path):
+        """A /extcmd prompt calls the extension handler, not the provider."""
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        called_with: list[tuple[str, Any]] = []
+
+        def my_handler(args_str: str, ctx: Any) -> str:
+            called_with.append((args_str, ctx))
+            return "extension output"
+
+        mock_mgr = MagicMock()
+        mock_mgr.commands = {"extcmd": ("My extension command", my_handler)}
+        sdk_agent._extension_managers[sid] = mock_mgr
+
+        response = await sdk_agent.prompt(prompt=[{"text": "/extcmd some args"}], session_id=sid)
+
+        assert response.stop_reason == "end_turn"
+        assert len(called_with) == 1
+        assert called_with[0][0] == "some args"
+        assert len(provider.call_history) == 0
+
+    @pytest.mark.asyncio
+    async def test_extension_command_reply_sent_to_client(self, tmp_path):
+        """The extension handler's return value is pushed as an agent message."""
+        from acp.schema import AgentMessageChunk
+
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        mock_mgr = MagicMock()
+        mock_mgr.commands = {"greet": ("Say hello", lambda a, c: "hello from extension")}
+        sdk_agent._extension_managers[sid] = mock_mgr
+
+        await sdk_agent.prompt(prompt=[{"text": "/greet"}], session_id=sid)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        agent_msgs = [u for u in all_updates if isinstance(u, AgentMessageChunk)]
+        assert any("hello from extension" in getattr(m.content, "text", "") for m in agent_msgs)
+
+    @pytest.mark.asyncio
+    async def test_extension_command_no_args(self, tmp_path):
+        """Handler receives empty string when no args follow the command."""
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        received: list[str] = []
+        mock_mgr = MagicMock()
+        mock_mgr.commands = {"noargs": ("No-arg command", lambda a, c: received.append(a) or "")}
+        sdk_agent._extension_managers[sid] = mock_mgr
+
+        await sdk_agent.prompt(prompt=[{"text": "/noargs"}], session_id=sid)
+
+        assert received == [""]
+
+    @pytest.mark.asyncio
+    async def test_extension_commands_in_available_commands_push(self, tmp_path):
+        """AvailableCommandsUpdate includes extension commands from the session's manager."""
+        from acp.schema import AvailableCommandsUpdate
+
+        from agent.extensions.api import ExtensionAPI
+        from agent.extensions.loader import ExtensionInfo
+        from agent.extensions.manager import ExtensionManager
+
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        mgr = ExtensionManager()
+        api = ExtensionAPI("test-ext")
+        api._commands["inspect"] = ("Inspect session state", lambda a, c: None)
+        info = ExtensionInfo(name="test-ext", source="project", path=None)
+        info.api = api
+        mgr._extensions = [info]
+        sdk_agent._extension_managers[sid] = mgr
+
+        mock_conn.reset_mock()
+        await sdk_agent._push_available_commands(sid)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        cmd_updates = [u for u in all_updates if isinstance(u, AvailableCommandsUpdate)]
+        assert cmd_updates
+        names = {c.name for c in cmd_updates[-1].available_commands}
+        assert "inspect" in names
+        assert "status" in names
+
+    @pytest.mark.asyncio
+    async def test_unknown_slash_command_not_intercepted(self, tmp_path):
+        """An unknown /slash is passed through to the LLM, not silently dropped."""
+        provider = MockProvider()
+        provider.enqueue_text("I don't know that command.", stop="end_turn")
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "/unknown_cmd"}], session_id=r.session_id)
+
+        assert len(provider.call_history) == 1

@@ -11,8 +11,8 @@ import time
 
 from agent.core.config import SafetyConfig, ToolConfig
 from agent.core.events import ToolCall, ToolResult
-from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.permissions import ApprovalCallback, PermissionManager
+from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.sandbox import (
     LinuxSandbox,
     LocalSandbox,
@@ -211,6 +211,8 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
             distro_name=sb.wsl.distro,
             workspace=sb.wsl.workspace,
             shell=sb.wsl.shell,
+            wsl_user=sb.wsl.wsl_user,
+            restrict_to_workspace=sb.wsl.restrict_to_workspace,
         )
     if mode == "linux":
         return LinuxSandbox(
