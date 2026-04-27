@@ -167,6 +167,9 @@ class ProviderConfig(BaseModel):
     base_url: str = ""
     max_tokens: int = 4096
     temperature: float = 0.0
+    context_window: int | None = None  # overrides AgentConfig.context_window when set
+    token_budget: int | None = None  # overrides AgentConfig.token_budget when set
+    cost_limit: float | None = None  # overrides AgentConfig.cost_limit when set
     response_format: str = ""  # "" | "json" | "json_schema"
     json_schema: dict = Field(default_factory=dict)  # schema when response_format="json_schema"
     extra: dict = Field(default_factory=dict)
@@ -353,7 +356,8 @@ class TUIConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    provider: str | ProviderConfig = Field(default_factory=ProviderConfig)
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
@@ -373,6 +377,57 @@ class AgentConfig(BaseModel):
     system_prompt: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
     log_file: Path | None = None  # opt-in file logging (append mode)
+
+    def resolve_provider(self, key: str | None = None) -> ProviderConfig:
+        """Resolve a provider config by key, falling back to the active default.
+
+        When *key* is given it is looked up in ``providers``.  When the
+        active ``provider`` field is a string it is treated as a key into
+        ``providers``.  An inline ``ProviderConfig`` is returned as-is.
+        """
+        if key is not None:
+            if key in self.providers:
+                return self.providers[key]
+            raise ValueError(
+                f"Unknown provider key: '{key}'. "
+                f"Available: {', '.join(sorted(self.providers)) or '(none)'}"
+            )
+        if isinstance(self.provider, str):
+            if self.provider in self.providers:
+                return self.providers[self.provider]
+            raise ValueError(
+                f"Provider key '{self.provider}' not found in providers dict. "
+                f"Available: {', '.join(sorted(self.providers)) or '(none)'}"
+            )
+        return self.provider
+
+    @property
+    def active_provider_key(self) -> str | None:
+        """Return the active provider key, or None if provider is inline."""
+        if isinstance(self.provider, str):
+            return self.provider
+        return None
+
+    def effective_context_window(self) -> int:
+        """Return the active context window — provider override or global fallback."""
+        p = self.resolve_provider()
+        if p.context_window is not None:
+            return p.context_window
+        return self.context_window
+
+    def effective_token_budget(self) -> int:
+        """Return the active token budget — provider override or global fallback."""
+        p = self.resolve_provider()
+        if p.token_budget is not None:
+            return p.token_budget
+        return self.token_budget
+
+    def effective_cost_limit(self) -> float:
+        """Return the active cost limit — provider override or global fallback."""
+        p = self.resolve_provider()
+        if p.cost_limit is not None:
+            return p.cost_limit
+        return self.cost_limit
 
     def model_post_init(self, __context: Any) -> None:
         """Build the system prompt from config if not explicitly provided."""

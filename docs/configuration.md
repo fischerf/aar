@@ -15,9 +15,16 @@ config = AgentConfig(
         api_key="...",                             # or set via env var
         max_tokens=4096,
         temperature=0.0,
+        context_window=None,                       # override AgentConfig.context_window per provider
+        token_budget=None,                         # override AgentConfig.token_budget per provider
+        cost_limit=None,                           # override AgentConfig.cost_limit per provider
         response_format="",                        # "" | "json" | "json_schema"
         json_schema={},                            # schema when response_format="json_schema"
     ),
+    providers={                                    # named provider profiles for runtime switching
+        "claude": ProviderConfig(name="anthropic", model="claude-sonnet-4-6"),
+        "gpt4": ProviderConfig(name="openai", model="gpt-4o"),
+    },
     tools=ToolConfig(
         enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
         command_timeout=30,                        # per-tool execution limit in seconds; 0 = no limit
@@ -62,6 +69,30 @@ config = AgentConfig(
     log_file=None,                                 # opt-in file logging path (append mode)
 )
 ```
+
+### Named provider profiles (`providers`)
+
+The `providers` dict lets you pre-configure multiple LLM providers and switch between them at runtime with `/model <key>`. Each entry is a full `ProviderConfig` — API keys, temperature, max_tokens, and provider-specific `extra` settings are all per-profile.
+
+The `provider` field selects the active profile:
+- **String** — key into `providers` (e.g. `"provider": "claude"`)
+- **Inline object** — a `ProviderConfig` dict (backward compatible with existing configs)
+
+See [Providers — Runtime provider switching](providers.md#runtime-provider-switching) for usage details.
+
+#### Per-provider runtime overrides
+
+`ProviderConfig` accepts three optional override fields that take effect when that provider is active:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `context_window` | `int \| null` | `null` | Model context limit in tokens; overrides global `context_window` |
+| `token_budget` | `int \| null` | `null` | Max total tokens per run; overrides global `token_budget` |
+| `cost_limit` | `float \| null` | `null` | Max USD cost per run; overrides global `cost_limit` |
+
+When `null` (the default), the global `AgentConfig` value is used. Set to `0` explicitly to disable budgets for local/free models.
+
+This lets you configure context windows and cost limits per model — a 32k Ollama model doesn't need a 200k sliding window, and a free local model doesn't need a $5 cost cap.
 
 ## Timeouts
 

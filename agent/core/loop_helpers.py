@@ -55,31 +55,31 @@ def apply_usage_and_budget(
     session.total_input_tokens += usage.input_tokens
     session.total_output_tokens += usage.output_tokens
 
-    pricing = get_pricing(config.provider.model)
+    pricing = get_pricing(config.resolve_provider().model)
     if pricing:
         session.total_cost += calculate_cost(usage, pricing)
 
-    if config.token_budget > 0 and session.total_tokens >= config.token_budget:
+    _token_budget = config.effective_token_budget()
+    if _token_budget > 0 and session.total_tokens >= _token_budget:
         session.state = AgentState.BUDGET_EXCEEDED
         emit(
             session,
             on_event,
             ErrorEvent(
-                message=f"Token budget exceeded ({session.total_tokens}/{config.token_budget})",
+                message=f"Token budget exceeded ({session.total_tokens}/{_token_budget})",
                 recoverable=False,
             ),
         )
         return True
 
-    if config.cost_limit > 0 and session.total_cost >= config.cost_limit:
+    _cost_limit = config.effective_cost_limit()
+    if _cost_limit > 0 and session.total_cost >= _cost_limit:
         session.state = AgentState.BUDGET_EXCEEDED
         emit(
             session,
             on_event,
             ErrorEvent(
-                message=(
-                    f"Cost limit exceeded (${session.total_cost:.4f}/${config.cost_limit:.4f})"
-                ),
+                message=(f"Cost limit exceeded (${session.total_cost:.4f}/${_cost_limit:.4f})"),
                 recoverable=False,
             ),
         )

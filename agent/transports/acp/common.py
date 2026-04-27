@@ -249,14 +249,22 @@ def _acp_server_to_mcp_config(srv: Any) -> Any:
 def _model_id_to_provider(model_id: str) -> tuple[str, str]:
     """Map a model ID string to (provider_name, model).
 
-    Uses simple prefix matching so new model releases work automatically.
-    Falls back to Ollama for unknown IDs (safe for local models).
+    Accepts explicit ``provider/model`` format (e.g. ``openai/gpt-4o``) or
+    uses prefix matching for bare model names.  Falls back to Ollama for
+    unknown IDs (safe for local models).
     """
+    if "/" in model_id:
+        provider_name, model = model_id.split("/", 1)
+        provider_name = provider_name.lower()
+        if provider_name in {"anthropic", "openai", "ollama", "gemini", "generic"}:
+            return provider_name, model
     mid = model_id.lower()
     if mid.startswith("claude"):
         return "anthropic", model_id
     if any(mid.startswith(p) for p in ("gpt-", "o1", "o3", "o4", "chatgpt")):
         return "openai", model_id
+    if mid.startswith("gemini"):
+        return "gemini", model_id
     return "ollama", model_id
 
 

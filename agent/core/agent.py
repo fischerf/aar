@@ -58,7 +58,7 @@ class Agent:
         approval_callback: ApprovalCallback | None = None,
     ) -> None:
         self.config = config or AgentConfig()
-        self.provider = provider or _create_provider(self.config.provider)
+        self.provider = provider or _create_provider(self.config.resolve_provider())
         self.registry = registry or ToolRegistry()
         self.executor = ToolExecutor(
             self.registry,
@@ -106,6 +106,36 @@ class Agent:
     def off_event(self, callback: Callable[[Event], Any]) -> None:
         """Remove a previously registered event callback."""
         self._on_event = [cb for cb in self._on_event if cb != callback]
+
+    def switch_provider(self, key_or_spec: str | ProviderConfig) -> str:
+        """Switch the active provider between turns.
+
+        Args:
+            key_or_spec: Either a key from ``config.providers`` or an
+                ad-hoc ``ProviderConfig``.
+
+        Returns:
+            Human-readable description of the new provider,
+            e.g. ``"anthropic/claude-sonnet-4-6"``.
+        """
+        if isinstance(key_or_spec, str):
+            if key_or_spec in self.config.providers:
+                cfg = self.config.providers[key_or_spec]
+            elif "/" in key_or_spec:
+                provider_name, model = key_or_spec.split("/", 1)
+                cfg = ProviderConfig(name=provider_name, model=model)
+            else:
+                raise ValueError(
+                    f"'{key_or_spec}' is not a known provider key and "
+                    f"doesn't match 'provider/model' format. "
+                    f"Available keys: "
+                    f"{', '.join(sorted(self.config.providers)) or '(none)'}"
+                )
+        else:
+            cfg = key_or_spec
+
+        self.provider = _create_provider(cfg)
+        return f"{cfg.name}/{cfg.model}"
 
     async def _init_extensions(
         self,

@@ -92,8 +92,9 @@ async def run_loop(
 
             session.increment_step()
             messages = session.to_messages()
-            if config.context_window > 0 and config.context_strategy == "sliding_window":
-                messages = trim_to_token_budget(messages, config.context_window)
+            _ctx_window = config.effective_context_window()
+            if _ctx_window > 0 and config.context_strategy == "sliding_window":
+                messages = trim_to_token_budget(messages, _ctx_window)
 
             if extension_manager is not None:
                 await extension_manager.fire_event("before_turn", None)
@@ -126,14 +127,16 @@ async def run_loop(
             if extension_manager is not None:
                 await extension_manager.fire_event("after_turn", response)
 
-            if guardrails.check_near_budget(session, config.token_budget, config.cost_limit):
+            _token_budget = config.effective_token_budget()
+            _cost_limit = config.effective_cost_limit()
+            if guardrails.check_near_budget(session, _token_budget, _cost_limit):
                 log.warning(
                     "Near budget at step %d (tokens=%d budget=%d cost=%.4f limit=%.4f)",
                     session.step_count,
                     session.total_tokens,
-                    config.token_budget,
+                    _token_budget,
                     session.total_cost,
-                    config.cost_limit,
+                    _cost_limit,
                     extra=log_extra,
                 )
                 emit(

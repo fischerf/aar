@@ -1099,6 +1099,34 @@ class AarFixedApp(App):
         elif stripped.lower() == "/clear":
             await self.action_clear_screen()
             return
+        elif stripped.lower().startswith("/model"):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 1:
+                p = self._agent.provider
+                await _write(Text.from_markup(f"[bold]Active:[/] {p.name}/{p.config.model}"))
+                if self._agent.config.providers:
+                    await _write(Text.from_markup(f"[{t.dim_text}]Available providers:[/]"))
+                    for k, v in self._agent.config.providers.items():
+                        marker = (
+                            " *" if (v.name == p.config.name and v.model == p.config.model) else ""
+                        )
+                        await _write(
+                            Text.from_markup(f"  [{t.dim_text}]{k}[/] → {v.name}/{v.model}{marker}")
+                        )
+                else:
+                    await _write(
+                        Text.from_markup(
+                            f"[{t.dim_text}]No named providers configured. "
+                            f"Use /model <provider/model> for ad-hoc switch.[/]"
+                        )
+                    )
+            else:
+                try:
+                    desc = self._agent.switch_provider(parts[1].strip())
+                    await _write(Text.from_markup(f"[green]Switched to {desc}[/]"))
+                except (ValueError, Exception) as exc:
+                    await _write(Text(str(exc), style=t.error.border_style))
+            return
         elif stripped.lower().startswith("/theme"):
             parts = stripped.split(maxsplit=1)
             if len(parts) == 1:

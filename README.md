@@ -48,6 +48,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
 - **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint without changing agent code
+- **Runtime provider switching** — switch between configured providers mid-session with `/model`; conversation history is preserved
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable
@@ -129,6 +130,10 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or point `base_url`
 
 # Start the HTTP/SSE web server
 > aar serve --host 0.0.0.0 --port 8080
+
+# Switch providers mid-session with /model (in chat, tui, or tui --fixed)
+> /model gpt4
+> /model ollama/llama3
 ```
 
 ## ACP — IDE integration

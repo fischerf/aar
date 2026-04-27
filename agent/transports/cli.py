@@ -354,6 +354,34 @@ async def _async_chat_loop(
             if stripped.lower() in {"/quit", "/exit", "/q"}:
                 break
 
+            # --- Built-in slash-commands ---------------------------------
+            if stripped.lower().startswith("/model"):
+                parts = stripped.split(maxsplit=1)
+                if len(parts) == 1:
+                    p = agent.provider
+                    console.print(f"[bold]Active:[/] {p.name}/{p.config.model}")
+                    if agent.config.providers:
+                        console.print("[dim]Available providers:[/]")
+                        for k, v in agent.config.providers.items():
+                            marker = (
+                                " [bold]*[/]"
+                                if (v.name == p.config.name and v.model == p.config.model)
+                                else ""
+                            )
+                            console.print(f"  [dim]{k}[/] → {v.name}/{v.model}{marker}")
+                    else:
+                        console.print(
+                            "[dim]No named providers configured. "
+                            "Use /model <provider/model> for ad-hoc switch.[/]"
+                        )
+                else:
+                    try:
+                        desc = agent.switch_provider(parts[1].strip())
+                        console.print(f"[green]Switched to {desc}[/]")
+                    except (ValueError, Exception) as exc:
+                        console.print(f"[red]{exc}[/]")
+                continue
+
             # --- Extension slash-commands --------------------------------
             if stripped.startswith("/"):
                 cmd_name = stripped[1:].split()[0].lower()

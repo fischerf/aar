@@ -8,6 +8,15 @@
       "timeout": null
     }
   },
+  "providers": {
+    "claude": {
+      "name": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "temperature": 0.0,
+      "max_tokens": 8192,
+      "extra": { "timeout": null }
+    }
+  },
   "tools": {
     "enabled_builtins": [
       "read_file",

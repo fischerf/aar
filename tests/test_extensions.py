@@ -176,7 +176,8 @@ class TestDiscoverExtensions:
         (user_dir / "alpha.py").write_text("def register(api): pass")
         (user_dir / "_hidden.py").write_text("")
 
-        infos = discover_extensions(user_dir=user_dir, project_dir=tmp_path / "nope")
+        with patch("agent.extensions.loader.importlib.metadata.entry_points", return_value=[]):
+            infos = discover_extensions(user_dir=user_dir, project_dir=tmp_path / "nope")
         names = [i.name for i in infos]
         assert "alpha" in names
         assert "_hidden" not in names
@@ -189,7 +190,8 @@ class TestDiscoverExtensions:
         (user_dir / "ext.py").write_text("# user")
         (proj_dir / "ext.py").write_text("# proj")
 
-        infos = discover_extensions(user_dir=user_dir, project_dir=proj_dir)
+        with patch("agent.extensions.loader.importlib.metadata.entry_points", return_value=[]):
+            infos = discover_extensions(user_dir=user_dir, project_dir=proj_dir)
         assert len(infos) == 1
         assert infos[0].source == "project"
 

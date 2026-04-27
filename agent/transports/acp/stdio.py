@@ -13,7 +13,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 from agent.core.agent import Agent as AarAgent
-from agent.core.config import AgentConfig
+from agent.core.config import AgentConfig, ProviderConfig
 from agent.core.events import (
     AssistantMessage,
     Event,
@@ -167,9 +167,7 @@ class AarAcpAgent:
         if self._conn:
             ext_mgr = self._extension_managers.get(session_id)
             ext_extra = (
-                {name: desc for name, (desc, _) in ext_mgr.commands.items()}
-                if ext_mgr
-                else None
+                {name: desc for name, (desc, _) in ext_mgr.commands.items()} if ext_mgr else None
             )
             await self._conn.session_update(
                 session_id=session_id,
@@ -453,11 +451,31 @@ class AarAcpAgent:
         from acp.schema import SetSessionModelResponse
 
         validate_session_id(session_id)
-        provider_name, model = _model_id_to_provider(model_id)
         base_cfg = self._session_configs.get(session_id, self._config)
-        new_provider = base_cfg.provider.model_copy(update={"name": provider_name, "model": model})
-        self._session_configs[session_id] = base_cfg.model_copy(update={"provider": new_provider})
-        logger.info("ACP: session %s model → %s/%s", session_id, provider_name, model)
+
+        # Check if model_id is a named provider key in the config registry
+        if model_id in base_cfg.providers:
+            new_provider = base_cfg.providers[model_id]
+        else:
+            provider_name, model = _model_id_to_provider(model_id)
+            new_provider = (
+                base_cfg.provider
+                if isinstance(base_cfg.provider, ProviderConfig)
+                else base_cfg.resolve_provider()
+            )
+            new_provider = new_provider.model_copy(
+                update={"name": provider_name, "model": model},
+            )
+
+        self._session_configs[session_id] = base_cfg.model_copy(
+            update={"provider": new_provider},
+        )
+        logger.info(
+            "ACP: session %s model → %s/%s",
+            session_id,
+            new_provider.name,
+            new_provider.model,
+        )
         return SetSessionModelResponse()
 
     async def authenticate(self, method_id: str, **kwargs: Any) -> Any:
@@ -915,7 +933,7 @@ class AarAcpAgent:
                 ext_cmds = ext_mgr.commands
                 if cmd_name in ext_cmds:
                     ext_mgr.update_session(session)
-                    args_str = text.strip()[len(cmd):].strip()
+                    args_str = text.strip()[len(cmd) :].strip()
                     _, handler = ext_cmds[cmd_name]
                     try:
                         result = handler(args_str, ext_mgr._context)

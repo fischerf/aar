@@ -431,6 +431,37 @@ async def run_tui(
                 )
                 renderer.render_welcome(extra_commands=_ext_cmds_now or None)
                 continue
+            elif stripped.lower().startswith("/model"):
+                parts = stripped.split(maxsplit=1)
+                if len(parts) == 1:
+                    p = agent.provider
+                    renderer.console.print(f"[bold]Active:[/] {p.name}/{p.config.model}")
+                    if agent.config.providers:
+                        renderer.console.print(
+                            f"[{renderer.theme.dim_text}]Available providers:[/]"
+                        )
+                        for k, v in agent.config.providers.items():
+                            marker = (
+                                " *"
+                                if (v.name == p.config.name and v.model == p.config.model)
+                                else ""
+                            )
+                            renderer.console.print(
+                                f"  [{renderer.theme.dim_text}]{k}[/] → {v.name}/{v.model}{marker}"
+                            )
+                    else:
+                        renderer.console.print(
+                            f"[{renderer.theme.dim_text}]No named providers"
+                            f" configured. Use /model <provider/model>"
+                            f" for ad-hoc switch.[/]"
+                        )
+                else:
+                    try:
+                        desc = agent.switch_provider(parts[1].strip())
+                        renderer.console.print(f"[green]Switched to {desc}[/]")
+                    except (ValueError, Exception) as exc:
+                        renderer.console.print(f"[{renderer.theme.error.border_style}]{exc}[/]")
+                continue
             elif stripped.lower().startswith("/theme"):
                 parts = stripped.split(maxsplit=1)
                 if len(parts) == 1:
