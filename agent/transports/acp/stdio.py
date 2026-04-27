@@ -1021,8 +1021,8 @@ class AarAcpAgent:
         if cmd == "/status":
             lines = [
                 f"**Session:** `{session_id}`",
-                f"**Provider:** {cfg.provider.name}",
-                f"**Model:** {cfg.provider.model}",
+                f"**Provider:** {cfg.resolve_provider().name}",
+                f"**Model:** {cfg.resolve_provider().model}",
                 f"**Steps this session:** {session.step_count}",
                 f"**Messages:** {len(session.events)}",
             ]

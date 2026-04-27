@@ -690,8 +690,9 @@ class AarFixedApp(App):
         header = self.query_one(HeaderBar)
         footer = self.query_one(FooterBar)
 
-        header.provider_name = self._config.provider.name
-        header.model_name = self._config.provider.model
+        _active = self._config.resolve_provider()
+        header.provider_name = _active.name
+        header.model_name = _active.model
 
         # Apply selected block highlight style from theme to ChatBody CSS
         fl = self._theme.fixed_layout

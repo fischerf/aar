@@ -78,6 +78,11 @@ def _build_config(
     else:
         cfg = AgentConfig()
 
+    # Resolve string provider key to an inline ProviderConfig so the rest of
+    # _build_config (and downstream code) can mutate cfg.provider.* directly.
+    if isinstance(cfg.provider, str):
+        cfg.provider = cfg.resolve_provider()
+
     # Provider settings — only override when explicitly passed
     if provider is not None:
         cfg.provider.name = provider

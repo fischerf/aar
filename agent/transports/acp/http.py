@@ -218,8 +218,8 @@ class AcpTransport:
             input_content_types=["text/plain"],
             output_content_types=["text/plain"],
             metadata={
-                "provider": self.config.provider.name,
-                "model": self.config.provider.model,
+                "provider": self.config.resolve_provider().name,
+                "model": self.config.resolve_provider().model,
                 "max_steps": self.config.max_steps,
             },
         )
