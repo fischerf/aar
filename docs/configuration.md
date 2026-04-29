@@ -53,7 +53,7 @@ config = AgentConfig(
     timeout=0.0,                                   # wall-clock limit in seconds for the whole run; 0.0 = no limit
     streaming=False,                               # use token-level streaming when supported
     context_window=0,                              # model context limit in tokens; 0 = no management
-    context_strategy="sliding_window",             # "sliding_window" | "none"
+    context_strategy="sliding_window",             # "sliding_window" | "compact" | "none"
     system_prompt="You are a helpful assistant.",
     tui=TUIConfig(
         theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name

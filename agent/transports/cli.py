@@ -381,7 +381,7 @@ async def _async_chat_loop(
                         )
                 else:
                     try:
-                        desc = agent.switch_provider(parts[1].strip())
+                        desc = agent.switch_provider(parts[1].strip(), session)
                         console.print(f"[green]Switched to {desc}[/]")
                     except (ValueError, Exception) as exc:
                         console.print(f"[red]{exc}[/]")

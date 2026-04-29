@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent.core.events import Event, deserialize_event
 from agent.core.session import Session
@@ -56,6 +56,9 @@ class SessionStore:
             "state": session.state.value,
             "step_count": session.step_count,
             "metadata": session.metadata,
+            "total_input_tokens": session.total_input_tokens,
+            "total_output_tokens": session.total_output_tokens,
+            "total_cost": session.total_cost,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -112,12 +115,21 @@ class SessionStore:
             step_count=header.get("step_count", 0),
             metadata=header.get("metadata", {}),
             events=events,
+            total_input_tokens=header.get("total_input_tokens", 0),
+            total_output_tokens=header.get("total_output_tokens", 0),
+            total_cost=header.get("total_cost", 0.0),
         )
 
         logger.info("Loaded session %s with %d events", session_id, len(events))
         return session
 
-    def compact(self, session_id: str, max_events: int = 200) -> Session:
+    def compact(
+        self,
+        session_id: str,
+        max_events: int = 200,
+        *,
+        on_prune: Callable[[list[Event], dict], None] | None = None,
+    ) -> Session:
         """Truncate a session to its most recent *max_events* events and rewrite the file.
 
         Compaction keeps the session file from growing without bound in long-running
@@ -125,31 +137,16 @@ class SessionStore:
         returned. Callers are responsible for re-injecting any system context that
         may have been pruned (e.g. via the system_prompt in AgentConfig).
 
-        **Companion baseline**: before truncating, cumulative ``ToolCall`` and
-        ``ErrorEvent`` counts are rolled into ``session.metadata["companion_baseline"]``
-        so the living companion's progress survives compaction without any
-        separate persistence file.
+        If *on_prune* is provided, it is called with the list of pruned events and
+        the session metadata dict before truncation.  This allows extensions (e.g.
+        the companion) to roll up statistics from the about-to-be-discarded events
+        into session metadata without coupling the store to any specific extension.
         """
         session = self.load(session_id)
         if len(session.events) > max_events:
-            # Roll up companion stats into the baseline watermark so that
-            # companion_stats_from_session() can recover the lifetime totals
-            # after old events are pruned.  We compute inline here to avoid
-            # importing from agent.transports inside agent.memory.
-            from agent.core.events import ErrorEvent, ToolCall
-
-            prior = session.metadata.get("companion_baseline", {})
-            base_steps = int(prior.get("steps", 0))
-            base_errors = int(prior.get("errors", 0))
-            # Count only the events being PRUNED (not the ones kept).
-            # companion_stats_from_session() adds the remaining events on top
-            # of this baseline, so storing the total here would double-count
-            # the events that survive compaction.
             pruned = session.events[:-max_events]
-            session.metadata["companion_baseline"] = {
-                "steps": base_steps + sum(1 for e in pruned if isinstance(e, ToolCall)),
-                "errors": base_errors + sum(1 for e in pruned if isinstance(e, ErrorEvent)),
-            }
+            if on_prune is not None:
+                on_prune(pruned, session.metadata)
             session.events = session.events[-max_events:]
             logger.info("Compacted session %s to %d events", session_id, len(session.events))
         self.save(session)

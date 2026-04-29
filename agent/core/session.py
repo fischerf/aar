@@ -208,6 +208,63 @@ def trim_to_token_budget(
     return result
 
 
+def compact_to_token_budget(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+) -> list[dict[str, Any]]:
+    """Compress older messages to fit within the token budget.
+
+    Unlike :func:`trim_to_token_budget` which simply drops the oldest
+    messages, this strategy preserves the **first message** (system
+    context) and the **last N messages** that fit within 75% of the
+    budget.  Dropped middle messages are replaced with a single synthetic
+    user message summarizing what was removed.
+
+    If messages already fit within *max_tokens*, they are returned as-is.
+    """
+    if max_tokens <= 0 or estimate_token_count(messages) <= max_tokens:
+        return messages
+
+    if len(messages) <= 2:
+        return messages
+
+    # Reserve 75% of the budget for the tail messages
+    tail_budget = int(max_tokens * 0.75)
+
+    # Always keep the first message
+    first_msg = messages[0]
+
+    # Collect tail messages that fit within the tail budget
+    tail: list[dict[str, Any]] = []
+    tail_tokens = 0
+    for msg in reversed(messages[1:]):
+        msg_tokens = estimate_token_count([msg])
+        if tail_tokens + msg_tokens > tail_budget and tail:
+            break
+        tail.insert(0, msg)
+        tail_tokens += msg_tokens
+
+    # Determine how many middle messages were dropped
+    kept_tail_count = len(tail)
+    dropped_messages = messages[1 : len(messages) - kept_tail_count]
+    n_dropped = len(dropped_messages)
+
+    if n_dropped == 0:
+        return messages
+
+    dropped_tokens = estimate_token_count(dropped_messages)
+
+    marker: dict[str, Any] = {
+        "role": "user",
+        "content": (
+            f"[Earlier conversation truncated \u2014 {n_dropped} messages comprising "
+            f"approximately {dropped_tokens} tokens were removed to fit context window]"
+        ),
+    }
+
+    return [first_msg, marker] + tail
+
+
 def _tool_results_message(results: list[ToolResult]) -> dict[str, Any]:
     """Build a user message containing tool result blocks."""
     content = []

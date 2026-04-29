@@ -14,6 +14,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Log exceptions from fire-and-forget extension handler tasks."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Async extension handler raised: %s", task.exception(), exc_info=task.exception()
+        )
+
+
 # ---------------------------------------------------------------------------
 # Protocols — usable by third-party extensions for static type-checking
 # without importing concrete Aar classes.
@@ -107,7 +115,8 @@ class ExtensionEventBus:
                     # Best-effort: schedule on running loop if available.
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(result)
+                        task = loop.create_task(result)
+                        task.add_done_callback(_log_task_exception)
                     except RuntimeError:
                         # No running loop — discard the coroutine to avoid warnings.
                         result.close()

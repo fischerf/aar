@@ -263,6 +263,30 @@ def companion_stats_from_session(session: "Session") -> dict[str, int]:
     return {"steps": steps, "errors": errors}
 
 
+def companion_on_prune(pruned: list, metadata: dict) -> None:
+    """on_prune hook for SessionStore.compact() — maintains companion_baseline.
+
+    Rolls up ``ToolCall`` and ``ErrorEvent`` counts from the about-to-be-pruned
+    events into ``metadata["companion_baseline"]`` so that
+    :func:`companion_stats_from_session` can recover lifetime totals after
+    compaction.
+
+    Usage::
+
+        from agent.transports.companion_state import companion_on_prune
+        store.compact(session_id, max_events=200, on_prune=companion_on_prune)
+    """
+    from agent.core.events import ErrorEvent, ToolCall
+
+    prior = metadata.get("companion_baseline", {})
+    base_steps = int(prior.get("steps", 0))
+    base_errors = int(prior.get("errors", 0))
+    metadata["companion_baseline"] = {
+        "steps": base_steps + sum(1 for e in pruned if isinstance(e, ToolCall)),
+        "errors": base_errors + sum(1 for e in pruned if isinstance(e, ErrorEvent)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Git probe
 # ---------------------------------------------------------------------------

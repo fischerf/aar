@@ -228,6 +228,12 @@ the up-to-date totals.
 `agent.run()` call. Limits therefore apply per-run, not across the lifetime of the
 `Agent` instance.
 
+**Session restore:** when resuming a persisted session (e.g. via `aar chat --resume`
+or the ACP `session/load` endpoint), token and cost tallies (`total_input_tokens`,
+`total_output_tokens`, `total_cost`) are restored from the saved state. This means
+budget enforcement continues from where the previous run left off rather than
+resetting to zero.
+
 ---
 
 ## 6. Cost Estimation

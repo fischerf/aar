@@ -91,6 +91,7 @@ class EventType(str, Enum):
     PROVIDER_META = "provider_meta"
     ERROR = "error"
     SESSION = "session"
+    PROVIDER_SWITCH = "provider_switch"
 
 
 class StopReason(str, Enum):
@@ -194,6 +195,14 @@ class SessionEvent(Event):
     action: str = ""  # "started", "resumed", "paused", "ended"
 
 
+class ProviderSwitchEvent(Event):
+    type: EventType = EventType.PROVIDER_SWITCH
+    from_provider: str = ""
+    from_model: str = ""
+    to_provider: str = ""
+    to_model: str = ""
+
+
 # Union type for type-safe event handling
 AnyEvent = (
     UserMessage
@@ -205,6 +214,7 @@ AnyEvent = (
     | ProviderMeta
     | ErrorEvent
     | SessionEvent
+    | ProviderSwitchEvent
 )
 
 EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
@@ -217,6 +227,7 @@ EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.PROVIDER_META: ProviderMeta,
     EventType.ERROR: ErrorEvent,
     EventType.SESSION: SessionEvent,
+    EventType.PROVIDER_SWITCH: ProviderSwitchEvent,
 }
 
 

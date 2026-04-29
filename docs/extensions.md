@@ -172,6 +172,12 @@ Handlers are called in registration order. All handlers receive `(event, ctx)`.
 | `stream_chunk` | Per-token streaming chunk | — |
 | `error` | Error raised in the loop | — |
 
+**Transform events (`user_message`, `tool_result`):** these are piped through
+handlers sequentially — each handler receives the previous handler's output as its
+input. The final transformed value is what the loop uses. This enables chaining
+multiple extensions that each refine or enrich the content (e.g. one strips PII,
+another injects context).
+
 ---
 
 ## Blocking Tool Calls

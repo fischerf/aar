@@ -24,7 +24,7 @@ from agent.core.loop_helpers import (
     parse_stop,
 )
 from agent.core.provider_runner import ProviderRequestFailed, provider_request
-from agent.core.session import Session, trim_to_token_budget
+from agent.core.session import Session, compact_to_token_budget, trim_to_token_budget
 from agent.core.state import AgentState
 from agent.extensions.api import BlockResult
 from agent.extensions.manager import ExtensionManager
@@ -95,6 +95,8 @@ async def run_loop(
             _ctx_window = config.effective_context_window()
             if _ctx_window > 0 and config.context_strategy == "sliding_window":
                 messages = trim_to_token_budget(messages, _ctx_window)
+            elif _ctx_window > 0 and config.context_strategy == "compact":
+                messages = compact_to_token_budget(messages, _ctx_window)
 
             if extension_manager is not None:
                 await extension_manager.fire_event("before_turn", None)

@@ -13,6 +13,7 @@ sentinel to know when to return early after an unrecoverable provider error.
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 
 from agent.core.config import AgentConfig
@@ -78,7 +79,7 @@ async def provider_request(
                     friendly,
                     extra=log_extra,
                 )
-                await asyncio.sleep(delay)
+                await asyncio.sleep(random.uniform(0.5, 1.5) * delay)
                 continue
             log.warning(
                 "Provider error at step %d: %s",
