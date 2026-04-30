@@ -64,7 +64,9 @@ class _HeaderInfoStatic(Static):
         if session:
             parts.append((session, h.session_style))
             parts.append(("  |  ", h.separator_style))
-        state_label = "streaming…" if bar.streaming else bar.state
+        state_label = "streaming\u2026" if bar.streaming else bar.state
+        if bar.queue_depth > 0:
+            state_label += f" | queued: {bar.queue_depth}"
         parts.append((state_label, h.state_style))
         parts.append(("  |  ", h.separator_style))
         parts.append((thinking_label, h.tokens_style))
@@ -108,6 +110,7 @@ class HeaderBar(Horizontal):
         self.total_cost: float = 0.0
         self.warning_active: bool = False
         self.streaming: bool = False
+        self.queue_depth: int = 0
 
     def compose(self) -> ComposeResult:
         yield _HeaderInfoStatic(self)

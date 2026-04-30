@@ -69,6 +69,7 @@ agent/
     ├── web.py                # ASGI web server + SSE streaming
     ├── stream.py             # EventStream — cross-request pub/sub
     ├── keybinds.py           # keyboard shortcuts for fixed TUI
+    ├── prompt_queue.py       # transport-agnostic prompt queue
     ├── acp_permissions.py    # ACP approval callback
     ├── acp/                  # ACP transport package
     │   ├── common.py         # shared types + helpers
@@ -331,7 +332,7 @@ Transports are thin I/O adapters. They create an `Agent`, wire up event handlers
 |-----------|--------|-------------|-------|
 | CLI | `transports/cli.py` | `aar chat`, `aar run`, etc. | Typer app, terminal approval callback |
 | TUI | `transports/tui.py` | `aar tui` | Rich inline TUI, scrollable terminal UI |
-| TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer |
+| TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer, prompt queue |
 | Web | `transports/web.py` | `aar serve` | ASGI app, SSE streaming, per-request safety override |
 | Stream | `transports/stream.py` | (internal) | `EventStream` for cross-request pub/sub |
 
@@ -341,6 +342,7 @@ Shared TUI sub-packages:
 |---------|----------|
 | `transports/tui_utils/` | Formatting helpers shared by both TUI transports |
 | `transports/keybinds.py` | Keyboard shortcut definitions for the fixed TUI |
+| `transports/prompt_queue.py` | Transport-agnostic prompt queue for auto-dispatching when idle |
 | `transports/tui_widgets/` | Textual widget classes: bars, blocks, chat body, input, log viewer, thinking panel |
 | `transports/themes/` | Theme models, built-in themes, theme registry |
 
@@ -348,6 +350,21 @@ All transports share the same `AgentConfig` schema. Transport-specific behavior 
 - How user input is collected
 - How events are displayed
 - The approval callback implementation (terminal prompt vs. auto-deny vs. custom)
+
+### Prompt queue (TUI Fixed)
+
+The TUI Fixed transport supports **prompt queueing** — users can type and submit
+messages while the agent is running. Queued prompts auto-dispatch in FIFO order
+once the agent becomes idle.
+
+| Aspect | Detail |
+|--------|--------|
+| Module | `transports/prompt_queue.py` (`PromptQueue`) |
+| Trigger | `Ctrl+S` while agent is busy |
+| Feedback | "Queued (N pending)" in chat + header badge |
+| Drain | 100 ms poll on `session.state` via `start_drain()` |
+| Cancel | `Ctrl+X` clears the queue along with the running agent |
+| Commands | `/queue` (list), `/queue clear` (flush) |
 
 ## MCP (Model Context Protocol)
 

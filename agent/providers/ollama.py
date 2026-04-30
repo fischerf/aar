@@ -231,7 +231,14 @@ class OllamaProvider(Provider):
         router = StreamThinkingRouter()
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                # Read the body so error messages are informative, then raise.
+                try:
+                    await resp.aread()
+                    body = resp.text or ""
+                except Exception:
+                    body = ""
+                raise RuntimeError(f"Ollama returned HTTP {resp.status_code}: {body[:400]}")
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
