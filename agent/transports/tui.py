@@ -457,7 +457,7 @@ async def run_tui(
                         )
                 else:
                     try:
-                        desc = agent.switch_provider(parts[1].strip())
+                        desc = agent.switch_provider(parts[1].strip(), session)
                         renderer.console.print(f"[green]Switched to {desc}[/]")
                     except (ValueError, Exception) as exc:
                         renderer.console.print(f"[{renderer.theme.error.border_style}]{exc}[/]")

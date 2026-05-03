@@ -107,17 +107,23 @@ class Agent:
         """Remove a previously registered event callback."""
         self._on_event = [cb for cb in self._on_event if cb != callback]
 
-    def switch_provider(self, key_or_spec: str | ProviderConfig) -> str:
+    def switch_provider(
+        self, key_or_spec: str | ProviderConfig, session: Session | None = None
+    ) -> str:
         """Switch the active provider between turns.
 
         Args:
             key_or_spec: Either a key from ``config.providers`` or an
                 ad-hoc ``ProviderConfig``.
+            session: Optional session to emit a :class:`ProviderSwitchEvent` into.
 
         Returns:
             Human-readable description of the new provider,
             e.g. ``"anthropic/claude-sonnet-4-6"``.
         """
+        old_name = self.provider.config.name
+        old_model = self.provider.config.model
+
         if isinstance(key_or_spec, str):
             if key_or_spec in self.config.providers:
                 cfg = self.config.providers[key_or_spec]
@@ -135,7 +141,40 @@ class Agent:
             cfg = key_or_spec
 
         self.provider = _create_provider(cfg)
+
+        if session is not None:
+            from agent.core.events import ProviderSwitchEvent
+
+            event = ProviderSwitchEvent(
+                from_provider=old_name,
+                from_model=old_model,
+                to_provider=cfg.name,
+                to_model=cfg.model,
+            )
+            session.append(event)
+            self._warn_capability_mismatch(session)
+
         return f"{cfg.name}/{cfg.model}"
+
+    def _warn_capability_mismatch(self, session: Session) -> None:
+        """Log warnings if the new provider lacks capabilities used in the session so far."""
+        from agent.core.events import ToolCall, UserMessage
+
+        has_tool_calls = any(isinstance(e, ToolCall) for e in session.events)
+        has_images = any(isinstance(e, UserMessage) and e.is_multimodal for e in session.events)
+
+        if has_tool_calls and not self.provider.supports_tools:
+            logger.warning(
+                "New provider %s/%s does not support tools, but session has tool call history",
+                self.provider.config.name,
+                self.provider.config.model,
+            )
+        if has_images and not self.provider.supports_vision:
+            logger.warning(
+                "New provider %s/%s does not support vision, but session has image content",
+                self.provider.config.name,
+                self.provider.config.model,
+            )
 
     async def _init_extensions(
         self,

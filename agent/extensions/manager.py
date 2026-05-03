@@ -94,10 +94,12 @@ class ExtensionManager:
         """Fire event to all extension handlers.
 
         For tool_call: if any handler returns BlockResult, return it.
-        For user_message: if handler returns str, use it as replacement.
-        For tool_result: if handler returns str, use it as replacement.
+        For user_message / tool_result: if handler returns str, use it as
+        replacement and pass the transformed value to subsequent handlers
+        (pipeline semantics).
         """
         result: Any = None
+        current_payload = event
 
         for info in self._extensions:
             if info.api is None:
@@ -107,9 +109,9 @@ class ExtensionManager:
             for handler in handlers:
                 try:
                     if asyncio.iscoroutinefunction(handler):
-                        rv = await handler(event, self._context)
+                        rv = await handler(current_payload, self._context)
                     else:
-                        rv = handler(event, self._context)
+                        rv = handler(current_payload, self._context)
                 except Exception as exc:
                     logger.error(
                         "Error in %r handler from extension %r: %s",
@@ -128,9 +130,10 @@ class ExtensionManager:
 
                 if event_name in ("user_message", "tool_result") and isinstance(rv, str):
                     result = rv
+                    current_payload = rv  # pipeline: pass transformed value to next handler
 
             # Also fire on the extension's own event bus
-            info.api.events.emit(event_name, event)
+            info.api.events.emit(event_name, current_payload)
 
         return result
 

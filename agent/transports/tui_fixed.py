@@ -68,6 +68,7 @@ from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalResult
 from agent.transports.companion_state import get_git_health  # noqa: F401
 from agent.transports.keybinds import KeyBinds
+from agent.transports.prompt_queue import PromptQueue
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
@@ -495,12 +496,24 @@ class FixedTUIRenderer:
         if not self.layout.welcome.visible:
             return
         t = self.theme
-        builtin = ["help", "quit", "model", "status", "tools", "policy", "theme", "think", "clear"]
+        builtin = [
+            "help",
+            "quit",
+            "model",
+            "status",
+            "tools",
+            "policy",
+            "theme",
+            "think",
+            "clear",
+            "queue",
+        ]
         cmds = builtin + list(extra_commands or [])
         cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
             "Type your message and press Ctrl+S to send.\n"
+            "Send while the agent is running to queue prompts.\n"
             "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
             f"Commands: {cmds_markup}\n\n"
@@ -600,6 +613,9 @@ class AarFixedApp(App):
         self._renderer: FixedTUIRenderer | None = renderer
         self._cancel_event: asyncio.Event | None = None
         self._keybinds: KeyBinds = KeyBinds()
+        self._prompt_queue: PromptQueue = PromptQueue()
+        self._drain_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._agent_running: bool = False
 
     # ------------------------------------------------------------------
     # Compose the widget tree from theme layout config
@@ -809,6 +825,15 @@ class AarFixedApp(App):
                 name="companion-git-poll",
             )
 
+        # Start the prompt queue drain loop
+        self._drain_task = asyncio.get_running_loop().create_task(
+            self._prompt_queue.start_drain(
+                run_fn=self._run_queued_prompt,
+                is_idle_fn=self._agent_is_idle,
+                on_dispatch=self._on_queue_dispatch,
+            )
+        )
+
         self.query_one("#user-input", HistoryTextArea).focus()
 
     def apply_theme(self, theme: Theme) -> None:
@@ -974,6 +999,7 @@ class AarFixedApp(App):
         """Ctrl+X — cancel the running agent."""
         if self._cancel_event is not None:
             self._cancel_event.set()
+        cleared = self._prompt_queue.clear()
         for worker in self.workers:
             if getattr(worker, "name", "") == "agent-run" and worker.is_running:
                 worker.cancel()
@@ -991,6 +1017,15 @@ class AarFixedApp(App):
                         raw="Cancelled",
                         kind="system",
                     )
+                    if cleared:
+                        self._renderer._write(
+                            Text(
+                                f"Cleared {cleared} queued prompt(s)",
+                                style=self._renderer.theme.dim_text,
+                            ),
+                            raw=f"Cleared {cleared} queued prompts",
+                            kind="system",
+                        )
                 try:
                     header = self.query_one(HeaderBar)
                     header.streaming = False
@@ -1148,6 +1183,29 @@ class AarFixedApp(App):
         elif stripped.lower() == "/think":
             self._renderer.toggle_thinking()
             return
+        elif stripped.lower().startswith("/queue"):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 1 or parts[1].strip() == "":
+                if self._prompt_queue.is_empty:
+                    await _write(Text("No queued prompts.", style=t.dim_text))
+                else:
+                    for i, qp in enumerate(self._prompt_queue._queue):
+                        preview = qp.content if isinstance(qp.content, str) else "[multimodal]"
+                        if len(preview) > 60:
+                            preview = preview[:57] + "..."
+                        await _write(Text.from_markup(f"  [{t.dim_text}]{i + 1}.[/] {preview}"))
+            elif parts[1].strip().lower() == "clear":
+                count = self._prompt_queue.clear()
+                try:
+                    header = self.query_one(HeaderBar)
+                    header.queue_depth = 0
+                    header.refresh_info()
+                except Exception:
+                    pass
+                await _write(Text(f"Cleared {count} queued prompt(s).", style=t.dim_text))
+            else:
+                await _write(Text("Usage: /queue or /queue clear", style=t.dim_text))
+            return
         elif stripped.lower() in {"/help", "/h"}:
             _ext_mgr_help = getattr(self._agent, "_extension_manager", None)
             _ext_cmds_now = (
@@ -1202,12 +1260,26 @@ class AarFixedApp(App):
                     )
                 )
 
-        # --- Run agent (in worker so the UI event loop stays responsive) ---
+        # --- Run agent or enqueue if busy ----------------------------------
+        if not self._agent_is_idle():
+            # Agent is busy — queue this prompt for later
+            depth = self._prompt_queue.enqueue(content)
+            header.queue_depth = depth
+            header.refresh_info()
+            await chat_body._mount_block(
+                RichBlock(
+                    Text(f"  Queued ({depth} pending)", style=self._renderer.theme.dim_text),
+                    raw=f"Queued ({depth} pending)",
+                    kind="system",
+                )
+            )
+            return
+
         header.state = "running"
         header.refresh_info()
-        inp.disabled = True
         chat_body.auto_scroll = True
 
+        self._agent_running = True
         self._run_agent_worker(content)
 
     def _run_agent_worker(self, content: object) -> None:
@@ -1227,6 +1299,10 @@ class AarFixedApp(App):
             return
 
         from textual.worker import WorkerState
+
+        # Only act on terminal states — ignore PENDING and RUNNING transitions.
+        if worker.state in {WorkerState.PENDING, WorkerState.RUNNING}:
+            return
 
         if worker.state != WorkerState.SUCCESS:
             if worker.state == WorkerState.ERROR:
@@ -1274,11 +1350,65 @@ class AarFixedApp(App):
         self._restore_input()
 
     def _restore_input(self) -> None:
-        """Re-enable the input widget after the agent finishes."""
+        """Mark the agent as idle and refocus the input widget."""
+        self._agent_running = False
         try:
+            header = self.query_one(HeaderBar)
+            header.queue_depth = self._prompt_queue.depth
+            header.refresh_info()
             inp = self.query_one("#user-input", HistoryTextArea)
-            inp.disabled = False
             inp.focus()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Prompt queue helpers
+    # ------------------------------------------------------------------
+
+    def _agent_is_idle(self) -> bool:
+        """Check whether the agent is ready for the next prompt."""
+        if self._agent_running:
+            return False
+        if self._session is None:
+            return True
+        return self._session.state in {
+            AgentState.IDLE,
+            AgentState.COMPLETED,
+            AgentState.ERROR,
+        }
+
+    async def _run_queued_prompt(self, content: str | list) -> None:
+        """Dispatch a queued prompt through the normal submit pipeline."""
+        chat_body = self.query_one("#chat-body", ChatBody)
+        header = self.query_one(HeaderBar)
+
+        # Echo the queued message in chat
+        assert self._renderer is not None
+        await chat_body._mount_block(
+            RichBlock(
+                Text(
+                    f"  > {content}" if isinstance(content, str) else "  > [queued message]",
+                    style=self._renderer.theme.prompt_style,
+                ),
+                raw=str(content),
+                kind="user",
+            )
+        )
+
+        header.state = "running"
+        header.queue_depth = self._prompt_queue.depth
+        header.refresh_info()
+        chat_body.auto_scroll = True
+
+        self._agent_running = True
+        self._run_agent_worker(content)
+
+    def _on_queue_dispatch(self, prompt: object, remaining: int) -> None:
+        """Called by the drain loop right before dispatching a queued prompt."""
+        try:
+            header = self.query_one(HeaderBar)
+            header.queue_depth = remaining
+            header.refresh_info()
         except Exception:
             pass
 
@@ -1302,6 +1432,10 @@ class AarFixedApp(App):
             await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
 
     def on_unmount(self) -> None:
+        """Clean up the prompt queue drain task on app teardown."""
+        self._prompt_queue.stop_drain()
+        if self._drain_task is not None:
+            self._drain_task.cancel()
         if self._session:
             self._store.save(self._session)
 

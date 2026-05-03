@@ -25,12 +25,15 @@ User message
 │  ┌─ Context management ──────────────────────────────────────┐  │
 │  │  context_window > 0 & strategy="sliding_window"           │  │
 │  │    → trim_to_token_budget(messages, context_window)       │  │
+│  │  context_window > 0 & strategy="compact"                  │  │
+│  │    → compact_to_token_budget(messages, context_window)    │  │
+│  │      keeps first msg + last N msgs; inserts marker        │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                           │                                     │
 │                           ▼                                     │
 │  ┌─ Provider request (with retries) ─────────────────────────┐  │
 │  │  • streaming or complete()                                │  │
-│  │  • exponential back-off on recoverable errors             │  │
+│  │  • exponential back-off with jitter on recoverable errors │  │
 │  │  • max_retries attempts before ERROR state                │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                           │                                     │

@@ -397,7 +397,10 @@ class TestCompactCompanionBaseline:
         full lifetime counts (baseline covers pruned events, remaining events
         are added on top — no double-counting)."""
         from agent.core.events import ErrorEvent, ToolCall
-        from agent.transports.companion_state import companion_stats_from_session
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
 
         store = SessionStore(tmp_dir)
         s = Session()
@@ -407,7 +410,7 @@ class TestCompactCompanionBaseline:
             s.events.append(ErrorEvent(message="boom"))
         store.save(s)
 
-        store.compact(s.session_id, max_events=5)
+        store.compact(s.session_id, max_events=5, on_prune=companion_on_prune)
         reloaded = store.load(s.session_id)
 
         # Only 5 events remain, but the full 8 steps / 2 errors are recoverable
@@ -420,7 +423,10 @@ class TestCompactCompanionBaseline:
         """A second compaction adds to the watermark set by the first, and
         companion_stats_from_session always returns the correct lifetime total."""
         from agent.core.events import ToolCall
-        from agent.transports.companion_state import companion_stats_from_session
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
 
         store = SessionStore(tmp_dir)
         s = Session()
@@ -428,14 +434,18 @@ class TestCompactCompanionBaseline:
         for _ in range(6):
             s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
         store.save(s)
-        store.compact(s.session_id, max_events=3)  # prunes 3, baseline steps=3, keeps 3
+        store.compact(
+            s.session_id, max_events=3, on_prune=companion_on_prune
+        )  # prunes 3, baseline steps=3, keeps 3
 
         # Add 4 more tool calls to the saved session, then compact again
         s2 = store.load(s.session_id)
         for _ in range(4):
             s2.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
         store.save(s2)
-        store.compact(s2.session_id, max_events=3)  # prunes 4 more, baseline=3+4=7, keeps 3
+        store.compact(
+            s2.session_id, max_events=3, on_prune=companion_on_prune
+        )  # prunes 4 more, baseline=3+4=7, keeps 3
 
         # The end-to-end check: lifetime total is always 6 + 4 = 10
         reloaded = store.load(s.session_id)
@@ -446,14 +456,17 @@ class TestCompactCompanionBaseline:
         """The baseline watermark survives a save/load round-trip, and
         companion_stats_from_session recovers the correct lifetime total."""
         from agent.core.events import ToolCall
-        from agent.transports.companion_state import companion_stats_from_session
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
 
         store = SessionStore(tmp_dir)
         s = Session()
         for _ in range(5):
             s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
         store.save(s)
-        store.compact(s.session_id, max_events=2)
+        store.compact(s.session_id, max_events=2, on_prune=companion_on_prune)
 
         reloaded = store.load(s.session_id)
         # 2 events remain; the other 3 were pruned and recorded in the baseline.
@@ -478,14 +491,17 @@ class TestCompactCompanionBaseline:
     def test_compact_baseline_used_by_companion_stats(self, tmp_dir: Path):
         """companion_stats_from_session recovers lifetime totals after compaction."""
         from agent.core.events import ToolCall
-        from agent.transports.companion_state import companion_stats_from_session
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
 
         store = SessionStore(tmp_dir)
         s = Session()
         for _ in range(12):
             s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
         store.save(s)
-        store.compact(s.session_id, max_events=4)
+        store.compact(s.session_id, max_events=4, on_prune=companion_on_prune)
 
         reloaded = store.load(s.session_id)
         # Only 4 events remain, but the baseline covers the other 8
