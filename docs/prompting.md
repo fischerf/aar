@@ -165,6 +165,18 @@ Not:
 
 > Use bash to run `grep -r TODO --include="*.py"`, then read each file with read_file and list the todos.
 
+### Prefer search tools over bash for exploration
+
+Aar ships with `grep` and `find_files` tools that have READ-level side effects
+(auto-approved, no sandbox overhead). Prefer these over `bash` for code
+navigation:
+
+- **`grep`** — regex search across files, paginated, cross-platform.
+- **`find_files`** — glob-based file path search.
+- **`read_file`** with `start_line`/`end_line` — surgical reads of specific sections.
+
+See [tools.md](tools.md) for full parameter reference.
+
 ### Guide tool behaviour with rules, not instructions
 
 If you always want the agent to read before writing, put that in the system prompt:

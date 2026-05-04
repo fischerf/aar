@@ -177,7 +177,15 @@ class ProviderConfig(BaseModel):
 
 class ToolConfig(BaseModel):
     enabled_builtins: list[str] = Field(
-        default_factory=lambda: ["read_file", "write_file", "edit_file", "list_directory", "bash"]
+        default_factory=lambda: [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_directory",
+            "bash",
+            "grep",
+            "find_files",
+        ]
     )
     # Default timeout (seconds) for bash commands when the model omits the timeout argument.
     # Set higher for long-running tasks (package installs, builds, docker pulls, etc.).

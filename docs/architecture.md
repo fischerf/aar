@@ -217,13 +217,15 @@ Side effects drive policy decisions (read-only mode blocks WRITE+EXECUTE, approv
 
 ### Built-in tools
 
-| Tool | Side effects | Source |
-|------|-------------|--------|
-| `read_file` | READ | `tools/builtin/filesystem.py` |
-| `write_file` | WRITE | `tools/builtin/filesystem.py` |
-| `edit_file` | WRITE | `tools/builtin/filesystem.py` |
-| `list_directory` | READ | `tools/builtin/filesystem.py` |
-| `bash` | EXECUTE | `tools/builtin/shell.py` |
+| Tool | Side effects | Source | Description |
+|------|-------------|--------|-------------|
+| `read_file` | READ | `tools/builtin/filesystem.py` | Read file contents with line numbers. Supports `start_line`/`end_line` for surgical reads. Files >500 lines return a preview + hint to use line ranges. |
+| `write_file` | WRITE | `tools/builtin/filesystem.py` | Create or overwrite a file. |
+| `edit_file` | WRITE | `tools/builtin/filesystem.py` | Find-and-replace a unique string in a file. |
+| `list_directory` | READ | `tools/builtin/filesystem.py` | List directory contents with types and sizes. |
+| `bash` | EXECUTE | `tools/builtin/shell.py` | Execute a shell command (sandboxed when configured). |
+| `grep` | READ | `tools/builtin/search.py` | Regex content search across files. Returns matches with paths and line numbers. Skips hidden/generated dirs. Paginated. |
+| `find_files` | READ | `tools/builtin/search.py` | Glob-based file path search. Returns relative paths. Skips hidden/generated dirs. |
 
 Built-ins are opt-in via `ToolConfig.enabled_builtins`. The agent constructor registers only the enabled set.
 
