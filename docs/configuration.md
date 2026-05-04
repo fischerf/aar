@@ -26,7 +26,7 @@ config = AgentConfig(
         "gpt4": ProviderConfig(name="openai", model="gpt-4o"),
     },
     tools=ToolConfig(
-        enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
+        enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash", "grep", "find_files"],
         command_timeout=30,                        # per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
     ),
@@ -444,7 +444,7 @@ If no rules files exist, only the base prompt is used. When present, the layers 
 
 **Project drop-ins** — place `.md` files in `<project_rules_dir>/rules.d/` for per-contributor or per-machine additions. Add `rules.d/` to `.gitignore` if you don't want them committed, or commit them for shared team overrides.
 
-Run `aar init` to create the skeleton files and directories (`rules.md`, `rules.d/`) for both global and project layers.
+Run `aar init` to create the skeleton files and directories. The init command pre-installs default agent rules at `~/.aar/rules.md` and a multi-provider reference config at `~/.aar/config.example.json`. Edit the rules file to add your own global preferences, or use the example config as a starting point for new provider profiles.
 
 **Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
 
