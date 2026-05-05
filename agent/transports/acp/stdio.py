@@ -1116,6 +1116,7 @@ class AarAcpAgent:
             # the session registry that _setup_mcp creates.
             try:
                 from agent.tools.builtin.filesystem import register_filesystem_tools
+                from agent.tools.builtin.search import register_search_tools
                 from agent.tools.builtin.shell import register_shell_tools
                 from agent.tools.registry import ToolRegistry as TR
 
@@ -1125,6 +1126,8 @@ class AarAcpAgent:
                     register_filesystem_tools(tmp_reg)
                 if "bash" in enabled:
                     register_shell_tools(tmp_reg)
+                if enabled & {"grep", "find_files"}:
+                    register_search_tools(tmp_reg)
                 for name in list(tmp_reg._tools):
                     if name not in enabled:
                         del tmp_reg._tools[name]
