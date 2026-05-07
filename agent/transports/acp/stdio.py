@@ -198,7 +198,23 @@ class AarAcpAgent:
             SessionResumeCapabilities,
         )
 
+        try:
+            from acp.schema import SessionAdditionalDirectoriesCapabilities
+        except ImportError:  # SDK < 0.12.2
+            SessionAdditionalDirectoriesCapabilities = None
+
         self._client_capabilities = client_capabilities
+
+        session_caps_kwargs: dict[str, Any] = dict(
+            list=SessionListCapabilities(),
+            close=SessionCloseCapabilities(),
+            fork=SessionForkCapabilities(),
+            resume=SessionResumeCapabilities(),
+        )
+        if SessionAdditionalDirectoriesCapabilities is not None:
+            session_caps_kwargs["additional_directories"] = (
+                SessionAdditionalDirectoriesCapabilities()
+            )
 
         return InitializeResponse(
             protocol_version=PROTOCOL_VERSION,
@@ -206,12 +222,7 @@ class AarAcpAgent:
                 load_session=True,
                 mcp_capabilities=McpCapabilities(http=True, sse=False),
                 prompt_capabilities=PromptCapabilities(embedded_context=True),
-                session_capabilities=SessionCapabilities(
-                    list=SessionListCapabilities(),
-                    close=SessionCloseCapabilities(),
-                    fork=SessionForkCapabilities(),
-                    resume=SessionResumeCapabilities(),
-                ),
+                session_capabilities=SessionCapabilities(**session_caps_kwargs),
             ),
             agent_info=Implementation(name="aar", title="Aar Agent", version="0.3.2"),
         )
@@ -220,11 +231,13 @@ class AarAcpAgent:
         self,
         cwd: str = "",
         mcp_servers: list | None = None,
+        additional_directories: list | None = None,
         **kwargs: Any,
     ) -> Any:
         from acp import NewSessionResponse
 
         session = Session(metadata={"cwd": cwd} if cwd else {})
+        session.metadata["additional_directories"] = additional_directories or []
         sid = session.session_id
         async with self._session_lock(sid):
             self._sessions[sid] = session
@@ -258,6 +271,7 @@ class AarAcpAgent:
         cwd: str = "",
         session_id: str = "",
         mcp_servers: list | None = None,
+        additional_directories: list | None = None,
         **kwargs: Any,
     ) -> Any:
         """Resume a previously saved session.
@@ -282,6 +296,7 @@ class AarAcpAgent:
                 session = self._store.load(session_id)
                 if cwd:
                     session.metadata["cwd"] = cwd
+                session.metadata["additional_directories"] = additional_directories or []
                 self._sessions[session_id] = session
                 await self._setup_mcp(session_id, mcp_servers or [])
                 await self._setup_extensions(session_id, session)
@@ -677,6 +692,7 @@ class AarAcpAgent:
         cwd: str = "",
         session_id: str = "",
         mcp_servers: list | None = None,
+        additional_directories: list | None = None,
         **kwargs: Any,
     ) -> Any:
         """Create a new session that starts with a deep copy of *session_id*'s events.
@@ -703,6 +719,7 @@ class AarAcpAgent:
         )
         if cwd:
             forked.metadata["cwd"] = cwd
+        forked.metadata["additional_directories"] = additional_directories or []
 
         new_sid = forked.session_id
         async with self._session_lock(new_sid):
@@ -728,6 +745,7 @@ class AarAcpAgent:
         cwd: str = "",
         session_id: str = "",
         mcp_servers: list | None = None,
+        additional_directories: list | None = None,
         **kwargs: Any,
     ) -> Any:
         """Resume a previously saved session WITHOUT replaying history.
@@ -747,6 +765,7 @@ class AarAcpAgent:
                 session = self._store.load(session_id)
                 if cwd:
                     session.metadata["cwd"] = cwd
+                session.metadata["additional_directories"] = additional_directories or []
                 self._sessions[session_id] = session
                 await self._setup_mcp(session_id, mcp_servers or [])
                 await self._setup_extensions(session_id, session)
@@ -779,6 +798,11 @@ class AarAcpAgent:
 
         validate_session_id(session_id)
         text = _extract_text(prompt)
+
+        message_id: str | None = kwargs.get("message_id")
+        _resp_extra: dict[str, Any] = {}
+        if message_id is not None:
+            _resp_extra["user_message_id"] = message_id
 
         # Reject concurrent prompts for the same session. Per the ACP spec
         # only one prompt turn may be in flight per session at a time. A
@@ -948,7 +972,7 @@ class AarAcpAgent:
             if update_tasks:
                 await asyncio.gather(*update_tasks, return_exceptions=True)
             self._cancel_events.pop(session_id, None)
-            return PromptResponse(stop_reason="end_turn")
+            return PromptResponse(stop_reason="end_turn", **_resp_extra)
 
         # Handle extension slash commands
         if cmd:
@@ -972,7 +996,7 @@ class AarAcpAgent:
                     if update_tasks:
                         await asyncio.gather(*update_tasks, return_exceptions=True)
                     self._cancel_events.pop(session_id, None)
-                    return PromptResponse(stop_reason="end_turn")
+                    return PromptResponse(stop_reason="end_turn", **_resp_extra)
 
         # Build the approval callback: use ACP request_permission when a client
         # is connected (Zed / stdio mode), fall back to the configured default.
@@ -1019,7 +1043,7 @@ class AarAcpAgent:
         self._sessions[session_id] = finished
         self._store.save(finished)
 
-        return PromptResponse(stop_reason=_map_stop_reason(finished.state))
+        return PromptResponse(stop_reason=_map_stop_reason(finished.state), **_resp_extra)
 
     # ------------------------------------------------------------------
     # Internal helpers
