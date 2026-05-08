@@ -1270,6 +1270,24 @@ class TestSlashCommandHandler:
         assert "read_file" in reply
         assert "write_file" in reply
 
+    def test_tools_includes_search_builtins(self, tmp_path):
+        """When grep/find_files are enabled, /tools must list them."""
+        from agent.core.config import ToolConfig
+        from agent.core.session import Session
+
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "tools": ToolConfig(enabled_builtins=["read_file", "bash", "grep", "find_files"])
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        session = Session(session_id="x")
+        reply = agent._handle_slash_command("/tools", "x", session)
+        assert "grep" in reply
+        assert "find_files" in reply
+        assert "read_file" in reply
+
     def test_policy_contains_approval_fields(self, tmp_path):
         from agent.core.session import Session
 

@@ -23,7 +23,9 @@
       "write_file",
       "edit_file",
       "list_directory",
-      "bash"
+      "bash",
+      "grep",
+      "find_files"
     ],
     "bash_default_timeout": 300,
     "command_timeout": 360,

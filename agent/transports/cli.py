@@ -1289,6 +1289,20 @@ def register(api: ExtensionAPI) -> None:
     created: list[str] = []
     skipped: list[str] = []
 
+    # Built-in rules.md → ~/.aar/rules.md (default global agent rules)
+    _USER_RULES_FILE = _USER_DIR / "rules.md"
+    _builtin_rules_path = _BUILTIN_RULES_DIR / "rules.md"
+    _rules_text: str | None = None
+    if _builtin_rules_path.is_file():
+        _rules_text = _builtin_rules_path.read_text(encoding="utf-8")
+
+    # config_reference.json → ~/.aar/config.example.json
+    _USER_CONFIG_EXAMPLE = _USER_DIR / "config.example.json"
+    _builtin_config_ref = _BUILTIN_SAMPLES_DIR / "config_reference.json"
+    _config_example_data: dict | None = None
+    if _builtin_config_ref.is_file():
+        _config_example_data = _json.loads(_builtin_config_ref.read_text(encoding="utf-8"))
+
     distro_profile_items = [
         (_USER_DISTROS_DIR / name, data) for name, data in _load_builtin_distro_profiles().items()
     ]
@@ -1323,16 +1337,51 @@ def register(api: ExtensionAPI) -> None:
         created.append(str(_USER_EXTENSION_HELLO))
         console.print(f"[green]Created:[/] {_USER_EXTENSION_HELLO}")
 
+    # Global rules.md (plain Markdown, not JSON)
+    if _rules_text is not None:
+        if _USER_RULES_FILE.is_file() and not force:
+            console.print(
+                f"[yellow]Warning:[/] {_USER_RULES_FILE} already exists"
+                " — skipping (use --force to overwrite)"
+            )
+            skipped.append(str(_USER_RULES_FILE))
+        else:
+            _USER_RULES_FILE.write_text(_rules_text, encoding="utf-8")
+            created.append(str(_USER_RULES_FILE))
+            console.print(f"[green]Created:[/] {_USER_RULES_FILE}")
+
+    # Config example (JSON)
+    if _config_example_data is not None:
+        if _USER_CONFIG_EXAMPLE.is_file() and not force:
+            console.print(
+                f"[yellow]Warning:[/] {_USER_CONFIG_EXAMPLE} already exists"
+                " — skipping (use --force to overwrite)"
+            )
+            skipped.append(str(_USER_CONFIG_EXAMPLE))
+        else:
+            _USER_CONFIG_EXAMPLE.write_text(
+                _json.dumps(_config_example_data, indent=2), encoding="utf-8"
+            )
+            created.append(str(_USER_CONFIG_EXAMPLE))
+            console.print(f"[green]Created:[/] {_USER_CONFIG_EXAMPLE}")
+
     if created:
         console.print("\n[bold]Next steps:[/]")
         console.print(
             f"  1. Edit [bold]{_USER_CONFIG}[/] — set provider, model, api_key, base_url, etc."
         )
         console.print(
+            f"     See [bold]{_USER_DIR / 'config.example.json'}[/] for a multi-provider"
+            " reference with all available fields."
+        )
+        console.print(
             f"  2. Copy entries from [bold]{_USER_MCP_EXAMPLE}[/] into"
             f" [bold]{_USER_MCP_CONFIG}[/] to enable MCP servers."
         )
-        console.print("  3. Optionally add global rules to [bold]~/.aar/rules.md[/].")
+        console.print(
+            "  3. Review [bold]~/.aar/rules.md[/] — default agent rules are pre-installed."
+            " Edit to add your own global preferences."
+        )
         console.print(
             f"  4. To add custom model prices (e.g. local Ollama models), copy"
             f" [bold]{_USER_PRICING_TEMPLATE}[/] to [bold]{_USER_DIR / 'pricing.json'}[/]"
@@ -1382,6 +1431,15 @@ _DEFAULT_PACKAGES = "python3,py3-pip"
 _WHEEL_DISTROS_DIR = Path(__file__).parent.parent / "data" / "distros"
 _REPO_DISTROS_DIR = Path(__file__).parent.parent.parent / "config" / "distros"
 _BUILTIN_DISTROS_DIR = _WHEEL_DISTROS_DIR if _WHEEL_DISTROS_DIR.is_dir() else _REPO_DISTROS_DIR
+
+# Built-in rules.md and config reference — same resolution logic (wheel vs repo).
+_WHEEL_RULES_DIR = Path(__file__).parent.parent / "data" / "rules"
+_REPO_RULES_DIR = Path(__file__).parent.parent.parent / "config" / "rules"
+_BUILTIN_RULES_DIR = _WHEEL_RULES_DIR if _WHEEL_RULES_DIR.is_dir() else _REPO_RULES_DIR
+
+_WHEEL_SAMPLES_DIR = Path(__file__).parent.parent / "data" / "samples"
+_REPO_SAMPLES_DIR = Path(__file__).parent.parent.parent / "config" / "samples"
+_BUILTIN_SAMPLES_DIR = _WHEEL_SAMPLES_DIR if _WHEEL_SAMPLES_DIR.is_dir() else _REPO_SAMPLES_DIR
 
 
 def _load_builtin_distro_profiles() -> dict[str, dict]:

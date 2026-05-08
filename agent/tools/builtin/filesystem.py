@@ -11,14 +11,44 @@ from agent.tools.schema import SideEffect, ToolSpec
 def register_filesystem_tools(registry: ToolRegistry) -> None:
     """Register all filesystem tools into the given registry."""
 
-    async def read_file(path: str) -> str:
-        """Read a file and return its contents."""
+    async def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
+        """Read a file and return its contents with line numbers.
+
+        When *start_line* / *end_line* are provided, only that slice is returned
+        (1-based, inclusive).  When omitted (or 0), the entire file is returned.
+
+        For files exceeding 500 lines with no line range specified, an outline
+        summary is returned instead of the full content, showing line counts and
+        a hint to use start_line/end_line.
+        """
         p = Path(path).resolve()
         if not p.is_file():
             raise FileNotFoundError(f"File not found: {p}")
         content = p.read_text(encoding="utf-8", errors="replace")
         lines = content.splitlines(keepends=True)
-        numbered = "".join(f"{i + 1:>6}\t{line}" for i, line in enumerate(lines))
+        total = len(lines)
+
+        # Determine slice bounds (1-based inclusive → 0-based)
+        s = max(start_line - 1, 0) if start_line > 0 else 0
+        e = min(end_line, total) if end_line > 0 else total
+
+        if s >= total:
+            return f"start_line {start_line} is beyond end of file ({total} lines)."
+
+        # If no range specified and file is large, return a summary
+        if start_line <= 0 and end_line <= 0 and total > 500:
+            return (
+                f"File {p} has {total} lines — too large to return in full.\n"
+                f"Use start_line / end_line to read a specific section.\n"
+                f"First 50 lines preview:\n\n"
+                + "".join(f"{i + 1:>6}\t{lines[i]}" for i in range(min(50, total)))
+            )
+
+        selected = lines[s:e]
+        numbered = "".join(f"{s + i + 1:>6}\t{line}" for i, line in enumerate(selected))
+        if start_line > 0 or end_line > 0:
+            shown_range = f"[lines {s + 1}–{s + len(selected)} of {total}]"
+            return f"{shown_range}\n{numbered}"
         return numbered
 
     async def write_file(path: str, content: str) -> str:
@@ -69,14 +99,35 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
     registry.add(
         ToolSpec(
             name="read_file",
-            description="Read a file and return its contents with line numbers. Accepts relative or absolute paths (Windows or Unix style).",
+            description=(
+                "Read a file and return its contents with line numbers. "
+                "For large files (>500 lines), returns a preview and line count \u2014 "
+                "use start_line/end_line to read specific sections. "
+                "Accepts relative or absolute paths (Windows or Unix style)."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "File path, e.g. README.md or subdir\\file.py",
-                    }
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": (
+                            "First line to return (1-based, inclusive). "
+                            "Omit or pass 0 to start from the beginning."
+                        ),
+                        "default": 0,
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": (
+                            "Last line to return (1-based, inclusive). "
+                            "Omit or pass 0 to read to the end."
+                        ),
+                        "default": 0,
+                    },
                 },
                 "required": ["path"],
             },

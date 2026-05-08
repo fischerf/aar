@@ -29,7 +29,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 <table width="100%">
   <tr>
     <td width="33%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — with CLI/TUI" width="100%" />
+      <img src="https://fischerf.github.io/aar/aar.gif" alt="AAR Agent — with CLI/TUI" width="100%" />
       <br/><sub><b>AAR Agent — with CLI/TUI</b></sub>
     </td>
     <td width="33%" align="center" valign="top">
@@ -231,7 +231,7 @@ See [`docs/extensions.md`](docs/extensions.md) for the full developer guide on c
 agent/
 ├── core/           # Loop, agent, events, session, config
 ├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic)
-├── tools/          # Tool registry, schema, execution engine
+├── tools/          # Tool registry, schema, execution engine, built-in tools (grep, find_files, filesystem, shell)
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # Extension API, loader, manager, MCP bridge, observability
@@ -295,6 +295,7 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
+| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
 
 ---

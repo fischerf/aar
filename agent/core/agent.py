@@ -73,9 +73,12 @@ class Agent:
         self._register_builtins()
 
     def _register_builtins(self) -> None:
+        from agent.tools.builtin.search import register_search_tools
+
         enabled = set(self.config.tools.enabled_builtins)
         fs_tools = {"read_file", "write_file", "edit_file", "list_directory"}
         shell_tools = {"bash"}
+        search_tools = {"grep", "find_files"}
 
         # Track pre-existing tools (e.g. MCP) so we don't prune them
         pre_existing = set(self.registry.names())
@@ -88,6 +91,8 @@ class Agent:
                 sandbox=self.executor.sandbox,
                 default_timeout=self.config.tools.bash_default_timeout,
             )
+        if enabled & search_tools:
+            register_search_tools(self.registry)
 
         # Only prune builtins we just added that weren't explicitly enabled
         newly_added = set(self.registry.names()) - pre_existing
