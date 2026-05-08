@@ -197,6 +197,7 @@ The generic provider defaults to 60 s — suitable for fast proxies but may be t
     }
   }
 }
+```
 
 ## Config loading and precedence
 
