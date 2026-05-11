@@ -186,7 +186,7 @@ class AnthropicProvider(Provider):
                     # Build usage metadata from the final message
                     stream_meta: ProviderMeta | None = None
                     try:
-                        final_msg = stream.get_final_message()
+                        final_msg = await stream.get_final_message()
                         usage: dict[str, int] = {
                             "input_tokens": final_msg.usage.input_tokens,
                             "output_tokens": final_msg.usage.output_tokens,
