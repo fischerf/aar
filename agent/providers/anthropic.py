@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
 
 
 class AnthropicProvider(Provider):
@@ -58,7 +58,7 @@ class AnthropicProvider(Provider):
             kwargs["tools"] = tools
         if self.config.temperature > 0:
             kwargs["temperature"] = self.config.temperature
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
 
         response = await self._client.messages.create(**kwargs)
 
@@ -137,7 +137,7 @@ class AnthropicProvider(Provider):
             kwargs["tools"] = tools
         if self.config.temperature > 0:
             kwargs["temperature"] = self.config.temperature
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
 
         # Track active content blocks by index
         active_blocks: dict[int, dict[str, Any]] = {}

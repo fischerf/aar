@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
 
 
 class OpenAIProvider(Provider):
@@ -95,7 +95,7 @@ class OpenAIProvider(Provider):
                 "json_schema": self.config.json_schema,
             }
 
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
 
         response = await self._client.chat.completions.create(**kwargs)
 
@@ -188,7 +188,7 @@ class OpenAIProvider(Provider):
                 "json_schema": self.config.json_schema,
             }
 
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
 
         # Accumulators for tool call fragments
         tool_acc: dict[int, dict[str, str]] = {}

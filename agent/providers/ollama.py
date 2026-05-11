@@ -10,7 +10,7 @@ import httpx
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +96,7 @@ class OllamaProvider(Provider):
         payload["keep_alive"] = self._keep_alive
 
         # Extra options (skip known non-option keys)
-        _SKIP = {
-            "keep_alive",
-            "read_timeout",
-            "supports_reasoning",
-            "supports_tools",
-            "supports_vision",
-            "supports_audio",
-        }
+        _SKIP = FRAMEWORK_EXTRA_KEYS
         for k, v in self.config.extra.items():
             if k not in _SKIP:
                 payload["options"][k] = v
@@ -209,14 +202,7 @@ class OllamaProvider(Provider):
 
         payload["keep_alive"] = self._keep_alive
 
-        _SKIP = {
-            "keep_alive",
-            "read_timeout",
-            "supports_reasoning",
-            "supports_tools",
-            "supports_vision",
-            "supports_audio",
-        }
+        _SKIP = FRAMEWORK_EXTRA_KEYS
         for k, v in self.config.extra.items():
             if k not in _SKIP:
                 payload["options"][k] = v
