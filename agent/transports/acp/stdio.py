@@ -59,6 +59,11 @@ class AarAcpAgent:
     The SDK is imported lazily so the package is optional at import time.
     """
 
+    # Delay (seconds) before optimistic AvailableCommandsUpdate push.
+    # Gives the client time to register the session before the notification
+    # arrives.  Override to 0 in tests.
+    _PUSH_COMMANDS_DELAY: float = 0.5
+
     def __init__(
         self,
         config: AgentConfig | None = None,
@@ -156,14 +161,28 @@ class AarAcpAgent:
     def on_connect(self, conn: Any) -> None:
         self._conn = conn
 
-    async def _push_available_commands(self, session_id: str) -> None:
+    async def _push_available_commands(
+        self,
+        session_id: str,
+        *,
+        delay: float = 0.0,
+    ) -> None:
         """Send ``AvailableCommandsUpdate`` to the client for *session_id*.
+
+        *delay* — seconds to ``asyncio.sleep`` before sending.  The early
+        push from ``new_session`` / ``load_session`` / ``fork_session`` uses
+        a short delay so that the response that creates the session reaches
+        the client before this notification.  Without the delay, the client
+        may drop the notification because it hasn't registered the session
+        yet (Zed logs ``Received session notification for unknown session``).
 
         Does **not** check or mutate ``_commands_pushed`` — callers are
         responsible for gating and recording delivery.
         """
         from acp.schema import AvailableCommandsUpdate
 
+        if delay > 0:
+            await asyncio.sleep(delay)
         if self._conn:
             ext_mgr = self._extension_managers.get(session_id)
             ext_extra = (
@@ -244,10 +263,14 @@ class AarAcpAgent:
             self._store.save(session)
             await self._setup_mcp(sid, mcp_servers or [])
             await self._setup_extensions(sid, session)
-        # Fire-and-forget: try to push commands early. The notification may
-        # arrive before the client acknowledges the session, so prompt() is
-        # the guaranteed delivery point.
-        self._spawn(self._push_available_commands(sid), name=f"push-cmds-{sid}")
+        # Fire-and-forget: push commands early with a short delay so the
+        # session/new response reaches the client first.  Without the delay
+        # Zed drops the notification ("unknown session").  prompt() still
+        # acts as the guaranteed delivery fallback.
+        self._spawn(
+            self._push_available_commands(sid, delay=self._PUSH_COMMANDS_DELAY),
+            name=f"push-cmds-{sid}",
+        )
         logger.info("ACP: new session %s cwd=%r", sid, cwd)
         cfg = self._session_configs.get(sid, self._config)
         resp = NewSessionResponse(
@@ -326,7 +349,7 @@ class AarAcpAgent:
                         )
 
             self._spawn(
-                self._push_available_commands(session_id),
+                self._push_available_commands(session_id, delay=self._PUSH_COMMANDS_DELAY),
                 name=f"push-cmds-{session_id}",
             )
             logger.info("ACP: loaded session %s (%d events)", session_id, len(session.events))
@@ -734,7 +757,10 @@ class AarAcpAgent:
             await self._setup_mcp(new_sid, mcp_servers or [])
             await self._setup_extensions(new_sid, forked)
 
-        self._spawn(self._push_available_commands(new_sid), name=f"push-cmds-{new_sid}")
+        self._spawn(
+            self._push_available_commands(new_sid, delay=self._PUSH_COMMANDS_DELAY),
+            name=f"push-cmds-{new_sid}",
+        )
         logger.info(
             "ACP: forked session %s → %s (%d events)", session_id, new_sid, len(forked.events)
         )
@@ -770,7 +796,7 @@ class AarAcpAgent:
                 await self._setup_mcp(session_id, mcp_servers or [])
                 await self._setup_extensions(session_id, session)
             self._spawn(
-                self._push_available_commands(session_id),
+                self._push_available_commands(session_id, delay=self._PUSH_COMMANDS_DELAY),
                 name=f"push-cmds-{session_id}",
             )
             logger.info("ACP: resumed session %s (%d events)", session_id, len(session.events))

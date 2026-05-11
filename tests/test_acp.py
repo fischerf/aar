@@ -81,6 +81,8 @@ def _make_sdk_agent(provider: MockProvider) -> AarAcpAgent:
     """Return an AarAcpAgent with the mock provider injected."""
     config = _make_config()
     agent = AarAcpAgent(config=config, agent_name="test-agent")
+    # Disable the delay so optimistic pushes complete immediately in tests.
+    agent._PUSH_COMMANDS_DELAY = 0
 
     def patched_make(session_id: str = "", approval_callback=None):
         from agent.core.agent import Agent

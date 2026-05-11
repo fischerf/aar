@@ -20,3 +20,4 @@ tools/mcp_chrome.json
 .vscode/
 tools/mcp_sqlite.json
 docs/loop_flow_explained.md
+.githooks/
