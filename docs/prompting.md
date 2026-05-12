@@ -70,6 +70,61 @@ Aar picks it up automatically — no code change needed.
 
 For machine-local or per-contributor additions that shouldn't be committed, drop `.md` files into `.agent/rules.d/` and add the directory to `.gitignore`. Run `aar init` to scaffold both `rules.md` and `rules.d/` for global and project layers.
 
+### Skills (lazy-load instructions)
+
+Skills are Markdown files with YAML frontmatter that provide specialised instructions the model can load on demand. Only the name and description appear in the system prompt — the full content is loaded via `read_file` when a task matches.
+
+#### Skill file format
+
+````markdown
+---
+name: my-skill
+description: What this skill does and when to use it.
+---
+
+# My Skill
+
+Detailed instructions, examples, scripts, and references go here.
+The model reads this on demand — it is NOT always in context.
+````
+
+#### Discovery locations
+
+1. **Global:** `~/.aar/skills/` — user-wide skills
+2. **Project:** `.agent/skills/` — repo-specific skills (commit these)
+3. **Extra:** paths listed in `skills_dirs` in config
+
+Within each directory:
+- A sub-directory containing `SKILL.md` is a skill root (supports scripts, references, assets alongside the instructions)
+- Loose `.md` files at the directory root are standalone skills
+
+#### Configuration
+
+```json
+{
+  "skills_enabled": true,
+  "skills_dirs": ["~/.claude/skills", "/extra/shared-skills"]
+}
+```
+
+Set `skills_enabled: false` to disable discovery entirely.
+
+#### System prompt injection
+
+Discovered skills appear as an `<available_skills>` XML block in the system prompt:
+
+```xml
+<available_skills>
+  <skill name="web-search" file_path="/home/user/.aar/skills/web-search.md">
+    Search the web for documentation, facts, or current information.
+  </skill>
+</available_skills>
+
+To use a skill, read its file with read_file to get the full instructions.
+```
+
+Run `aar prompt --layers` to see whether the skills layer is active.
+
 ---
 
 ## Writing effective user prompts

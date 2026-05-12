@@ -75,6 +75,7 @@ def _collect_layers(
     system_prompt_hint: str = "",
     tool_snippets: dict[str, str] | None = None,
     tool_guidelines: list[str] | None = None,
+    skills_text: str | None = None,
 ) -> list[PromptLayer]:
     """Return all prompt layers in assembly order, including missing ones."""
     layers: list[PromptLayer] = []
@@ -100,6 +101,10 @@ def _collect_layers(
                 tools_lines.append(f"- {g}")
         tools_text = "\n".join(tools_lines)
         layers.append(PromptLayer("tools", "[built-in]", None, tools_text, True))
+
+    # Skills layer — available skill names and descriptions for on-demand loading
+    if skills_text:
+        layers.append(PromptLayer("skills", "[built-in]", None, skills_text, True))
 
     global_dir = Path.home() / ".aar"
 
@@ -160,16 +165,18 @@ def build_system_prompt(
     system_prompt_hint: str = "",
     tool_snippets: dict[str, str] | None = None,
     tool_guidelines: list[str] | None = None,
+    skills_text: str | None = None,
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
     Layers (all optional except base):
       1. Base             — runtime facts (OS, cwd, shell)
       2. Tools            — one-line snippets + conditional guidelines (when provided)
-      3. Global           — ~/.aar/rules.md (user-wide preferences)
-      4. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
-      5. Project          — <project_rules_dir>/rules.md (project-specific instructions)
-      6. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
+      3. Skills           — available skill names for on-demand loading
+      4. Global           — ~/.aar/rules.md (user-wide preferences)
+      5. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
+      6. Project          — <project_rules_dir>/rules.md (project-specific instructions)
+      7. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
     layers = _collect_layers(
         project_rules_dir=project_rules_dir,
@@ -178,6 +185,7 @@ def build_system_prompt(
         system_prompt_hint=system_prompt_hint,
         tool_snippets=tool_snippets,
         tool_guidelines=tool_guidelines,
+        skills_text=skills_text,
     )
 
     return "\n---\n".join(layer.text for layer in layers if layer.loaded)
@@ -407,6 +415,8 @@ class AgentConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    skills_dirs: list[str] = Field(default_factory=list)  # extra skill discovery paths
+    skills_enabled: bool = True  # set to False to disable skill loading
     max_steps: int = 50
     timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3

@@ -728,6 +728,18 @@ def prompt(
     # (mirrors what Agent.__init__ + _rebuild_system_prompt does).
     tool_snippets, tool_guidelines = _harvest_tool_prompt_metadata(config)
 
+    # Harvest skills text (mirrors Agent._rebuild_system_prompt).
+    skills_text: str | None = None
+    if config.skills_enabled:
+        from agent.core.skills import format_skills_for_prompt, load_skills
+
+        sr = load_skills(
+            project_rules_dir=config.project_rules_dir,
+            extra_dirs=config.skills_dirs or None,
+        )
+        if sr.skills:
+            skills_text = format_skills_for_prompt(sr.skills)
+
     if layers:
         sb = config.safety.sandbox
         layer_list = _collect_layers(
@@ -737,6 +749,7 @@ def prompt(
             system_prompt_hint=sb.wsl.system_prompt_hint,
             tool_snippets=tool_snippets or None,
             tool_guidelines=tool_guidelines or None,
+            skills_text=skills_text,
         )
         console.print("\n[bold]System prompt layers[/] (assembled in order):\n")
         for i, layer in enumerate(layer_list, 1):
@@ -763,6 +776,7 @@ def prompt(
         system_prompt_hint=sb.wsl.system_prompt_hint,
         tool_snippets=tool_snippets or None,
         tool_guidelines=tool_guidelines or None,
+        skills_text=skills_text,
     )
 
     if raw:

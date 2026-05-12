@@ -1,6 +1,6 @@
 # Plan: Skills, LLM-Summarized Compaction, File Tracking, Tool Awareness
 
-Status: **Phase 1 complete**
+Status: **All phases complete** (Phase 1 + 2 + 3)
 
 ---
 
@@ -27,17 +27,18 @@ guidelines so the LLM knows what it has *before* parsing tool schemas.
 **Goal:** Specialized instructions in `.md` files; only name + description + path in the
 system prompt. LLM reads the full file on demand via `read_file`.
 
-**Status:** ⏳ not started
+**Status:** ✅ complete
 
 ### Steps
 
-- [ ] **2a** `agent/core/skills.py` — `Skill` model, frontmatter parsing
-- [ ] **2b** `agent/core/skills.py` — `load_skills()` discovery (global `~/.aar/skills/`, project `.agent/skills/`, extra paths)
-- [ ] **2c** `agent/core/skills.py` — `format_skills_for_prompt()` → XML `<available_skills>` block
-- [ ] **2d** `agent/core/config.py` — `build_system_prompt()` gains `skills` param; wire into prompt assembly
-- [ ] **2e** `agent/core/config.py` — `skills_dirs` and `skills_enabled` fields on `AgentConfig`
-- [ ] **2f** `agent/core/agent.py` — call `load_skills()` in `_rebuild_system_prompt()`
-- [ ] **2g** tests
+- [x] **2a** `agent/core/skills.py` — `Skill` model, `parse_frontmatter()`, `strip_frontmatter()`, validation
+- [x] **2b** `agent/core/skills.py` — `load_skills()` discovery (global `~/.aar/skills/`, project `.agent/skills/`, extra paths)
+- [x] **2c** `agent/core/skills.py` — `format_skills_for_prompt()` → XML `<available_skills>` block
+- [x] **2d** `agent/core/config.py` — `build_system_prompt()` + `_collect_layers()` gain `skills_text` param; skills layer inserted after tools, before global rules
+- [x] **2e** `agent/core/config.py` — `skills_dirs` and `skills_enabled` fields on `AgentConfig`
+- [x] **2f** `agent/core/agent.py` — call `load_skills()` in `_rebuild_system_prompt()`
+- [x] **2g** `agent/transports/cli.py` — `aar prompt` command includes skills layer in output and `--layers` view
+- [x] **2h** tests — 32 tests in `tests/test_skills.py`, all passing
 
 ---
 
@@ -46,19 +47,18 @@ system prompt. LLM reads the full file on demand via `read_file`.
 **Goal:** When context exceeds the window, call the LLM to produce a structured summary
 instead of a one-line truncation marker. Track files read/modified across compactions.
 
-**Status:** ⏳ not started
+**Status:** ✅ complete
 
 ### Steps
 
-- [ ] **3a** `agent/core/compaction.py` — `FileOperations` dataclass, `extract_file_ops()`, `merge_file_ops()`, `format_file_ops()`
-- [ ] **3b** `agent/core/compaction.py` — `SUMMARIZATION_PROMPT`, `UPDATE_SUMMARIZATION_PROMPT`, `SUMMARIZATION_SYSTEM_PROMPT`
-- [ ] **3c** `agent/core/compaction.py` — `generate_summary()` async function
-- [ ] **3d** `agent/core/events.py` — `CompactionSummary` event type
-- [ ] **3e** `agent/core/session.py` — `summarize_and_compact()` async function
-- [ ] **3f** `agent/core/loop.py` — new `"summarize"` context strategy branch
-- [ ] **3g** `agent/core/session.py` — `to_messages()` handles `CompactionSummary` events
-- [ ] **3h** `agent/core/config.py` — `compaction_reserve_tokens`, `compaction_keep_recent_tokens` fields
-- [ ] **3i** tests
+- [x] **3a** `agent/core/compaction/utils.py` — `FileOperations` dataclass, `extract_file_ops_from_message()`, `compute_file_lists()`, `format_file_operations()`, `serialize_conversation()`
+- [x] **3b** `agent/core/compaction/compaction.py` — `_INITIAL_PROMPT`, `_UPDATE_PROMPT`, `SUMMARIZATION_SYSTEM_PROMPT`
+- [x] **3c** `agent/core/compaction/compaction.py` — `generate_summary()` async, `compact_session()` async
+- [x] **3d** `agent/core/compaction/compaction.py` — `estimate_message_tokens()`, `estimate_event_tokens()`, `estimate_context_tokens()`, `should_compact()`, `find_event_cut_point()`, `CompactionResult`
+- [x] **3e** `agent/core/session.py` — `events_to_messages()` extracted as standalone function; `Session.apply_compaction()` method
+- [x] **3f** `agent/core/loop.py` — new `"summarize"` context strategy branch with fallback to trim
+- [x] **3g** `agent/core/config.py` — `CompactionConfig` model (enabled, reserve_tokens, keep_recent_tokens); `compaction` field on `AgentConfig`; `context_strategy` now includes `"summarize"`
+- [x] **3h** tests — 46 tests in `tests/test_compaction.py`, all passing
 
 ---
 
@@ -75,10 +75,15 @@ Phase 3: LLM-Summarized Compaction  (independent — parallel with Phase 1)
 | `agent/tools/schema.py` | ✏️ add fields | | |
 | `agent/tools/registry.py` | ✏️ add methods | | |
 | `agent/tools/builtin/*.py` | ✏️ add snippets | | |
-| `agent/core/config.py` | ✏️ prompt params | ✏️ skill config + prompt | ✏️ compaction config |
-| `agent/core/agent.py` | ✏️ rebuild prompt | ✏️ load skills | |
-| `agent/core/skills.py` | | 🆕 | |
-| `agent/core/compaction.py` | | | 🆕 |
-| `agent/core/events.py` | | | ✏️ new event type |
-| `agent/core/session.py` | | | ✏️ new compact fn |
-| `agent/core/loop.py` | | | ✏️ new strategy branch |
+| `agent/core/config.py` | ✏️ prompt params | ✏️ skills_text param + skills_dirs/skills_enabled config | ✏️ CompactionConfig + compaction field + "summarize" strategy |
+| `agent/core/agent.py` | ✏️ rebuild prompt | ✏️ load skills in _rebuild_system_prompt | |
+| `agent/core/skills.py` | | 🆕 Skill model, discovery, formatting | |
+| `agent/core/compaction/__init__.py` | | | 🆕 package exports |
+| `agent/core/compaction/utils.py` | | | 🆕 file ops, serialization |
+| `agent/core/compaction/compaction.py` | | | 🆕 core logic, LLM summary |
+| `agent/core/session.py` | | | ✏️ events_to_messages() + apply_compaction() |
+| `agent/core/loop.py` | | | ✏️ "summarize" strategy branch |
+| `agent/transports/cli.py` | | ✏️ prompt command includes skills | |
+| `tests/test_tool_aware_prompt.py` | 🆕 22 tests | | |
+| `tests/test_skills.py` | | 🆕 32 tests | |
+| `tests/test_compaction.py` | | | 🆕 46 tests |
