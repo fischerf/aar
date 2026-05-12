@@ -73,6 +73,8 @@ def _collect_layers(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    tool_snippets: dict[str, str] | None = None,
+    tool_guidelines: list[str] | None = None,
 ) -> list[PromptLayer]:
     """Return all prompt layers in assembly order, including missing ones."""
     layers: list[PromptLayer] = []
@@ -83,6 +85,21 @@ def _collect_layers(
         system_prompt_hint=system_prompt_hint,
     )
     layers.append(PromptLayer("aar-system", "[built-in]", None, base_text, True))
+
+    # Tools layer — one-line snippets + conditional guidelines
+    if tool_snippets or tool_guidelines:
+        tools_lines: list[str] = []
+        if tool_snippets:
+            tools_lines.append("Available tools:")
+            for name, snippet in tool_snippets.items():
+                tools_lines.append(f"- {name}: {snippet}")
+        if tool_guidelines:
+            tools_lines.append("")
+            tools_lines.append("Guidelines:")
+            for g in tool_guidelines:
+                tools_lines.append(f"- {g}")
+        tools_text = "\n".join(tools_lines)
+        layers.append(PromptLayer("tools", "[built-in]", None, tools_text, True))
 
     global_dir = Path.home() / ".aar"
 
@@ -141,22 +158,28 @@ def build_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    tool_snippets: dict[str, str] | None = None,
+    tool_guidelines: list[str] | None = None,
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
     Layers (all optional except base):
       1. Base             — runtime facts (OS, cwd, shell)
-      2. Global           — ~/.aar/rules.md (user-wide preferences)
-      3. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
-      4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
-      5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
+      2. Tools            — one-line snippets + conditional guidelines (when provided)
+      3. Global           — ~/.aar/rules.md (user-wide preferences)
+      4. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
+      5. Project          — <project_rules_dir>/rules.md (project-specific instructions)
+      6. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
     layers = _collect_layers(
         project_rules_dir=project_rules_dir,
         sandbox_mode=sandbox_mode,
         wsl_distro=wsl_distro,
         system_prompt_hint=system_prompt_hint,
+        tool_snippets=tool_snippets,
+        tool_guidelines=tool_guidelines,
     )
+
     return "\n---\n".join(layer.text for layer in layers if layer.loaded)
 
 

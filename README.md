@@ -231,7 +231,7 @@ See [`docs/extensions.md`](docs/extensions.md) for the full developer guide on c
 agent/
 ├── core/           # Loop, agent, events, session, config
 ├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic)
-├── tools/          # Tool registry, schema, execution engine, built-in tools (grep, find_files, filesystem, shell)
+├── tools/          # Tool registry, schema, execution engine, built-in tools — each tool carries prompt metadata
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # Extension API, loader, manager, MCP bridge, observability

@@ -46,13 +46,14 @@ Rules:
 
 ### Project rules file
 
-The system prompt is assembled from five layers (all optional except Base):
+The system prompt is assembled from six layers (all optional except Base):
 
 1. **Base** — runtime facts (OS, cwd, shell, sandbox environment) — always included. On Windows with `wsl` sandbox mode the base includes the distro description from `system_prompt_hint` in your distro profile.
-2. **Global rules** — `~/.aar/rules.md` — user-wide preferences
-3. **Global drop-ins** — `~/.aar/rules.d/*.md` (sorted) — environment-specific additions without editing the main file
-4. **Project rules** — `<project_rules_dir>/rules.md` — project instructions checked into git
-5. **Project drop-ins** — `<project_rules_dir>/rules.d/*.md` (sorted) — per-contributor or per-machine overrides; can be gitignored
+2. **Tools** — one-line snippet per active tool + conditional guidelines. Auto-generated from `ToolSpec.prompt_snippet` and `ToolSpec.prompt_guidelines` on the registered tools. This tells the model what tools are available before it ever sees the tool schemas.
+3. **Global rules** — `~/.aar/rules.md` — user-wide preferences
+4. **Global drop-ins** — `~/.aar/rules.d/*.md` (sorted) — environment-specific additions without editing the main file
+5. **Project rules** — `<project_rules_dir>/rules.md` — project instructions checked into git
+6. **Project drop-ins** — `<project_rules_dir>/rules.d/*.md` (sorted) — per-contributor or per-machine overrides; can be gitignored
 
 Run `aar prompt --layers` to see the ordered list of all active sources, their file paths, and how many characters each contributes. Missing files are shown as skipped.
 

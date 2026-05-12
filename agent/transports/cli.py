@@ -50,6 +50,41 @@ _PROVIDER_ENV_KEY: dict[str, str] = {
 }
 
 
+def _harvest_tool_prompt_metadata(
+    config: AgentConfig,
+) -> tuple[dict[str, str], list[str]]:
+    """Register built-in tools into a temporary registry and return prompt metadata.
+
+    Returns ``(tool_snippets, tool_guidelines)`` — the same data that
+    :meth:`Agent._rebuild_system_prompt` passes to :func:`build_system_prompt`.
+    """
+    from agent.tools.builtin.filesystem import register_filesystem_tools
+    from agent.tools.builtin.search import register_search_tools
+    from agent.tools.builtin.shell import register_shell_tools
+    from agent.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+    enabled = set(config.tools.enabled_builtins)
+    fs_tools = {"read_file", "write_file", "edit_file", "list_directory"}
+    shell_tools = {"bash"}
+    search_tools = {"grep", "find_files"}
+
+    if enabled & fs_tools:
+        register_filesystem_tools(reg)
+    if enabled & shell_tools:
+        register_shell_tools(reg)
+    if enabled & search_tools:
+        register_search_tools(reg)
+
+    # Prune tools not explicitly enabled
+    for name in list(reg.names()):
+        if name not in enabled:
+            if name in reg._tools:
+                del reg._tools[name]
+
+    return reg.get_prompt_snippets(), reg.get_prompt_guidelines()
+
+
 def _build_config(
     model: Optional[str] = None,
     provider: Optional[str] = None,
@@ -689,6 +724,10 @@ def prompt(
         config_file=config_file,
     )
 
+    # Build a temporary tool registry to harvest prompt snippets/guidelines
+    # (mirrors what Agent.__init__ + _rebuild_system_prompt does).
+    tool_snippets, tool_guidelines = _harvest_tool_prompt_metadata(config)
+
     if layers:
         sb = config.safety.sandbox
         layer_list = _collect_layers(
@@ -696,6 +735,8 @@ def prompt(
             sandbox_mode=sb.mode,
             wsl_distro=sb.wsl.distro,
             system_prompt_hint=sb.wsl.system_prompt_hint,
+            tool_snippets=tool_snippets or None,
+            tool_guidelines=tool_guidelines or None,
         )
         console.print("\n[bold]System prompt layers[/] (assembled in order):\n")
         for i, layer in enumerate(layer_list, 1):
@@ -711,7 +752,18 @@ def prompt(
         console.print(f"\n  [dim]{loaded} layer(s) loaded · {total_chars} total chars[/]")
         return
 
-    system_prompt = config.system_prompt
+    # Rebuild the system prompt with tool metadata included
+    from agent.core.config import build_system_prompt as _build_prompt
+
+    sb = config.safety.sandbox
+    system_prompt = _build_prompt(
+        project_rules_dir=config.project_rules_dir,
+        sandbox_mode=sb.mode,
+        wsl_distro=sb.wsl.distro,
+        system_prompt_hint=sb.wsl.system_prompt_hint,
+        tool_snippets=tool_snippets or None,
+        tool_guidelines=tool_guidelines or None,
+    )
 
     if raw:
         typer.echo(system_prompt)
