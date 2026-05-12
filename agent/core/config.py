@@ -386,6 +386,19 @@ class TUIConfig(BaseModel):
     layout: dict = Field(default_factory=dict)
 
 
+class CompactionConfig(BaseModel):
+    """LLM-based context compaction settings.
+
+    When enabled, older conversation messages are periodically summarized
+    by the LLM and replaced with a structured checkpoint, keeping the
+    context within the model's window without simply dropping history.
+    """
+
+    enabled: bool = False  # opt-in — triggers an extra LLM call per compaction
+    reserve_tokens: int = 16_384  # tokens reserved for the next response
+    keep_recent_tokens: int = 20_000  # tokens of recent context to preserve verbatim
+
+
 class AgentConfig(BaseModel):
     provider: str | ProviderConfig = Field(default_factory=ProviderConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
@@ -393,12 +406,13 @@ class AgentConfig(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
+    compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     max_steps: int = 50
     timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
-    context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "none"
+    context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "summarize" | "none"
     token_budget: int = 0  # max total tokens across the run; 0 = unlimited
     cost_limit: float = 0.0  # max USD cost across the run; 0.0 = unlimited
     token_warning_threshold: float = 0.8  # fraction of budget to trigger warning style

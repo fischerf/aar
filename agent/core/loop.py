@@ -93,7 +93,27 @@ async def run_loop(
             session.increment_step()
             messages = session.to_messages()
             _ctx_window = config.effective_context_window()
-            if _ctx_window > 0 and config.context_strategy == "sliding_window":
+            if _ctx_window > 0 and config.context_strategy == "summarize":
+                if config.compaction.enabled:
+                    try:
+                        from agent.core.compaction.compaction import compact_session
+
+                        result = await compact_session(
+                            session, provider, _ctx_window, config.compaction
+                        )
+                        if result:
+                            messages = session.to_messages()
+                            log.info(
+                                "Compacted context: %d tokens before, %d events removed",
+                                result.tokens_before,
+                                result.events_removed,
+                                extra=log_extra,
+                            )
+                    except Exception:
+                        log.exception("Compaction failed, falling back to trim", extra=log_extra)
+                # Safety net: trim if still over budget (or if compaction disabled)
+                messages = trim_to_token_budget(messages, _ctx_window)
+            elif _ctx_window > 0 and config.context_strategy == "sliding_window":
                 messages = trim_to_token_budget(messages, _ctx_window)
             elif _ctx_window > 0 and config.context_strategy == "compact":
                 messages = compact_to_token_budget(messages, _ctx_window)

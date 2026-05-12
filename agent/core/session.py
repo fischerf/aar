@@ -92,75 +92,96 @@ class Session(BaseModel):
         string so that every provider adapter receives properly structured
         image blocks.
         """
-        messages: list[dict[str, Any]] = []
-        pending_tool_calls: list[ToolCall] = []
-        pending_tool_results: list[ToolResult] = []
+        return events_to_messages(self.events)
 
-        for event in self.events:
-            if isinstance(event, UserMessage):
-                # Flush any pending tool results first
-                if pending_tool_results:
-                    messages.append(_tool_results_message(pending_tool_results))
-                    pending_tool_results = []
-                if event.is_multimodal:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": [p.model_dump(exclude_none=True) for p in event.parts],
-                        }
-                    )
-                else:
-                    messages.append({"role": "user", "content": event.content})
+    def apply_compaction(self, cut_event_index: int, summary_content: str) -> None:
+        """Replace events before *cut_event_index* with a summary UserMessage.
 
-            elif isinstance(event, AssistantMessage):
-                # Flush pending tool results before the next assistant message
-                if pending_tool_results:
-                    messages.append(_tool_results_message(pending_tool_results))
-                    pending_tool_results = []
+        This is called by the compaction module after generating a
+        structured summary of older conversation messages.  The session's
+        event list is modified in-place so subsequent ``to_messages()``
+        calls return the compacted context.
+        """
+        summary_event = UserMessage(content=summary_content)
+        self.events = [summary_event] + self.events[cut_event_index:]
 
-                if pending_tool_calls:
-                    # Assistant message with tool calls
-                    content_blocks: list[dict] = []
-                    if event.content:
-                        content_blocks.append({"type": "text", "text": event.content})
-                    for tc in pending_tool_calls:
-                        content_blocks.append(
-                            {
-                                "type": "tool_use",
-                                "id": tc.tool_call_id,
-                                "name": tc.tool_name,
-                                "input": tc.arguments,
-                            }
-                        )
-                    messages.append({"role": "assistant", "content": content_blocks})
-                    pending_tool_calls = []
-                else:
-                    messages.append({"role": "assistant", "content": event.content})
 
-            elif isinstance(event, ToolCall):
-                pending_tool_calls.append(event)
+def events_to_messages(events: list[Event]) -> list[dict[str, Any]]:
+    """Convert a list of events to a provider-friendly message list.
 
-            elif isinstance(event, ToolResult):
-                pending_tool_results.append(event)
+    Standalone version of :meth:`Session.to_messages` — accepts an
+    arbitrary event list so the compaction module can convert a subset
+    of events without constructing a full Session.
+    """
+    messages: list[dict[str, Any]] = []
+    pending_tool_calls: list[ToolCall] = []
+    pending_tool_results: list[ToolResult] = []
 
-        # Flush remaining
-        if pending_tool_calls:
-            content_blocks = []
-            for tc in pending_tool_calls:
-                content_blocks.append(
+    for event in events:
+        if isinstance(event, UserMessage):
+            # Flush any pending tool results first
+            if pending_tool_results:
+                messages.append(_tool_results_message(pending_tool_results))
+                pending_tool_results = []
+            if event.is_multimodal:
+                messages.append(
                     {
-                        "type": "tool_use",
-                        "id": tc.tool_call_id,
-                        "name": tc.tool_name,
-                        "input": tc.arguments,
+                        "role": "user",
+                        "content": [p.model_dump(exclude_none=True) for p in event.parts],
                     }
                 )
-            messages.append({"role": "assistant", "content": content_blocks})
+            else:
+                messages.append({"role": "user", "content": event.content})
 
-        if pending_tool_results:
-            messages.append(_tool_results_message(pending_tool_results))
+        elif isinstance(event, AssistantMessage):
+            # Flush pending tool results before the next assistant message
+            if pending_tool_results:
+                messages.append(_tool_results_message(pending_tool_results))
+                pending_tool_results = []
 
-        return messages
+            if pending_tool_calls:
+                # Assistant message with tool calls
+                content_blocks: list[dict] = []
+                if event.content:
+                    content_blocks.append({"type": "text", "text": event.content})
+                for tc in pending_tool_calls:
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.tool_call_id,
+                            "name": tc.tool_name,
+                            "input": tc.arguments,
+                        }
+                    )
+                messages.append({"role": "assistant", "content": content_blocks})
+                pending_tool_calls = []
+            else:
+                messages.append({"role": "assistant", "content": event.content})
+
+        elif isinstance(event, ToolCall):
+            pending_tool_calls.append(event)
+
+        elif isinstance(event, ToolResult):
+            pending_tool_results.append(event)
+
+    # Flush remaining
+    if pending_tool_calls:
+        content_blocks = []
+        for tc in pending_tool_calls:
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.tool_call_id,
+                    "name": tc.tool_name,
+                    "input": tc.arguments,
+                }
+            )
+        messages.append({"role": "assistant", "content": content_blocks})
+
+    if pending_tool_results:
+        messages.append(_tool_results_message(pending_tool_results))
+
+    return messages
 
 
 def estimate_token_count(messages: list[dict[str, Any]]) -> int:
