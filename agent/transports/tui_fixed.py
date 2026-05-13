@@ -1170,6 +1170,11 @@ class AarFixedApp(App):
                 try:
                     desc = self._agent.switch_provider(parts[1].strip())
                     await _write(Text.from_markup(f"[green]Switched to {desc}[/]"))
+                    # Update status bar to reflect the new provider/model
+                    p = self._agent.provider
+                    header.provider_name = p.config.name
+                    header.model_name = p.config.model
+                    header.refresh_info()
                 except (ValueError, Exception) as exc:
                     await _write(Text(str(exc), style=t.error.border_style))
             return
