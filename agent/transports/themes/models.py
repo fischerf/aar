@@ -40,6 +40,7 @@ class HeaderStyle(BaseModel):
     provider_style: str = "bold cyan"
     tokens_style: str = "dim green"
     tokens_warning_style: str = "bold red"
+    tokens_warning_mid_style: str = "bold yellow"  # context fill 60-80 %
     session_style: str = "dim"
     state_style: str = "bold yellow"
 

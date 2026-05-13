@@ -52,6 +52,7 @@ from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
     AudioBlock,
+    ContextWindowEvent,
     ErrorEvent,
     Event,
     ImageURLBlock,
@@ -491,6 +492,15 @@ class FixedTUIRenderer:
                 raw=usage_text.strip(),
                 kind="usage",
             )
+
+        # --- Context-window fill update ------------------------------------
+        elif isinstance(event, ContextWindowEvent):
+            self._header.update_context(
+                ctx_tokens=event.ctx_tokens,
+                ctx_window=event.ctx_window,
+                msgs_dropped=event.msgs_dropped,
+            )
+            self._header.refresh_info()
 
     def render_welcome(self, extra_commands: list[str] | None = None) -> None:
         if not self.layout.welcome.visible:

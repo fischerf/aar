@@ -18,7 +18,56 @@ except ImportError as exc:  # pragma: no cover
 
 from agent.safety.permissions import ApprovalResult
 from agent.transports.keybinds import KeyBinds
-from agent.transports.themes.models import Theme
+from agent.transports.themes.models import HeaderStyle, Theme
+
+# ---------------------------------------------------------------------------
+# Context-window fill-bar helper
+# ---------------------------------------------------------------------------
+
+_BAR_WIDTH = 10  # Unicode block characters wide
+_BAR_FILLED = "█"
+_BAR_EMPTY = "░"
+
+
+def _ctx_fill_bar(
+    ctx_tokens: int,
+    ctx_window: int,
+    msgs_dropped: int,
+    h: HeaderStyle,
+) -> list[tuple[str, str]]:
+    """Return Rich text *parts* for the context-window fill indicator.
+
+    The bar is ``_BAR_WIDTH`` Unicode block characters wide.  Colour
+    transitions at 60 % (mid-warning) and 80 % (full warning / red).
+    When messages were evicted this turn a small ``↷N`` suffix is appended.
+    """
+    if ctx_window <= 0:
+        return []
+
+    fill = min(1.0, ctx_tokens / ctx_window)
+    filled = round(fill * _BAR_WIDTH)
+    empty = _BAR_WIDTH - filled
+    bar = _BAR_FILLED * filled + _BAR_EMPTY * empty
+
+    def _fmt_k(n: int) -> str:
+        return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+    label = f"{_fmt_k(ctx_tokens)}/{_fmt_k(ctx_window)}"
+
+    if fill >= 0.8:
+        style = h.tokens_warning_style
+    elif fill >= 0.6:
+        style = h.tokens_warning_mid_style
+    else:
+        style = h.tokens_style
+
+    parts: list[tuple[str, str]] = [
+        (bar, style),
+        (f" {label}", style),
+    ]
+    if msgs_dropped > 0:
+        parts.append((f" ↷{msgs_dropped}", style))
+    return parts
 
 
 class _HeaderInfoStatic(Static):
@@ -70,6 +119,12 @@ class _HeaderInfoStatic(Static):
         parts.append((state_label, h.state_style))
         parts.append(("  |  ", h.separator_style))
         parts.append((thinking_label, h.tokens_style))
+        # Context-window fill bar (only when a window is configured)
+        if bar.ctx_window > 0:
+            ctx_parts = _ctx_fill_bar(bar.ctx_tokens, bar.ctx_window, bar.msgs_dropped, h)
+            if ctx_parts:
+                parts.append(("  |  ", h.separator_style))
+                parts.extend(ctx_parts)
         return Text.assemble(*parts)
 
 
@@ -111,6 +166,10 @@ class HeaderBar(Horizontal):
         self.warning_active: bool = False
         self.streaming: bool = False
         self.queue_depth: int = 0
+        # --- context-window fill (updated by ContextWindowEvent) ---
+        self.ctx_tokens: int = 0
+        self.ctx_window: int = 0
+        self.msgs_dropped: int = 0  # messages evicted in the most recent turn
 
     def compose(self) -> ComposeResult:
         yield _HeaderInfoStatic(self)
@@ -123,6 +182,12 @@ class HeaderBar(Horizontal):
         self.output_tokens += usage.get("output_tokens", 0)
         self.total_cost += step_cost
         self.warning_active = warning
+
+    def update_context(self, ctx_tokens: int, ctx_window: int, msgs_dropped: int = 0) -> None:
+        """Update context-window fill state and refresh the info section."""
+        self.ctx_tokens = ctx_tokens
+        self.ctx_window = ctx_window
+        self.msgs_dropped = msgs_dropped
 
     def refresh_info(self) -> None:
         """Trigger a repaint of the left info section."""
