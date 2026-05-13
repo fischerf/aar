@@ -151,3 +151,136 @@ class TestHeaderBarContextState:
         bar.update_context(2000, 8192, 0)
         assert bar.ctx_tokens == 2000
         assert bar.msgs_dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# format_ctx_window_bar — shared helper in tui_utils/formatting.py
+# (same logic as _ctx_fill_bar but returns rich.text.Text)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatCtxWindowBar:
+    def test_returns_none_when_window_zero(self):
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        assert format_ctx_window_bar(100, 0) is None
+
+    def test_returns_text_object(self):
+        from rich.text import Text
+
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        result = format_ctx_window_bar(4096, 8192)
+        assert isinstance(result, Text)
+
+    def test_contains_bar_characters(self):
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        result = format_ctx_window_bar(4096, 8192)
+        assert result is not None
+        assert "█" in result.plain
+        assert "░" in result.plain
+
+    def test_contains_label(self):
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        result = format_ctx_window_bar(4096, 8192)
+        assert result is not None
+        assert "k" in result.plain  # 4.1k/8.2k format
+
+    def test_eviction_glyph_when_dropped(self):
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        result = format_ctx_window_bar(3000, 8192, msgs_dropped=3)
+        assert result is not None
+        assert "↷3" in result.plain
+
+    def test_no_eviction_glyph_when_none(self):
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        result = format_ctx_window_bar(3000, 8192, msgs_dropped=0)
+        assert result is not None
+        assert "↷" not in result.plain
+
+    def test_style_applied(self):
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+        result = format_ctx_window_bar(
+            7500, 8192, tokens_warning_style="bold red"  # > 80 %
+        )
+        assert result is not None
+        assert result.style == "bold red"
+
+    def test_consistent_with_ctx_fill_bar(self):
+        """format_ctx_window_bar and _ctx_fill_bar must agree on label content."""
+        from agent.transports.themes.models import HeaderStyle
+        from agent.transports.tui_utils.formatting import format_ctx_window_bar
+        from agent.transports.tui_widgets.bars import _ctx_fill_bar
+
+        h = HeaderStyle()
+        parts = _ctx_fill_bar(4000, 8192, 2, h)
+        bar_text = format_ctx_window_bar(
+            4000, 8192, msgs_dropped=2,
+            tokens_style=h.tokens_style,
+            tokens_warning_mid_style=h.tokens_warning_mid_style,
+            tokens_warning_style=h.tokens_warning_style,
+        )
+        assert bar_text is not None
+        # Both should mention the eviction count
+        combined_parts = "".join(p[0] for p in parts)
+        assert "↷2" in combined_parts
+        assert "↷2" in bar_text.plain
+
+
+# ---------------------------------------------------------------------------
+# TUIRenderer — ContextWindowEvent state tracking
+# ---------------------------------------------------------------------------
+
+
+class TestTUIRendererContextState:
+    def _renderer(self):
+        import io
+
+        from rich.console import Console
+
+        from agent.transports.tui import TUIRenderer
+
+        return TUIRenderer(console=Console(file=io.StringIO(), width=120))
+
+    def test_initial_context_fields_zero(self):
+        r = self._renderer()
+        assert r._ctx_tokens == 0
+        assert r._ctx_window == 0
+        assert r._msgs_dropped == 0
+
+    def test_context_window_event_updates_state(self):
+        from agent.core.events import ContextWindowEvent
+
+        r = self._renderer()
+        r.render_event(
+            ContextWindowEvent(
+                ctx_tokens=4096,
+                ctx_window=8192,
+                msgs_dropped=3,
+                strategy="sliding_window",
+            )
+        )
+        assert r._ctx_tokens == 4096
+        assert r._ctx_window == 8192
+        assert r._msgs_dropped == 3
+
+    def test_context_window_event_no_console_output(self):
+        """ContextWindowEvent must not print anything — it only updates state."""
+        import io
+
+        from rich.console import Console
+
+        from agent.core.events import ContextWindowEvent
+        from agent.transports.tui import TUIRenderer
+
+        buf = io.StringIO()
+        r = TUIRenderer(console=Console(file=buf, width=120))
+        r.render_event(
+            ContextWindowEvent(ctx_tokens=3000, ctx_window=8192, msgs_dropped=0)
+        )
+        assert buf.getvalue() == ""
