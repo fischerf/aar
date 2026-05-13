@@ -2014,6 +2014,110 @@ class TestAcpModels:
         assert data["name"] == "aar"
         assert "text/plain" in data["input_content_types"]
 
+    # Context-window fields on AcpRun
+    def test_acp_run_ctx_fields_default_zero(self):
+        run = AcpRun(agent_name="aar")
+        assert run.ctx_tokens == 0
+        assert run.ctx_window == 0
+        assert run.msgs_dropped == 0
+
+    def test_acp_run_ctx_fields_set(self):
+        run = AcpRun(agent_name="aar", ctx_tokens=4096, ctx_window=8192, msgs_dropped=3)
+        assert run.ctx_tokens == 4096
+        assert run.ctx_window == 8192
+        assert run.msgs_dropped == 3
+
+    def test_acp_run_ctx_fields_in_serialisation(self):
+        run = AcpRun(agent_name="aar", ctx_tokens=1000, ctx_window=8192)
+        data = run.model_dump()
+        assert data["ctx_tokens"] == 1000
+        assert data["ctx_window"] == 8192
+
+
+class TestContextWindowUpdatedEvent:
+    """ContextWindowUpdatedEvent — new SSE event type in the ACP HTTP transport."""
+
+    def test_default_fields(self):
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        evt = ContextWindowUpdatedEvent(run_id="abc123")
+        assert evt.type == "context_window_updated"
+        assert evt.run_id == "abc123"
+        assert evt.ctx_tokens == 0
+        assert evt.ctx_window == 0
+        assert evt.msgs_dropped == 0
+        assert evt.msgs_before == 0
+        assert evt.msgs_after == 0
+        assert evt.strategy == ""
+
+    def test_fields_set(self):
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        evt = ContextWindowUpdatedEvent(
+            run_id="abc",
+            ctx_tokens=4096,
+            ctx_window=8192,
+            msgs_dropped=5,
+            msgs_before=20,
+            msgs_after=15,
+            strategy="sliding_window",
+        )
+        assert evt.ctx_tokens == 4096
+        assert evt.msgs_dropped == 5
+        assert evt.strategy == "sliding_window"
+
+    def test_serialises_correctly(self):
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        evt = ContextWindowUpdatedEvent(run_id="xyz", ctx_tokens=3000, ctx_window=8192)
+        data = evt.model_dump()
+        assert data["type"] == "context_window_updated"
+        assert data["run_id"] == "xyz"
+        assert data["ctx_tokens"] == 3000
+
+    @pytest.mark.asyncio
+    async def test_in_sse_stream_when_context_window_set(self):
+        """ContextWindowUpdatedEvent should appear in the SSE stream when ctx window is configured."""
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        provider = MockProvider()
+        provider.enqueue_text("hi", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(update={"context_window": 8192, "context_strategy": "sliding_window"})
+        transport = AcpTransport(config=config, agent_name="test-agent", agent_description="Test")
+
+        def patched_make():
+            from agent.core.agent import Agent
+
+            return Agent(
+                config=transport.config,
+                provider=provider,
+                approval_callback=transport.approval_callback,
+                registry=transport.registry,
+            )
+
+        transport._make_agent = patched_make  # type: ignore[method-assign]
+
+        run, queue = await transport.create_run(
+            agent_name="test-agent",
+            input_messages=[_user_msg("hello")],
+            mode=RunMode.STREAM,
+        )
+        events = []
+        while True:
+            evt = await queue.get()
+            if evt is None:
+                break
+            events.append(evt)
+
+        ctx_events = [e for e in events if isinstance(e, ContextWindowUpdatedEvent)]
+        assert len(ctx_events) >= 1
+        assert ctx_events[0].ctx_window == 8192
+        assert ctx_events[0].run_id == run.run_id
+        # The run object itself should also have the fill state
+        assert run.ctx_window == 8192
+
 
 class TestSseLine:
     def test_sse_line_format(self):

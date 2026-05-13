@@ -14,7 +14,14 @@ import logging
 import time
 
 from agent.core.config import AgentConfig
-from agent.core.events import AssistantMessage, ErrorEvent, SessionEvent, StopReason, ToolResult
+from agent.core.events import (
+    AssistantMessage,
+    ContextWindowEvent,
+    ErrorEvent,
+    SessionEvent,
+    StopReason,
+    ToolResult,
+)
 from agent.core.guardrails import LoopGuardrails
 from agent.core.loop_helpers import (
     append_internal_user_message,
@@ -24,7 +31,7 @@ from agent.core.loop_helpers import (
     parse_stop,
 )
 from agent.core.provider_runner import ProviderRequestFailed, provider_request
-from agent.core.session import Session, compact_to_token_budget, trim_to_token_budget
+from agent.core.session import Session, compact_to_token_budget, estimate_token_count, trim_to_token_budget
 from agent.core.state import AgentState
 from agent.extensions.api import BlockResult
 from agent.extensions.manager import ExtensionManager
@@ -93,10 +100,49 @@ async def run_loop(
             session.increment_step()
             messages = session.to_messages()
             _ctx_window = config.effective_context_window()
-            if _ctx_window > 0 and config.context_strategy == "sliding_window":
+            _msgs_before = len(messages)
+            if _ctx_window > 0 and config.context_strategy == "summarize":
+                if config.compaction.enabled:
+                    try:
+                        from agent.core.compaction.compaction import compact_session
+
+                        result = await compact_session(
+                            session, provider, _ctx_window, config.compaction
+                        )
+                        if result:
+                            messages = session.to_messages()
+                            log.info(
+                                "Compacted context: %d tokens before, %d events removed",
+                                result.tokens_before,
+                                result.events_removed,
+                                extra=log_extra,
+                            )
+                    except Exception:
+                        log.exception("Compaction failed, falling back to trim", extra=log_extra)
+                # Safety net: trim if still over budget (or if compaction disabled)
+                messages = trim_to_token_budget(messages, _ctx_window)
+            elif _ctx_window > 0 and config.context_strategy == "sliding_window":
                 messages = trim_to_token_budget(messages, _ctx_window)
             elif _ctx_window > 0 and config.context_strategy == "compact":
                 messages = compact_to_token_budget(messages, _ctx_window)
+
+            # Emit a context-window fill event so the UI can show a live indicator.
+            # Fired unconditionally when a context window is configured so the bar
+            # updates every turn, not only when messages are dropped.
+            if _ctx_window > 0:
+                _ctx_tokens = estimate_token_count(messages)
+                emit(
+                    session,
+                    on_event,
+                    ContextWindowEvent(
+                        ctx_tokens=_ctx_tokens,
+                        ctx_window=_ctx_window,
+                        msgs_before=_msgs_before,
+                        msgs_after=len(messages),
+                        msgs_dropped=max(0, _msgs_before - len(messages)),
+                        strategy=config.context_strategy,
+                    ),
+                )
 
             if extension_manager is not None:
                 await extension_manager.fire_event("before_turn", None)

@@ -73,6 +73,9 @@ def _collect_layers(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    tool_snippets: dict[str, str] | None = None,
+    tool_guidelines: list[str] | None = None,
+    skills_text: str | None = None,
 ) -> list[PromptLayer]:
     """Return all prompt layers in assembly order, including missing ones."""
     layers: list[PromptLayer] = []
@@ -83,6 +86,25 @@ def _collect_layers(
         system_prompt_hint=system_prompt_hint,
     )
     layers.append(PromptLayer("aar-system", "[built-in]", None, base_text, True))
+
+    # Tools layer — one-line snippets + conditional guidelines
+    if tool_snippets or tool_guidelines:
+        tools_lines: list[str] = []
+        if tool_snippets:
+            tools_lines.append("Available tools:")
+            for name, snippet in tool_snippets.items():
+                tools_lines.append(f"- {name}: {snippet}")
+        if tool_guidelines:
+            tools_lines.append("")
+            tools_lines.append("Guidelines:")
+            for g in tool_guidelines:
+                tools_lines.append(f"- {g}")
+        tools_text = "\n".join(tools_lines)
+        layers.append(PromptLayer("tools", "[built-in]", None, tools_text, True))
+
+    # Skills layer — available skill names and descriptions for on-demand loading
+    if skills_text:
+        layers.append(PromptLayer("skills", "[built-in]", None, skills_text, True))
 
     global_dir = Path.home() / ".aar"
 
@@ -141,22 +163,31 @@ def build_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    tool_snippets: dict[str, str] | None = None,
+    tool_guidelines: list[str] | None = None,
+    skills_text: str | None = None,
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
     Layers (all optional except base):
       1. Base             — runtime facts (OS, cwd, shell)
-      2. Global           — ~/.aar/rules.md (user-wide preferences)
-      3. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
-      4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
-      5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
+      2. Tools            — one-line snippets + conditional guidelines (when provided)
+      3. Skills           — available skill names for on-demand loading
+      4. Global           — ~/.aar/rules.md (user-wide preferences)
+      5. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
+      6. Project          — <project_rules_dir>/rules.md (project-specific instructions)
+      7. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
     layers = _collect_layers(
         project_rules_dir=project_rules_dir,
         sandbox_mode=sandbox_mode,
         wsl_distro=wsl_distro,
         system_prompt_hint=system_prompt_hint,
+        tool_snippets=tool_snippets,
+        tool_guidelines=tool_guidelines,
+        skills_text=skills_text,
     )
+
     return "\n---\n".join(layer.text for layer in layers if layer.loaded)
 
 
@@ -363,6 +394,19 @@ class TUIConfig(BaseModel):
     layout: dict = Field(default_factory=dict)
 
 
+class CompactionConfig(BaseModel):
+    """LLM-based context compaction settings.
+
+    When enabled, older conversation messages are periodically summarized
+    by the LLM and replaced with a structured checkpoint, keeping the
+    context within the model's window without simply dropping history.
+    """
+
+    enabled: bool = False  # opt-in — triggers an extra LLM call per compaction
+    reserve_tokens: int = 16_384  # tokens reserved for the next response
+    keep_recent_tokens: int = 20_000  # tokens of recent context to preserve verbatim
+
+
 class AgentConfig(BaseModel):
     provider: str | ProviderConfig = Field(default_factory=ProviderConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
@@ -370,12 +414,15 @@ class AgentConfig(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
+    compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    skills_dirs: list[str] = Field(default_factory=list)  # extra skill discovery paths
+    skills_enabled: bool = True  # set to False to disable skill loading
     max_steps: int = 50
     timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
-    context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "none"
+    context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "summarize" | "none"
     token_budget: int = 0  # max total tokens across the run; 0 = unlimited
     cost_limit: float = 0.0  # max USD cost across the run; 0.0 = unlimited
     token_warning_threshold: float = 0.8  # fraction of budget to trigger warning style

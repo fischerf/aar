@@ -264,3 +264,69 @@ class TestStopReason:
     def test_string_comparison(self):
         assert StopReason.END_TURN == "end_turn"
         assert StopReason.TOOL_USE.value == "tool_use"
+
+
+# ---------------------------------------------------------------------------
+# ContextWindowEvent
+# ---------------------------------------------------------------------------
+
+
+class TestContextWindowEvent:
+    def test_default_fields(self):
+        from agent.core.events import ContextWindowEvent, EventType
+
+        ev = ContextWindowEvent()
+        assert ev.type == EventType.CONTEXT_WINDOW
+        assert ev.ctx_tokens == 0
+        assert ev.ctx_window == 0
+        assert ev.msgs_before == 0
+        assert ev.msgs_after == 0
+        assert ev.msgs_dropped == 0
+        assert ev.strategy == ""
+
+    def test_fields_set(self):
+        from agent.core.events import ContextWindowEvent
+
+        ev = ContextWindowEvent(
+            ctx_tokens=4096,
+            ctx_window=8192,
+            msgs_before=20,
+            msgs_after=15,
+            msgs_dropped=5,
+            strategy="sliding_window",
+        )
+        assert ev.ctx_tokens == 4096
+        assert ev.ctx_window == 8192
+        assert ev.msgs_before == 20
+        assert ev.msgs_after == 15
+        assert ev.msgs_dropped == 5
+        assert ev.strategy == "sliding_window"
+
+    def test_round_trip(self):
+        from agent.core.events import ContextWindowEvent
+
+        ev = ContextWindowEvent(
+            ctx_tokens=3000,
+            ctx_window=8192,
+            msgs_before=10,
+            msgs_after=8,
+            msgs_dropped=2,
+            strategy="sliding_window",
+        )
+        restored = deserialize_event(ev.model_dump())
+        assert isinstance(restored, ContextWindowEvent)
+        assert restored.ctx_tokens == 3000
+        assert restored.ctx_window == 8192
+        assert restored.msgs_dropped == 2
+        assert restored.strategy == "sliding_window"
+
+    def test_in_event_type_map(self):
+        from agent.core.events import EVENT_TYPE_MAP, ContextWindowEvent, EventType
+
+        assert EventType.CONTEXT_WINDOW in EVENT_TYPE_MAP
+        assert EVENT_TYPE_MAP[EventType.CONTEXT_WINDOW] is ContextWindowEvent
+
+    def test_context_window_in_any_event_union(self):
+        """ContextWindowEvent must be part of AnyEvent (checked via EVENT_TYPE_MAP coverage)."""
+        for et in EventType:
+            assert et in EVENT_TYPE_MAP, f"EventType.{et.name} missing from EVENT_TYPE_MAP"

@@ -16,6 +16,7 @@ from agent.core.agent import Agent as AarAgent
 from agent.core.config import AgentConfig, ProviderConfig
 from agent.core.events import (
     AssistantMessage,
+    ContextWindowEvent,
     Event,
     ProviderMeta,
     ReasoningBlock,
@@ -869,6 +870,7 @@ class AarAcpAgent:
         update_tasks: list[asyncio.Task] = []
         streamed_chunks = False
         title_sent = False
+        _ctx_window_size: int = 0  # updated by ContextWindowEvent; used to fix UsageUpdate semantics
 
         if first_push:
             _push_now = self._spawn(
@@ -891,7 +893,7 @@ class AarAcpAgent:
         _tc_args: dict[str, dict[str, Any]] = {}
 
         def on_event(event: Event) -> None:
-            nonlocal streamed_chunks, title_sent
+            nonlocal streamed_chunks, title_sent, _ctx_window_size
 
             if isinstance(event, StreamChunk) and not event.finished and event.text:
                 streamed_chunks = True
@@ -973,9 +975,21 @@ class AarAcpAgent:
                     )
                 )
 
+            elif isinstance(event, ContextWindowEvent):
+                # Track the context window capacity so the UsageUpdate below
+                # can send the correct ACP semantics: size=capacity, used=filled.
+                _ctx_window_size = event.ctx_window
+
             elif isinstance(event, ProviderMeta) and event.usage:
-                used = event.usage.get("input_tokens", 0) + event.usage.get("output_tokens", 0)
-                size = event.usage.get("input_tokens", 0)
+                # ACP UsageUpdate semantics (from the SDK schema):
+                #   size  — total context window capacity in tokens
+                #   used  — tokens currently in context (input tokens this turn)
+                # When sliding-window management is active we have accurate
+                # values from ContextWindowEvent; otherwise fall back to
+                # input_tokens as the best available approximation.
+                _input = event.usage.get("input_tokens", 0)
+                size = _ctx_window_size if _ctx_window_size > 0 else _input
+                used = _input
                 _push(
                     UsageUpdate(
                         cost=Cost(

@@ -252,10 +252,12 @@ async def fetch_url(url: str) -> str:
         r = await client.get(url)
         return r.text
 
-# Or explicit ToolSpec
+# Or explicit ToolSpec (with prompt metadata for the system prompt)
 agent.registry.add(ToolSpec(
     name="count_lines",
     description="Count the lines in a file",
+    prompt_snippet="Count lines in a file",
+    prompt_guidelines=["Use count_lines instead of bash wc -l."],
     input_schema={
         "type": "object",
         "properties": {"path": {"type": "string"}},

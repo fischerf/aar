@@ -105,6 +105,9 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
                 "use start_line/end_line to read specific sections. "
                 "Accepts relative or absolute paths (Windows or Unix style)."
             ),
+            prompt_snippet=(
+                "Read file contents (supports line ranges; large files return a preview)"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -140,6 +143,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="write_file",
             description="Write content to a file. Creates parent directories if needed. Use paths relative to the working directory, e.g. src\\main.py.",
+            prompt_snippet="Create or overwrite a file",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -160,6 +164,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="edit_file",
             description="Replace an exact string in a file. The old_string must appear exactly once. Use paths relative to the working directory.",
+            prompt_snippet="Replace an exact unique string in a file",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -181,6 +186,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="list_directory",
             description="List files and directories at a given path. Shows the resolved absolute path. Defaults to the current working directory.",
+            prompt_snippet="List files and directories at a path",
             input_schema={
                 "type": "object",
                 "properties": {

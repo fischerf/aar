@@ -64,6 +64,23 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools.keys())
 
+    def get_prompt_snippets(self) -> dict[str, str]:
+        """Return ``{name: snippet}`` for tools with a non-empty ``prompt_snippet``."""
+        return {
+            spec.name: spec.prompt_snippet for spec in self._tools.values() if spec.prompt_snippet
+        }
+
+    def get_prompt_guidelines(self) -> list[str]:
+        """Return a deduplicated list of guidelines from all active tools."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for spec in self._tools.values():
+            for g in spec.prompt_guidelines:
+                if g not in seen:
+                    seen.add(g)
+                    result.append(g)
+        return result
+
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 

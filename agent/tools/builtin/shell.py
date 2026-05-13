@@ -77,6 +77,7 @@ def register_shell_tools(
                 f"Pass a larger timeout for slow commands (package installs, builds, "
                 f"docker pulls); the default is {default_timeout}s."
             ),
+            prompt_snippet=("Execute a shell command (returns stdout, stderr, exit code)"),
             input_schema={
                 "type": "object",
                 "properties": {

@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from agent.core.agent import Agent as AarAgent
 from agent.core.config import AgentConfig
-from agent.core.events import AssistantMessage, Event, StreamChunk
+from agent.core.events import AssistantMessage, ContextWindowEvent, Event, StreamChunk
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.memory.session_store import SessionStore
@@ -90,6 +90,10 @@ class AcpRun(BaseModel):
     error: str | None = None
     created_at: str = Field(default_factory=lambda: _now_iso())
     finished_at: str | None = None
+    # Context-window fill — updated live during streaming runs
+    ctx_tokens: int = 0
+    ctx_window: int = 0
+    msgs_dropped: int = 0
 
     def finish(self, status: RunStatus, error: str | None = None) -> None:
         self.status = status
@@ -143,6 +147,19 @@ class RunCancelledEvent(BaseModel):
     run: AcpRun
 
 
+class ContextWindowUpdatedEvent(BaseModel):
+    """SSE event emitted each turn when context-window management trims the history."""
+
+    type: Literal["context_window_updated"] = "context_window_updated"
+    run_id: str
+    ctx_tokens: int = 0
+    ctx_window: int = 0
+    msgs_dropped: int = 0
+    msgs_before: int = 0
+    msgs_after: int = 0
+    strategy: str = ""
+
+
 AcpSseEvent = (
     RunCreatedEvent
     | MessageCreatedEvent
@@ -150,6 +167,7 @@ AcpSseEvent = (
     | RunCompletedEvent
     | RunFailedEvent
     | RunCancelledEvent
+    | ContextWindowUpdatedEvent
 )
 
 
@@ -298,6 +316,23 @@ class AcpTransport:
                         queue.put_nowait(evt)
                     else:
                         run.output.append(AcpMessage.from_text("assistant", event.content))
+                elif isinstance(event, ContextWindowEvent):
+                    # Update run metadata so REST pollers see the latest fill state.
+                    run.ctx_tokens = event.ctx_tokens
+                    run.ctx_window = event.ctx_window
+                    run.msgs_dropped = event.msgs_dropped
+                    if queue:
+                        cw_evt = ContextWindowUpdatedEvent(
+                            run_id=run.run_id,
+                            ctx_tokens=event.ctx_tokens,
+                            ctx_window=event.ctx_window,
+                            msgs_dropped=event.msgs_dropped,
+                            msgs_before=event.msgs_before,
+                            msgs_after=event.msgs_after,
+                            strategy=event.strategy,
+                        )
+                        record.acp_events.append(cw_evt)
+                        queue.put_nowait(cw_evt)
 
             aar_agent.on_event(on_event)
 

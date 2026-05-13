@@ -72,6 +72,9 @@ class Agent:
         # Register built-in tools based on config
         self._register_builtins()
 
+        # Build tool-aware system prompt
+        self._rebuild_system_prompt()
+
     def _register_builtins(self) -> None:
         from agent.tools.builtin.search import register_search_tools
 
@@ -99,6 +102,33 @@ class Agent:
         for name in newly_added - enabled:
             if name in self.registry._tools:
                 del self.registry._tools[name]
+
+    def _rebuild_system_prompt(self) -> None:
+        """Rebuild the system prompt with current tool snippets, guidelines, and skills."""
+        from agent.core.config import build_system_prompt
+
+        # Load skills if enabled
+        skills_text: str | None = None
+        if self.config.skills_enabled:
+            from agent.core.skills import format_skills_for_prompt, load_skills
+
+            result = load_skills(
+                project_rules_dir=self.config.project_rules_dir,
+                extra_dirs=self.config.skills_dirs or None,
+            )
+            if result.skills:
+                skills_text = format_skills_for_prompt(result.skills)
+
+        sb = self.config.safety.sandbox
+        self.config.system_prompt = build_system_prompt(
+            project_rules_dir=self.config.project_rules_dir,
+            sandbox_mode=sb.mode,
+            wsl_distro=sb.wsl.distro,
+            system_prompt_hint=sb.wsl.system_prompt_hint,
+            tool_snippets=self.registry.get_prompt_snippets() or None,
+            tool_guidelines=self.registry.get_prompt_guidelines() or None,
+            skills_text=skills_text,
+        )
 
     def on_event(self, callback: Callable[[Event], Any]) -> None:
         """Register a callback that fires for every event during a run.
@@ -195,7 +225,10 @@ class Agent:
         if count:
             logger.info("Registered %d extension tool(s)", count)
 
-        # Append system prompt additions
+        # Rebuild prompt with updated tool set (includes extension tools)
+        self._rebuild_system_prompt()
+
+        # Append system prompt additions from extensions
         additions = mgr.get_system_prompt_additions()
         if additions:
             self.config.system_prompt = self.config.system_prompt + "\n---\n" + additions

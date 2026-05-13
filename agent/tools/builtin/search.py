@@ -176,6 +176,11 @@ def register_search_tools(registry: ToolRegistry) -> None:
                 "paths. Use include_pattern to narrow the search to specific file types "
                 "(e.g. '**/*.py'). Results are paginated — increase max_results if needed."
             ),
+            prompt_snippet="Search file contents with regex",
+            prompt_guidelines=[
+                "Use grep to search file contents (symbols, patterns); "
+                "use find_files for path/filename searches.",
+            ],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -219,6 +224,7 @@ def register_search_tools(registry: ToolRegistry) -> None:
                 "directory. Searches recursively, skipping hidden and generated directories. "
                 "Use patterns like '*.py', '**/*.test.js', or 'src/**/*.ts'."
             ),
+            prompt_snippet="Find files by glob pattern",
             input_schema={
                 "type": "object",
                 "properties": {

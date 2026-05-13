@@ -132,6 +132,63 @@ For efficient codebase navigation, prefer specialised tools over `bash`:
 | Run tests | `bash` | Needs shell execution |
 | View directory structure | `list_directory` | Cleaner than `ls` output |
 
+## Tool-aware system prompt
+
+Every built-in tool carries two optional metadata fields on its `ToolSpec`:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `prompt_snippet` | `str` | One-line summary shown in the system prompt's "Available tools" section |
+| `prompt_guidelines` | `list[str]` | Conditional guidelines injected when this tool is active |
+
+When any registered tool has a non-empty `prompt_snippet`, the system prompt
+automatically includes an **Available tools** section between the base runtime
+facts and the rules layers. This gives the LLM a quick-reference overview of
+what tools exist before it parses the full JSON tool schemas.
+
+Example output in the assembled system prompt:
+
+```
+Available tools:
+- read_file: Read file contents (supports line ranges; large files return a preview)
+- write_file: Create or overwrite a file
+- edit_file: Replace an exact unique string in a file
+- list_directory: List files and directories at a path
+- bash: Execute a shell command (returns stdout, stderr, exit code)
+- grep: Search file contents with regex
+- find_files: Find files by glob pattern
+
+Guidelines:
+- Use grep to search file contents (symbols, patterns); use find_files for path/filename searches.
+```
+
+### Adding prompt metadata to custom tools
+
+When registering your own tools, set `prompt_snippet` and optionally
+`prompt_guidelines` on the `ToolSpec` to include them in the system prompt:
+
+```python
+from agent.tools.schema import SideEffect, ToolSpec
+
+agent.registry.add(ToolSpec(
+    name="fetch_url",
+    description="Fetch the contents of a URL and return the body as text.",
+    prompt_snippet="Fetch a URL and return its contents",
+    prompt_guidelines=["Prefer fetch_url over bash curl for simple HTTP GETs."],
+    input_schema={...},
+    side_effects=[SideEffect.NETWORK],
+    handler=my_handler,
+))
+```
+
+The system prompt is rebuilt automatically whenever tools are registered
+(including after extensions load), so extension tools with snippets are
+included too.
+
+Run `aar prompt` to see the assembled system prompt with the tools section.
+
+---
+
 ## Configuration
 
 In `config.json`:

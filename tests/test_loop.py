@@ -486,8 +486,96 @@ async def test_loop_handles_asyncio_cancelled_error(tool_registry, default_confi
 
 
 # ---------------------------------------------------------------------------
-# Observability — timing fields
+# ContextWindowEvent emission
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loop_emits_context_window_event(mock_provider, tool_registry):
+    """Loop should emit one ContextWindowEvent per turn when context_window is set."""
+    from agent.core.events import ContextWindowEvent
+
+    mock_provider.enqueue_text("Hello", stop="end_turn")
+    session = Session()
+    session.add_user_message("Hi")
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1"),
+        max_steps=10,
+        timeout=30.0,
+        context_window=8192,
+        context_strategy="sliding_window",
+    )
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    await run_loop(session, mock_provider, executor, config, on_event=collected.append)
+
+    ctx_events = [e for e in collected if isinstance(e, ContextWindowEvent)]
+    assert len(ctx_events) == 1
+    ev = ctx_events[0]
+    assert ev.ctx_window == 8192
+    assert ev.strategy == "sliding_window"
+    assert ev.ctx_tokens >= 0
+    assert ev.msgs_before >= 1
+    assert ev.msgs_dropped == 0  # small conversation — nothing trimmed
+
+
+@pytest.mark.asyncio
+async def test_loop_context_window_event_dropped_messages(mock_provider, tool_registry):
+    """msgs_dropped should be non-zero when the context window forces trimming."""
+    from agent.core.events import ContextWindowEvent
+
+    mock_provider.enqueue_text("Done", stop="end_turn")
+    session = Session()
+    # 15 user + 15 assistant = 30 history messages, each ~100 tokens
+    for _ in range(15):
+        session.events.append(UserMessage(content="x" * 400))
+        session.events.append(AssistantMessage(content="y" * 400))
+    session.add_user_message("Final question")
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1"),
+        max_steps=10,
+        timeout=30.0,
+        context_window=100,  # tiny: only ~1 message fits
+        context_strategy="sliding_window",
+    )
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    await run_loop(session, mock_provider, executor, config, on_event=collected.append)
+
+    ctx_events = [e for e in collected if isinstance(e, ContextWindowEvent)]
+    assert len(ctx_events) == 1
+    ev = ctx_events[0]
+    assert ev.msgs_dropped > 0
+    assert ev.msgs_after < ev.msgs_before
+    assert ev.ctx_tokens <= ev.ctx_window
+
+
+@pytest.mark.asyncio
+async def test_loop_no_context_window_event_when_window_zero(mock_provider, tool_registry):
+    """No ContextWindowEvent should be emitted when context_window is 0 (unset)."""
+    from agent.core.events import ContextWindowEvent
+
+    mock_provider.enqueue_text("Hello", stop="end_turn")
+    session = Session()
+    session.add_user_message("Hi")
+
+    # default config has context_window=0 — no window management
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1"),
+        max_steps=10,
+        timeout=30.0,
+    )
+
+    collected: list = []
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    await run_loop(session, mock_provider, executor, config, on_event=collected.append)
+
+    ctx_events = [e for e in collected if isinstance(e, ContextWindowEvent)]
+    assert len(ctx_events) == 0
 
 
 @pytest.mark.asyncio

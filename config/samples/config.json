@@ -275,12 +275,19 @@
     "reserve_tokens": 512,
     "reserve_cost_fraction": 0.1
   },
+  "compaction": {
+    "enabled": true,
+    "reserve_tokens": 16384,
+    "keep_recent_tokens": 20000
+  },
+  "skills_dirs": [],
+  "skills_enabled": true,
   "max_steps": 50,
   "timeout": 0.0,
   "max_retries": 3,
   "streaming": true,
   "context_window": 200000,
-  "context_strategy": "sliding_window",
+  "context_strategy": "summarize",
   "token_budget": 500000,
   "cost_limit": 5.0,
   "token_warning_threshold": 0.8,

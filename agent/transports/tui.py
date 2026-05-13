@@ -18,6 +18,7 @@ from agent.core.config import AgentConfig
 from agent.core.events import (
     AssistantMessage,
     AudioBlock,
+    ContextWindowEvent,
     ErrorEvent,
     Event,
     ImageURLBlock,
@@ -59,6 +60,10 @@ class TUIRenderer:
         self._extension_panels: dict[str, Callable[[Console], None]] = {}
         self._streaming_active = False
         self._config: AgentConfig | None = config
+        # Context-window fill state (updated by ContextWindowEvent each turn)
+        self._ctx_tokens: int = 0
+        self._ctx_window: int = 0
+        self._msgs_dropped: int = 0
 
     # ------------------------------------------------------------------
     # Theme switching
@@ -218,6 +223,12 @@ class TUIRenderer:
                 )
             )
 
+        elif isinstance(event, ContextWindowEvent):
+            # Silent state update — the fill bar is rendered alongside ProviderMeta.
+            self._ctx_tokens = event.ctx_tokens
+            self._ctx_window = event.ctx_window
+            self._msgs_dropped = event.msgs_dropped
+
         elif isinstance(event, ProviderMeta):
             u = event.usage
             self._usage_total["input_tokens"] += u.get("input_tokens", 0)
@@ -258,6 +269,21 @@ class TUIRenderer:
                 ),
                 justify="right",
             )
+            # Context-window fill bar (printed right after the token-usage line)
+            if self._ctx_window > 0:
+                from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+                h = t.header
+                ctx_bar = format_ctx_window_bar(
+                    self._ctx_tokens,
+                    self._ctx_window,
+                    self._msgs_dropped,
+                    h.tokens_style,
+                    h.tokens_warning_mid_style,
+                    h.tokens_warning_style,
+                )
+                if ctx_bar is not None:
+                    self.console.print(ctx_bar, justify="right")
 
     def render_status_bar(self, session: Session) -> None:
         """Print a status bar with session info."""
@@ -280,6 +306,21 @@ class TUIRenderer:
             f"[{t.dim_text}]Steps: {session.step_count}[/]",
             f"[{t.dim_text}]{token_info}[/]",
         )
+        # Context-window fill row (shown only when window management is active)
+        if self._ctx_window > 0:
+            from agent.transports.tui_utils.formatting import format_ctx_window_bar
+
+            h = t.header
+            ctx_bar = format_ctx_window_bar(
+                self._ctx_tokens,
+                self._ctx_window,
+                self._msgs_dropped,
+                h.tokens_style,
+                h.tokens_warning_mid_style,
+                h.tokens_warning_style,
+            )
+            if ctx_bar is not None:
+                status.add_row("", "", ctx_bar)
         self.console.print(status)
 
     def render_welcome(self, extra_commands: list[str] | None = None) -> None:
