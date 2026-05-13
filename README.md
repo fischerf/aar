@@ -300,6 +300,10 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 
 ---
 
+## Author
+
+**Florian Fischer** — [Discord](https://discord.gg/xYJNHJV7Bh)
+
 ## License
 
 Apache License 2.0
