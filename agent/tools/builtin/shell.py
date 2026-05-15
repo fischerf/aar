@@ -71,11 +71,7 @@ def register_shell_tools(
             name="bash",
             description=(
                 "Execute a shell command. Returns stdout, stderr, and exit code. "
-                "On Windows commands run via WSL (bash -c). Standard Unix/bash "
-                "syntax works (ls, cat, grep, find, …). Use Windows-style paths for "
-                "file tools, but bash syntax for shell commands. "
-                f"Pass a larger timeout for slow commands (package installs, builds, "
-                f"docker pulls); the default is {default_timeout}s."
+                f"Default timeout: {default_timeout}s — increase for slow commands."
             ),
             prompt_snippet=("Execute a shell command (returns stdout, stderr, exit code)"),
             input_schema={

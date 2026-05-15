@@ -73,7 +73,7 @@ def _collect_layers(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
-    tool_snippets: dict[str, str] | None = None,
+    tool_snippets: dict[str, str] | None = None,  # deprecated — ignored
     tool_guidelines: list[str] | None = None,
     skills_text: str | None = None,
 ) -> list[PromptLayer]:
@@ -87,20 +87,11 @@ def _collect_layers(
     )
     layers.append(PromptLayer("aar-system", "[built-in]", None, base_text, True))
 
-    # Tools layer — one-line snippets + conditional guidelines
-    if tool_snippets or tool_guidelines:
-        tools_lines: list[str] = []
-        if tool_snippets:
-            tools_lines.append("Available tools:")
-            for name, snippet in tool_snippets.items():
-                tools_lines.append(f"- {name}: {snippet}")
-        if tool_guidelines:
-            tools_lines.append("")
-            tools_lines.append("Guidelines:")
-            for g in tool_guidelines:
-                tools_lines.append(f"- {g}")
-        tools_text = "\n".join(tools_lines)
-        layers.append(PromptLayer("tools", "[built-in]", None, tools_text, True))
+    # Tools layer — only behavioural guidelines (snippets are redundant with
+    # the JSON tool schemas the provider already sends).
+    if tool_guidelines:
+        guidelines_text = "\n".join(["Tool guidelines:"] + [f"- {g}" for g in tool_guidelines])
+        layers.append(PromptLayer("tools", "[built-in]", None, guidelines_text, True))
 
     # Skills layer — available skill names and descriptions for on-demand loading
     if skills_text:
@@ -163,7 +154,7 @@ def build_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
-    tool_snippets: dict[str, str] | None = None,
+    tool_snippets: dict[str, str] | None = None,  # deprecated — kept for back-compat
     tool_guidelines: list[str] | None = None,
     skills_text: str | None = None,
 ) -> str:
@@ -171,7 +162,8 @@ def build_system_prompt(
 
     Layers (all optional except base):
       1. Base             — runtime facts (OS, cwd, shell)
-      2. Tools            — one-line snippets + conditional guidelines (when provided)
+      2. Tools            — behavioural guidelines only (tool schemas are sent
+                            separately via the provider's ``tools`` parameter)
       3. Skills           — available skill names for on-demand loading
       4. Global           — ~/.aar/rules.md (user-wide preferences)
       5. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
