@@ -2,10 +2,47 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
+
+# Extensions that must keep LF line-endings even on Windows (WSL compat)
+_LF_EXTENSIONS = frozenset(
+    {
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".py",
+        ".rb",
+        ".pl",
+        ".lua",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".json",
+        ".jsonl",
+    }
+)
+_LF_FILENAMES = frozenset({"Makefile", "Dockerfile", ".gitattributes"})
+
+
+def _should_force_lf(p: Path, content: str) -> bool:
+    """Return True when the file should be written with LF, not CRLF.
+
+    On Windows + WSL, CRLF in shell scripts causes 'set: -\\r: invalid option'.
+    We force LF for known script/config extensions, shebang-bearing files, and
+    common filenames that must stay Unix-compatible.
+    """
+    if p.suffix.lower() in _LF_EXTENSIONS:
+        return True
+    if p.name in _LF_FILENAMES:
+        return True
+    if content.startswith("#!"):  # shebang
+        return True
+    return False
 
 
 def register_filesystem_tools(registry: ToolRegistry) -> None:
@@ -55,7 +92,12 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         """Write content to a file, creating directories as needed."""
         p = Path(path).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        if os.name == "nt" and _should_force_lf(p, content):
+            # Write raw bytes to avoid Python's text-mode CRLF conversion.
+            # The LLM sends \n — we must not let Windows corrupt that to \r\n.
+            p.write_bytes(content.encode("utf-8"))
+        else:
+            p.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} bytes to {p}"
 
     async def edit_file(path: str, old_string: str, new_string: str) -> str:
