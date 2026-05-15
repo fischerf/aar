@@ -114,6 +114,7 @@ Aar has several independent timeouts that operate at different layers. They inte
 |----------|------|---------|-------|
 | **Ollama** | `extra.read_timeout` | `null` | Controls the streaming read phase only. `null` is strongly recommended for local models — response generation can take many minutes. |
 | **Anthropic** | `extra.timeout` | `null` → SDK default (600 s) | Passed directly to `AsyncAnthropic(timeout=...)`. `null` uses the SDK's own default. |
+| **Anthropic** | `extra.prompt_caching` | `false` | Enable [prompt caching](providers.md#prompt-caching) to cut repeated system-prompt costs by ~90% on turns 2+. |
 | **OpenAI** | `extra.timeout` | `null` → SDK default (600 s) | Passed directly to `AsyncOpenAI(timeout=...)`. `null` uses the SDK's own default. |
 | **Gemini** | `extra.timeout` | `120.0` s | Passed to `httpx.Timeout(timeout, connect=10.0)` (HTTP mode) or SDK client (SDK mode). Increase for Pro with large thinking budgets. |
 | **Generic** | `extra.timeout` | `60.0` s | Passed to `httpx.Timeout(timeout, connect=10.0)`. Covers the full round-trip. Increase for slow proxies. |

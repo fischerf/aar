@@ -18,6 +18,7 @@ FRAMEWORK_EXTRA_KEYS: frozenset[str] = frozenset(
         "auth_header",
         "include_thoughts",
         "keep_alive",
+        "prompt_caching",
         "quota",
         "read_timeout",
         "supports_audio",
