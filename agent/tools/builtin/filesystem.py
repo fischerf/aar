@@ -143,9 +143,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             name="read_file",
             description=(
                 "Read a file and return its contents with line numbers. "
-                "For large files (>500 lines), returns a preview and line count \u2014 "
-                "use start_line/end_line to read specific sections. "
-                "Accepts relative or absolute paths (Windows or Unix style)."
+                "Large files (>500 lines) return a preview — use start_line/end_line to read sections."
             ),
             prompt_snippet=(
                 "Read file contents (supports line ranges; large files return a preview)"

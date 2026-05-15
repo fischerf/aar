@@ -171,10 +171,7 @@ def register_search_tools(registry: ToolRegistry) -> None:
             name="grep",
             description=(
                 "Search file contents using a regex pattern. Returns matching lines with "
-                "file paths and line numbers. Searches the working directory recursively, "
-                "skipping hidden directories, node_modules, __pycache__, and other generated "
-                "paths. Use include_pattern to narrow the search to specific file types "
-                "(e.g. '**/*.py'). Results are paginated — increase max_results if needed."
+                "file paths and line numbers. Use include_pattern to narrow by file type."
             ),
             prompt_snippet="Search file contents with regex",
             prompt_guidelines=[

@@ -132,9 +132,11 @@ class TestBuildSystemPromptWithTools:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
         prompt = build_system_prompt(project_rules_dir=tmp_path / "norules")
-        assert "Available tools:" not in prompt
+        assert "Tool guidelines:" not in prompt
 
-    def test_tools_section_with_snippets(self, tmp_path, monkeypatch):
+    def test_snippets_no_longer_injected_into_prompt(self, tmp_path, monkeypatch):
+        """prompt_snippet values are NOT duplicated into the system prompt —
+        they already appear in the provider's tools JSON schemas."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
         snippets = {"read_file": "Read a file", "bash": "Run shell commands"}
@@ -142,9 +144,9 @@ class TestBuildSystemPromptWithTools:
             project_rules_dir=tmp_path / "norules",
             tool_snippets=snippets,
         )
-        assert "Available tools:" in prompt
-        assert "- read_file: Read a file" in prompt
-        assert "- bash: Run shell commands" in prompt
+        # Snippets should NOT appear (tool schemas handle this now)
+        assert "Available tools:" not in prompt
+        assert "- read_file: Read a file" not in prompt
 
     def test_tools_section_with_guidelines(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -154,10 +156,11 @@ class TestBuildSystemPromptWithTools:
             project_rules_dir=tmp_path / "norules",
             tool_guidelines=guidelines,
         )
-        assert "Guidelines:" in prompt
+        assert "Tool guidelines:" in prompt
         assert "- Prefer grep over bash for searching." in prompt
 
-    def test_tools_section_with_both(self, tmp_path, monkeypatch):
+    def test_guidelines_with_snippets_only_shows_guidelines(self, tmp_path, monkeypatch):
+        """When both snippets and guidelines are passed, only guidelines appear."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
         snippets = {"grep": "Search contents"}
@@ -167,31 +170,29 @@ class TestBuildSystemPromptWithTools:
             tool_snippets=snippets,
             tool_guidelines=guidelines,
         )
-        assert "Available tools:" in prompt
-        assert "- grep: Search contents" in prompt
-        assert "Guidelines:" in prompt
+        assert "Available tools:" not in prompt
+        assert "Tool guidelines:" in prompt
         assert "- Search before assuming." in prompt
 
-    def test_tools_layer_comes_after_base(self, tmp_path, monkeypatch):
-        """Tools section should appear between the base prompt and any rules."""
+    def test_guidelines_layer_comes_after_base(self, tmp_path, monkeypatch):
+        """Guidelines section should appear between the base prompt and any rules."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
-        # Create a project rules file
         rules_dir = tmp_path / "rules"
         rules_dir.mkdir()
         (rules_dir / "rules.md").write_text("Project rules here.", encoding="utf-8")
-        snippets = {"bash": "Shell"}
+        guidelines = ["Use grep for content searches."]
         prompt = build_system_prompt(
             project_rules_dir=rules_dir,
-            tool_snippets=snippets,
+            tool_guidelines=guidelines,
         )
         base_pos = prompt.find("You are a helpful assistant")
-        tools_pos = prompt.find("Available tools:")
+        tools_pos = prompt.find("Tool guidelines:")
         rules_pos = prompt.find("Project rules here.")
         assert base_pos < tools_pos < rules_pos
 
-    def test_empty_snippets_dict_no_tools_section(self, tmp_path, monkeypatch):
-        """Passing an empty dict should not add a tools section."""
+    def test_empty_snippets_and_guidelines_no_tools_section(self, tmp_path, monkeypatch):
+        """Passing empty dicts/lists should not add a tools section."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
         prompt = build_system_prompt(
@@ -199,6 +200,7 @@ class TestBuildSystemPromptWithTools:
             tool_snippets={},
             tool_guidelines=[],
         )
+        assert "Tool guidelines:" not in prompt
         assert "Available tools:" not in prompt
 
 

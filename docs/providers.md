@@ -90,7 +90,71 @@ config = AgentConfig(provider=ProviderConfig(
 ))
 ```
 
-Supports: tools, streaming, extended thinking (reasoning blocks).
+Supports: tools, streaming, extended thinking (reasoning blocks), prompt caching.
+
+### Prompt caching
+
+Anthropic’s prompt caching avoids re-processing the static prefix (system prompt +
+tool definitions) on every API call.  After the first turn the cached prefix is
+served at **10× lower cost**, which is significant because the prefix is re-sent
+with every step.
+
+**Enable** — add `"prompt_caching": true` to the provider’s `extra` block:
+
+```json
+{
+  "providers": {
+    "claude": {
+      "name": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "extra": {
+        "prompt_caching": true
+      }
+    }
+  }
+}
+```
+
+**How it works** — when enabled, Aar adds `cache_control: {"type": "ephemeral"}`
+breakpoints to the last system-prompt content block and the last tool definition.
+Anthropic caches everything from the start of the request up to these breakpoints.
+On turn 2+ the API returns `cache_read_input_tokens` instead of re-processing the
+prefix.
+
+**Cost implications:**
+
+| Turn | Without caching | With caching |
+|------|----------------|--------------|
+| Turn 1 (cold) | 2,400 tok at full price | 2,400 tok at 1.25× (cache write premium) |
+| Turns 2–N (warm) | 2,400 tok at full price each | 2,400 tok at 0.1× each (cache read) |
+| **6-turn session** | 14,400 full-price tokens | 3,000 + 12,000 × 0.1 = **4,200 tokens effective** |
+
+For a typical 6-step task, prompt caching reduces the overhead from the static
+prefix by roughly **70–80%**.
+
+**Metrics** — when caching is active, `ProviderMeta.usage` includes two extra keys:
+
+| Key | Meaning |
+|-----|--------|
+| `cache_read_tokens` | Tokens served from cache (cheap) |
+| `cache_write_tokens` | Tokens written to cache on the first call |
+
+These are already captured by Aar and used in cost estimation (see
+[Tokens §6](tokens.md#6-cost-estimation)).  The `/inspect` command and session
+JSONL files include them when present.
+
+**Requirements:**
+
+- Anthropic API (direct or via a proxy that preserves `cache_control` fields)
+- `anthropic` Python SDK ≥ 0.40
+- The cached prefix must be ≥ 1,024 tokens (Anthropic minimum); a typical Aar
+  system prompt + 7 built-in tools comfortably exceeds this
+
+**When to leave it off:**
+
+- Corporate API proxies that strip unknown fields from the request body
+- Single-turn `aar run` invocations (no second turn to benefit from the cache)
+- Providers other than Anthropic (the flag is ignored for OpenAI, Ollama, etc.)
 
 ## OpenAI
 
