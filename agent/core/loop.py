@@ -31,7 +31,13 @@ from agent.core.loop_helpers import (
     parse_stop,
 )
 from agent.core.provider_runner import ProviderRequestFailed, provider_request
-from agent.core.session import Session, compact_to_token_budget, estimate_token_count, trim_to_token_budget
+from agent.core.session import (
+    Session,
+    compact_to_token_budget,
+    estimate_token_count,
+    trim_to_token_budget,
+    truncate_old_tool_results,
+)
 from agent.core.state import AgentState
 from agent.extensions.api import BlockResult
 from agent.extensions.manager import ExtensionManager
@@ -125,6 +131,14 @@ async def run_loop(
                 messages = trim_to_token_budget(messages, _ctx_window)
             elif _ctx_window > 0 and config.context_strategy == "compact":
                 messages = compact_to_token_budget(messages, _ctx_window)
+
+            # Age old tool results to reduce context growth
+            if config.compaction.truncate_old_results:
+                messages = truncate_old_tool_results(
+                    messages,
+                    keep_recent=config.compaction.truncate_keep_recent,
+                    max_chars=config.compaction.truncate_max_chars,
+                )
 
             # Emit a context-window fill event so the UI can show a live indicator.
             # Fired unconditionally when a context window is configured so the bar
@@ -286,6 +300,14 @@ async def run_loop(
 
                 for tr in results:
                     emit(session, on_event, tr)
+
+                # --- Guardrail: bash→acp_terminal pivot hint ---
+                hint = guardrails.observe_tool_results(
+                    session, results, set(tool_executor.registry.names())
+                )
+                if hint:
+                    append_internal_user_message(session, on_event, hint, reason="bash_pivot_hint")
+
                 session.state = AgentState.RUNNING
                 continue
 
@@ -303,6 +325,22 @@ async def run_loop(
                     on_event,
                     guardrails.max_tokens_followup(),
                     reason="max_tokens_recovery",
+                )
+                continue
+
+            if stop == StopReason.END_TURN and guardrails.should_continue_after_premature_end(
+                session, response.content
+            ):
+                log.info(
+                    "Premature end_turn detected at step %d — injecting continuation",
+                    session.step_count,
+                    extra=log_extra,
+                )
+                append_internal_user_message(
+                    session,
+                    on_event,
+                    guardrails.premature_end_followup(),
+                    reason="premature_end_recovery",
                 )
                 continue
 

@@ -286,6 +286,69 @@ def compact_to_token_budget(
     return [first_msg, marker] + tail
 
 
+def truncate_old_tool_results(
+    messages: list[dict[str, Any]],
+    keep_recent: int = 6,
+    max_chars: int = 500,
+) -> list[dict[str, Any]]:
+    """Truncate tool result content in older messages to reduce context size.
+
+    Tool results in the last *keep_recent* user-role messages (containing
+    tool_result blocks) are preserved in full. Older tool results are
+    truncated to *max_chars* with a note showing the original size.
+
+    Truncation only activates when there are more than *keep_recent + 2*
+    tool-result messages total, preventing premature truncation in short
+    sessions where early reads are still needed.
+
+    This operates on the provider message format returned by
+    :func:`events_to_messages` and returns a new list — the input is not
+    mutated.
+    """
+    # Identify indices of messages containing tool_result blocks
+    tool_result_indices: list[int] = []
+    for i, msg in enumerate(messages):
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+        ):
+            tool_result_indices.append(i)
+
+    # Don't truncate until there are enough messages to justify it.
+    # This prevents early file reads from being truncated in short sessions.
+    if len(tool_result_indices) <= keep_recent + 2:
+        return messages  # nothing to truncate
+
+    # Indices to truncate = all except the last `keep_recent`
+    indices_to_truncate = set(tool_result_indices[:-keep_recent])
+
+    result = []
+    for i, msg in enumerate(messages):
+        if i not in indices_to_truncate:
+            result.append(msg)
+            continue
+
+        # Deep-copy and truncate this message's tool_result blocks
+        new_content = []
+        for block in msg["content"]:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                original = block.get("content", "")
+                if isinstance(original, str) and len(original) > max_chars:
+                    truncated = (
+                        original[:max_chars]
+                        + f"\n... [truncated: {len(original)} chars \u2192 {max_chars}]"
+                    )
+                    new_block = {**block, "content": truncated}
+                else:
+                    new_block = block
+                new_content.append(new_block)
+            else:
+                new_content.append(block)
+        result.append({**msg, "content": new_content})
+
+    return result
+
+
 def _tool_results_message(results: list[ToolResult]) -> dict[str, Any]:
     """Build a user message containing tool result blocks."""
     content = []

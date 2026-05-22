@@ -93,6 +93,7 @@ def register_search_tools(registry: ToolRegistry) -> None:
         include_pattern: str = "",
         case_sensitive: bool = False,
         max_results: int = 50,
+        offset: int = 0,
     ) -> str:
         """Search file contents with a regex pattern.
 
@@ -118,7 +119,7 @@ def register_search_tools(registry: ToolRegistry) -> None:
             for lineno, line in enumerate(text.splitlines(), 1):
                 if pattern.search(line):
                     total_matches += 1
-                    if len(matches) < max_results:
+                    if total_matches > offset and len(matches) < max_results:
                         rel = filepath.relative_to(cwd)
                         matches.append(f"{rel}:{lineno}: {line.rstrip()}")
 
@@ -126,14 +127,24 @@ def register_search_tools(registry: ToolRegistry) -> None:
             return "No matches found."
 
         header = f"Found {total_matches} match{'es' if total_matches != 1 else ''}"
-        if total_matches > max_results:
+        if offset > 0:
+            header += f" (offset {offset})"
+        if total_matches > offset + max_results:
+            header += f" (showing {max_results} from position {offset + 1})"
+        elif total_matches > max_results:
             header += f" (showing first {max_results})"
         header += ":\n"
-        return header + "\n".join(matches)
+        result = header + "\n".join(matches)
+        if total_matches <= 10:
+            result += "\n\n(Use read_file with start_line/end_line to see context around matches)"
+        elif total_matches > offset + max_results:
+            result += f"\n\n(Use offset={offset + max_results} to see more results)"
+        return result
 
     async def find_files(
         glob_pattern: str,
         max_results: int = 200,
+        offset: int = 0,
     ) -> str:
         """Find files whose paths match a glob pattern.
 
@@ -157,12 +168,20 @@ def register_search_tools(registry: ToolRegistry) -> None:
         if total == 0:
             return f"No files matching '{glob_pattern}' found."
 
-        shown = files[:max_results]
+        shown = files[offset : offset + max_results]
         header = f"Found {total} file{'s' if total != 1 else ''}"
-        if total > max_results:
-            header += f" (showing first {max_results})"
+        if offset > 0:
+            header += f" (offset {offset})"
+        remaining = total - offset
+        if remaining > max_results:
+            header += f" (showing {max_results} of {remaining} remaining)"
+        elif total > max_results:
+            header += f" (showing {len(shown)})"
         header += ":\n"
-        return header + "\n".join(shown)
+        result = header + "\n".join(shown)
+        if offset + max_results < total:
+            result += f"\n\n(Use offset={offset + max_results} to see more results)"
+        return result
 
     # --- Register tools ---
 
@@ -205,6 +224,11 @@ def register_search_tools(registry: ToolRegistry) -> None:
                         "description": ("Maximum number of matching lines to return. Default: 50."),
                         "default": 50,
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": ("Number of matches to skip (for pagination). Default: 0."),
+                        "default": 0,
+                    },
                 },
                 "required": ["regex"],
             },
@@ -235,6 +259,11 @@ def register_search_tools(registry: ToolRegistry) -> None:
                         "type": "integer",
                         "description": ("Maximum number of file paths to return. Default: 200."),
                         "default": 200,
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": ("Number of files to skip (for pagination). Default: 0."),
+                        "default": 0,
                     },
                 },
                 "required": ["glob_pattern"],

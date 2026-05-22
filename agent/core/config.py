@@ -397,6 +397,9 @@ class CompactionConfig(BaseModel):
     enabled: bool = False  # opt-in — triggers an extra LLM call per compaction
     reserve_tokens: int = 16_384  # tokens reserved for the next response
     keep_recent_tokens: int = 20_000  # tokens of recent context to preserve verbatim
+    truncate_old_results: bool = True
+    truncate_keep_recent: int = 6
+    truncate_max_chars: int = 500
 
 
 class AgentConfig(BaseModel):

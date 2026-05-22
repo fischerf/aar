@@ -237,7 +237,9 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": ["<cwd>/**"],
+    "allowed_paths": [
+      "<cwd>/**"
+    ],
     "sandbox": {
       "mode": "local",
       "local": {},
@@ -261,7 +263,10 @@
         "install_path": null,
         "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
         "pre_install_commands": [],
-        "packages": ["python3", "py3-pip"],
+        "packages": [
+          "python3",
+          "py3-pip"
+        ],
         "package_install_command": "apk add --no-cache {packages}",
         "system_prompt_hint": ""
       }
@@ -276,13 +281,18 @@
   "guardrails": {
     "max_tokens_recoveries": 2,
     "max_repeated_tool_steps": 3,
+    "max_premature_end_recoveries": 2,
     "reserve_tokens": 512,
-    "reserve_cost_fraction": 0.1
+    "reserve_cost_fraction": 0.1,
+    "bash_failure_threshold": 2
   },
   "compaction": {
     "enabled": true,
     "reserve_tokens": 16384,
-    "keep_recent_tokens": 20000
+    "keep_recent_tokens": 20000,
+    "truncate_old_results": true,
+    "truncate_keep_recent": 6,
+    "truncate_max_chars": 500
   },
   "skills_dirs": [],
   "skills_enabled": true,
