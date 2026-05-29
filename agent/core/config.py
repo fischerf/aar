@@ -415,6 +415,7 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3
+    max_rate_limit_retries: int = 5  # separate retry budget for rate-limit errors (longer delays)
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
     context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "summarize" | "none"

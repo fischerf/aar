@@ -40,6 +40,25 @@ _ACP_TERMINAL_HINT = (
     "tools. Try using acp_terminal instead.]"
 )
 
+_READ_ONLY_NUDGE = (
+    "[System] You have spent many steps reading without taking action. "
+    "Summarize what you've learned so far, formulate a concrete plan, and begin "
+    "implementation. Do not read more files unless absolutely necessary for the next step."
+)
+
+_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "list_directory",
+        "grep",
+        "find_files",
+        "find_projects",
+        "read_issue",
+        "whoami",
+        "list_my_issues",
+    }
+)
+
 
 class GuardrailsConfig(BaseModel):
     """Tuning knobs for the mechanical guardrails."""
@@ -50,6 +69,7 @@ class GuardrailsConfig(BaseModel):
     reserve_tokens: int = 512
     reserve_cost_fraction: float = 0.1
     bash_failure_threshold: int = 2
+    read_only_loop_threshold: int = 8
 
 
 def _get_state(session: Session) -> dict[str, Any]:
@@ -63,6 +83,8 @@ def _get_state(session: Session) -> dict[str, Any]:
             "near_budget_warned": False,
             "consecutive_bash_failures": 0,
             "bash_pivot_hinted": False,
+            "consecutive_read_only_steps": 0,
+            "read_only_nudge_given": False,
         }
     return session.metadata[_STATE_KEY]
 
@@ -166,10 +188,35 @@ class LoopGuardrails:
             state["repeated_tool_steps"] = 0
             state["last_tool_signature"] = signature
 
+        # Track consecutive read-only steps
+        all_read_only = all(tc.tool_name in _READ_ONLY_TOOLS for tc in tool_calls)
+        if all_read_only:
+            state["consecutive_read_only_steps"] += 1
+        else:
+            state["consecutive_read_only_steps"] = 0
+
     def is_stuck(self, session: Session) -> bool:
         """Return *True* when the same tool-call pattern has repeated too many times."""
         state = _get_state(session)
         return state["repeated_tool_steps"] >= self.config.max_repeated_tool_steps
+
+    # ------------------------------------------------------------------
+    # Read-only loop detection
+    # ------------------------------------------------------------------
+
+    def get_read_only_nudge(self, session: Session) -> str | None:
+        """Return a nudge message if the agent is stuck in a read-only loop.
+
+        Fires at most once per session.  Returns *None* if the threshold has
+        not been reached or the nudge was already given.
+        """
+        state = _get_state(session)
+        if state["read_only_nudge_given"]:
+            return None
+        if state["consecutive_read_only_steps"] >= self.config.read_only_loop_threshold:
+            state["read_only_nudge_given"] = True
+            return _READ_ONLY_NUDGE
+        return None
 
     # ------------------------------------------------------------------
     # Budget proximity

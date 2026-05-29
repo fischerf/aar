@@ -308,6 +308,18 @@ async def run_loop(
                 if hint:
                     append_internal_user_message(session, on_event, hint, reason="bash_pivot_hint")
 
+                # --- Guardrail: read-only loop nudge ---
+                nudge = guardrails.get_read_only_nudge(session)
+                if nudge:
+                    log.info(
+                        "Read-only loop detected at step %d — injecting nudge",
+                        session.step_count,
+                        extra=log_extra,
+                    )
+                    append_internal_user_message(
+                        session, on_event, nudge, reason="read_only_loop_nudge"
+                    )
+
                 session.state = AgentState.RUNNING
                 continue
 

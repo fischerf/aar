@@ -284,7 +284,8 @@
     "max_premature_end_recoveries": 2,
     "reserve_tokens": 512,
     "reserve_cost_fraction": 0.1,
-    "bash_failure_threshold": 2
+    "bash_failure_threshold": 2,
+    "read_only_loop_threshold": 8
   },
   "compaction": {
     "enabled": true,
