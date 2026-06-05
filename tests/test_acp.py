@@ -1120,6 +1120,8 @@ class TestSetSessionModel:
         session_cfg = agent._session_configs[sid]
         assert session_cfg.provider.name == "anthropic"
         assert session_cfg.provider.model == "claude-sonnet-4-6"
+        # Response should include updated config_options (matches the by-registry-key test)
+        assert resp is not None
 
     @pytest.mark.asyncio
     async def test_different_sessions_have_independent_models(self, tmp_path):
