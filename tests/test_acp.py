@@ -631,6 +631,88 @@ class TestAarAcpAgentCloseSession:
         await agent.close_session(session_id="unknown-session-id")
 
 
+class TestAarAcpAgentCloseAllSessions:
+    """Shutdown teardown path called from ``run_acp_stdio``'s ``finally`` block.
+
+    Exists to avoid the anyio cross-task cancel-scope error that surfaces
+    when async-generator GC closes still-open MCP transports during process
+    exit instead of letting us close them in the correct task context.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tears_down_all_mcp_bridges(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r1 = await agent.new_session()
+        r2 = await agent.new_session()
+
+        bridge1 = AsyncMock()
+        bridge2 = AsyncMock()
+        agent._mcp_bridges[r1.session_id] = bridge1
+        agent._mcp_bridges[r2.session_id] = bridge2
+
+        await agent.close_all_sessions()
+
+        bridge1.__aexit__.assert_awaited_once_with(None, None, None)
+        bridge2.__aexit__.assert_awaited_once_with(None, None, None)
+        assert agent._mcp_bridges == {}
+
+    @pytest.mark.asyncio
+    async def test_cancels_in_flight_prompt_tasks(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r = await agent.new_session()
+        sid = r.session_id
+
+        started = asyncio.Event()
+
+        async def _parked() -> None:
+            started.set()
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(_parked())
+        agent._run_tasks[sid] = task
+        await started.wait()
+
+        await agent.close_all_sessions()
+
+        assert task.done()
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_no_sessions_is_noop(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        # Must not raise even when there's nothing to clean up.
+        await agent.close_all_sessions()
+
+    @pytest.mark.asyncio
+    async def test_continues_when_one_bridge_raises(self, tmp_path):
+        """One failing bridge mustn't prevent the rest from being torn down."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r1 = await agent.new_session()
+        r2 = await agent.new_session()
+
+        bad = AsyncMock()
+        bad.__aexit__.side_effect = RuntimeError("boom")
+        good = AsyncMock()
+        agent._mcp_bridges[r1.session_id] = bad
+        agent._mcp_bridges[r2.session_id] = good
+
+        await agent.close_all_sessions()
+
+        good.__aexit__.assert_awaited_once()
+        assert agent._mcp_bridges == {}
+
+
 class TestAarAcpAgentCancel:
     @pytest.mark.asyncio
     async def test_cancel_sets_event(self, tmp_path):
@@ -2084,7 +2166,9 @@ class TestContextWindowUpdatedEvent:
         provider.enqueue_text("hi", stop="end_turn")
 
         config = _make_config()
-        config = config.model_copy(update={"context_window": 8192, "context_strategy": "sliding_window"})
+        config = config.model_copy(
+            update={"context_window": 8192, "context_strategy": "sliding_window"}
+        )
         transport = AcpTransport(config=config, agent_name="test-agent", agent_description="Test")
 
         def patched_make():
