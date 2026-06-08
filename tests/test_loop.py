@@ -1034,8 +1034,8 @@ async def test_streaming_emits_finished_when_no_done_delta(streaming_mock_provid
 @pytest.mark.asyncio
 async def test_streaming_emits_finished_on_exception(tool_registry):
     """If the stream generator raises, the finished=True marker still fires."""
-    from agent.core.events import ErrorEvent
     from agent.core.config import ProviderConfig
+    from agent.core.events import ErrorEvent
     from agent.providers.base import Provider
 
     class _BoomProvider(Provider):
@@ -1080,3 +1080,220 @@ async def test_streaming_emits_finished_on_exception(tool_registry):
     assert any(
         "transport blew up" in (e.message or "") or "Provider" in (e.message or "") for e in errors
     )
+
+
+# ---------------------------------------------------------------------------
+# Truncated tool-call detection (max_tokens-induced)
+# ---------------------------------------------------------------------------
+
+
+def _make_truncated_response(
+    *,
+    tool_name: str = "write_file",
+    raw_payload: str = '{"path": "X',
+    output_tokens: int = 10000,
+    input_tokens: int = 10,
+) -> ProviderResponse:
+    """Mimic Anthropic returning ``stop_reason="tool_use"`` with truncated args.
+
+    Streaming collectors (Anthropic + OpenAI) surface unparsable JSON as
+    ``arguments={"raw": <partial JSON>}`` so the helper can spot it.
+    """
+    return ProviderResponse(
+        content="",
+        tool_calls=[
+            ToolCall(
+                tool_name=tool_name,
+                tool_call_id="tc_truncated",
+                arguments={"raw": raw_payload},
+            )
+        ],
+        stop_reason="tool_use",
+        meta=ProviderMeta(
+            provider="mock",
+            model="mock-1",
+            usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
+        ),
+    )
+
+
+def test_detect_truncated_tool_call_positive():
+    """Helper returns the offending tool call when JSON is truncated at the cap."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = _make_truncated_response(output_tokens=10000)
+    result = detect_truncated_tool_call(response, max_tokens=10000)
+
+    assert result is not None
+    tc, raw = result
+    assert tc.tool_name == "write_file"
+    assert raw == '{"path": "X'
+
+
+def test_detect_truncated_tool_call_above_cap():
+    """``output_tokens`` strictly above the cap also counts (defensive ``>=``)."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = _make_truncated_response(output_tokens=10001)
+    assert detect_truncated_tool_call(response, max_tokens=10000) is not None
+
+
+def test_detect_truncated_tool_call_well_formed_at_cap():
+    """Well-formed args with output_tokens at the cap must NOT be classified."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = ProviderResponse(
+        content="",
+        tool_calls=[
+            ToolCall(
+                tool_name="write_file",
+                tool_call_id="tc_ok",
+                arguments={"path": "a.md", "content": "hi"},
+            )
+        ],
+        stop_reason="tool_use",
+        meta=ProviderMeta(
+            provider="mock",
+            model="mock-1",
+            usage={"input_tokens": 10, "output_tokens": 10000},
+        ),
+    )
+
+    assert detect_truncated_tool_call(response, max_tokens=10000) is None
+
+
+def test_detect_truncated_tool_call_below_cap():
+    """Even an unparsable raw payload below the cap is not a truncation event."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = _make_truncated_response(output_tokens=500)
+    assert detect_truncated_tool_call(response, max_tokens=10000) is None
+
+
+def test_detect_truncated_tool_call_parseable_raw():
+    """A ``{"raw": "<valid JSON>"}`` shape is not classified as truncated."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = ProviderResponse(
+        content="",
+        tool_calls=[
+            ToolCall(
+                tool_name="write_file",
+                tool_call_id="tc",
+                arguments={"raw": '{"path": "a.md"}'},
+            )
+        ],
+        stop_reason="tool_use",
+        meta=ProviderMeta(
+            provider="mock",
+            model="mock-1",
+            usage={"input_tokens": 10, "output_tokens": 10000},
+        ),
+    )
+
+    assert detect_truncated_tool_call(response, max_tokens=10000) is None
+
+
+def test_detect_truncated_tool_call_missing_usage():
+    """No usage metadata ⇒ cannot detect truncation."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = ProviderResponse(
+        content="",
+        tool_calls=[ToolCall(tool_name="x", tool_call_id="tc", arguments={"raw": "{"})],
+        stop_reason="tool_use",
+        meta=None,
+    )
+    assert detect_truncated_tool_call(response, max_tokens=10000) is None
+
+
+def test_detect_truncated_tool_call_zero_max_tokens():
+    """max_tokens<=0 means provider has no cap configured — short-circuit."""
+    from agent.core.loop_helpers import detect_truncated_tool_call
+
+    response = _make_truncated_response(output_tokens=10000)
+    assert detect_truncated_tool_call(response, max_tokens=0) is None
+
+
+@pytest.mark.asyncio
+async def test_loop_recovers_from_truncated_tool_call(mock_provider, tool_registry):
+    """Truncated tool call must trigger ``max_tokens`` recovery, not dispatch."""
+    from agent.core.guardrails import GuardrailsConfig
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1", max_tokens=10000),
+        max_steps=10,
+        timeout=30.0,
+        guardrails=GuardrailsConfig(max_tokens_recoveries=2),
+    )
+
+    # Step 1: truncated write_file (stop_reason="tool_use", output==max).
+    mock_provider._responses.append(
+        _make_truncated_response(
+            tool_name="write_file",
+            raw_payload='{"path": "FILTER_AND_NAVIGATE_DOC.md"',
+            output_tokens=10000,
+        )
+    )
+    # Step 2: model recovers and finishes cleanly.
+    mock_provider.enqueue_text("all done", stop="end_turn")
+
+    session = Session()
+    session.add_user_message("write a 50KB file")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, config)
+
+    assert result.state == AgentState.COMPLETED
+    # Recovery counter incremented exactly once for the truncated call.
+    assert result.metadata["guardrails"]["max_tokens_recovery_count"] == 1
+    # The broken tool call must NOT have been dispatched.
+    assert not any(isinstance(e, ToolCall) for e in result.events)
+    assert not any(isinstance(e, ToolResult) for e in result.events)
+    # An internal recovery user message was injected.
+    internal = [e for e in result.events if isinstance(e, UserMessage) and e.data.get("internal")]
+    assert len(internal) == 1
+    assert internal[0].data["reason"] == "max_tokens_recovery"
+    # The synthetic assistant message carries MAX_TOKENS stop reason.
+    assistant_msgs = [e for e in result.events if isinstance(e, AssistantMessage)]
+    assert assistant_msgs[0].stop_reason == StopReason.MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_loop_aborts_after_truncated_recoveries_exhausted(mock_provider, tool_registry):
+    """After ``max_tokens_recoveries`` failures, surface a tool-named error."""
+    from agent.core.guardrails import GuardrailsConfig
+
+    config = AgentConfig(
+        provider=ProviderConfig(name="mock", model="mock-1", max_tokens=10000),
+        max_steps=10,
+        timeout=30.0,
+        guardrails=GuardrailsConfig(max_tokens_recoveries=1),
+    )
+
+    # Two consecutive truncated tool calls — second one exhausts recoveries.
+    mock_provider._responses.append(
+        _make_truncated_response(tool_name="write_file", output_tokens=10000)
+    )
+    mock_provider._responses.append(
+        _make_truncated_response(tool_name="write_file", output_tokens=10000)
+    )
+
+    session = Session()
+    session.add_user_message("write a giant file")
+
+    executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+    result = await run_loop(session, mock_provider, executor, config)
+
+    assert result.state == AgentState.ERROR
+    errors = [e for e in result.events if isinstance(e, ErrorEvent)]
+    assert errors, "expected an ErrorEvent after exhausting recoveries"
+    msg = errors[-1].message
+    assert "write_file" in msg
+    assert "truncated" in msg.lower()
+    assert "max_tokens=10000" in msg
+    # No tool dispatch ever happened.
+    assert not any(isinstance(e, ToolCall) for e in result.events)
+    assert not any(isinstance(e, ToolResult) for e in result.events)
+    # Recovery counter saturated at the configured limit.
+    assert result.metadata["guardrails"]["max_tokens_recovery_count"] == 1

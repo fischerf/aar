@@ -26,6 +26,7 @@ from agent.core.guardrails import LoopGuardrails
 from agent.core.loop_helpers import (
     append_internal_user_message,
     apply_usage_and_budget,
+    detect_truncated_tool_call,
     emit,
     emit_provider_observation,
     parse_stop,
@@ -216,6 +217,61 @@ async def run_loop(
                 len(response.tool_calls),
                 extra=log_extra,
             )
+
+            # --- Detect max_tokens-induced tool-argument truncation ---
+            # Some providers return stop_reason="tool_use" with truncated,
+            # unparsable argument JSON when the response hit the max_tokens
+            # cap.  Route this through the same recovery path as a real
+            # ``stop_reason="max_tokens"`` event so we don't silently dispatch
+            # a broken tool call (and burn the token budget retrying it).
+            _max_tokens_cap = config.resolve_provider().max_tokens
+            _truncated = detect_truncated_tool_call(response, _max_tokens_cap)
+            if _truncated is not None:
+                _bad_tc, _raw_payload = _truncated
+                _out_tokens = (
+                    response.meta.usage.get("output_tokens", 0)
+                    if response.meta and response.meta.usage
+                    else 0
+                )
+                _clipped = _raw_payload[:500] + ("…[clipped]" if len(_raw_payload) > 500 else "")
+                log.warning(
+                    "Truncated tool-call detected at step %d: tool=%s "
+                    "output_tokens=%d max_tokens=%d raw=%r",
+                    session.step_count,
+                    _bad_tc.tool_name,
+                    _out_tokens,
+                    _max_tokens_cap,
+                    _clipped,
+                    extra=log_extra,
+                )
+                # Emit a synthetic AssistantMessage so the rest of the
+                # loop machinery (and any persisted session) sees a
+                # MAX_TOKENS stop, but DO NOT emit ToolCall events for
+                # the broken call — we never want to dispatch it.
+                emit(
+                    session,
+                    on_event,
+                    AssistantMessage(content=response.content, stop_reason=StopReason.MAX_TOKENS),
+                )
+                if guardrails.should_continue_after_max_tokens(session):
+                    append_internal_user_message(
+                        session,
+                        on_event,
+                        guardrails.max_tokens_followup(),
+                        reason="max_tokens_recovery",
+                    )
+                    continue
+                # Recoveries exhausted — surface a clear, actionable error.
+                _err_msg = (
+                    f"{_bad_tc.tool_name} argument JSON truncated at "
+                    f"output_tokens={_out_tokens} (max_tokens={_max_tokens_cap}); "
+                    f"aborting after {guardrails.config.max_tokens_recoveries} recoveries"
+                )
+                session.state = AgentState.ERROR
+                emit(session, on_event, ErrorEvent(message=_err_msg, recoverable=False))
+                if extension_manager is not None:
+                    await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
+                return session
 
             if response.tool_calls:
                 # --- Extension: tool_call filtering ---
