@@ -6,7 +6,7 @@
       "model": "claude-sonnet-4-6",
       "api_key": "",
       "base_url": "",
-      "max_tokens": 8192,
+      "max_tokens": 128000,
       "temperature": 0.0,
       "context_window": 1000000,
       "token_budget": 500000,
@@ -237,9 +237,7 @@
       "**/.npmrc",
       "**/.pypirc"
     ],
-    "allowed_paths": [
-      "<cwd>/**"
-    ],
+    "allowed_paths": ["<cwd>/**"],
     "sandbox": {
       "mode": "local",
       "local": {},
@@ -263,10 +261,7 @@
         "install_path": null,
         "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
         "pre_install_commands": [],
-        "packages": [
-          "python3",
-          "py3-pip"
-        ],
+        "packages": ["python3", "py3-pip"],
         "package_install_command": "apk add --no-cache {packages}",
         "system_prompt_hint": ""
       }
@@ -279,32 +274,33 @@
     "layout": {}
   },
   "guardrails": {
-    "max_tokens_recoveries": 2,
-    "max_repeated_tool_steps": 3,
-    "max_premature_end_recoveries": 2,
-    "reserve_tokens": 512,
+    "max_tokens_recoveries": 4,
+    "max_repeated_tool_steps": 2,
+    "max_premature_end_recoveries": 3,
+    "reserve_tokens": 4096,
     "reserve_cost_fraction": 0.1,
     "bash_failure_threshold": 2,
-    "read_only_loop_threshold": 8
+    "read_only_loop_threshold": 12
   },
   "compaction": {
     "enabled": true,
-    "reserve_tokens": 16384,
-    "keep_recent_tokens": 20000,
+    "reserve_tokens": 32768,
+    "keep_recent_tokens": 30000,
     "truncate_old_results": true,
-    "truncate_keep_recent": 6,
-    "truncate_max_chars": 500
+    "truncate_keep_recent": 4,
+    "truncate_max_chars": 300
   },
   "skills_dirs": [],
   "skills_enabled": true,
-  "max_steps": 50,
+  "max_steps": 80,
   "timeout": 0.0,
   "max_retries": 3,
+  "max_rate_limit_retries": 5,
   "streaming": true,
-  "context_window": 200000,
+  "context_window": 1000000,
   "context_strategy": "summarize",
-  "token_budget": 500000,
-  "cost_limit": 5.0,
+  "token_budget": 0,
+  "cost_limit": 0.0,
   "token_warning_threshold": 0.8,
   "cost_warning_threshold": 0.8,
   "session_dir": ".agent/sessions",
