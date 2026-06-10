@@ -659,3 +659,101 @@ class TestContextManagement:
         msgs = [{"role": "user", "content": "a" * 10000}]
         result = trim_to_token_budget(msgs, 1)
         assert len(result) == 1  # keeps at least one message
+
+
+class TestTruncateOldToolResults:
+    def _make_tool_result_msg(self, content: str, tool_use_id: str = "id") -> dict:
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": False,
+                }
+            ],
+        }
+
+    def test_no_truncation_when_few_results(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("x" * 1000, "t1"),
+            self._make_tool_result_msg("y" * 1000, "t2"),
+            self._make_tool_result_msg("z" * 1000, "t3"),
+            self._make_tool_result_msg("w" * 1000, "t4"),
+            self._make_tool_result_msg("v" * 1000, "t5"),
+        ]
+        # With keep_recent=3, threshold is 3+2=5 — so 5 results still don't truncate
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+        # Should return original list (no copy needed)
+        assert result is msgs
+
+    def test_old_results_truncated(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("a" * 1000, "t1"),
+            self._make_tool_result_msg("b" * 1000, "t2"),
+            self._make_tool_result_msg("c" * 1000, "t3"),
+            self._make_tool_result_msg("d" * 1000, "t4"),
+            self._make_tool_result_msg("e" * 1000, "t5"),
+            self._make_tool_result_msg("f" * 1000, "t6"),
+            self._make_tool_result_msg("g" * 1000, "t7"),
+        ]
+        # 7 tool results > keep_recent(3) + 2 = 5, so truncation activates
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+        assert len(result) == 8
+
+        # First four tool result messages (indices 1-4) should be truncated
+        block1 = result[1]["content"][0]
+        assert len(block1["content"]) < 1000
+        assert "truncated" in block1["content"]
+        assert "1000" in block1["content"]
+
+        block2 = result[2]["content"][0]
+        assert len(block2["content"]) < 1000
+        assert "truncated" in block2["content"]
+
+    def test_recent_results_preserved(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("a" * 1000, "t1"),
+            self._make_tool_result_msg("b" * 1000, "t2"),
+            self._make_tool_result_msg("c" * 1000, "t3"),
+            self._make_tool_result_msg("d" * 1000, "t4"),
+            self._make_tool_result_msg("e" * 1000, "t5"),
+            self._make_tool_result_msg("f" * 1000, "t6"),
+            self._make_tool_result_msg("g" * 1000, "t7"),
+        ]
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+
+        # Last 3 tool result messages (indices 5, 6, 7) should keep full content
+        assert result[5]["content"][0]["content"] == "e" * 1000
+        assert result[6]["content"][0]["content"] == "f" * 1000
+        assert result[7]["content"][0]["content"] == "g" * 1000
+
+    def test_short_results_not_truncated(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("short", "t1"),  # under max_chars
+            self._make_tool_result_msg("also short", "t2"),  # under max_chars
+            self._make_tool_result_msg("c" * 1000, "t3"),
+            self._make_tool_result_msg("d" * 1000, "t4"),
+            self._make_tool_result_msg("e" * 1000, "t5"),
+            self._make_tool_result_msg("f" * 1000, "t6"),
+            self._make_tool_result_msg("g" * 1000, "t7"),
+            self._make_tool_result_msg("h" * 1000, "t8"),
+        ]
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+
+        # First two are old but short — should NOT be truncated
+        assert result[1]["content"][0]["content"] == "short"
+        assert result[2]["content"][0]["content"] == "also short"

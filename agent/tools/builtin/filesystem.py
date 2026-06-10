@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from agent.tools.registry import ToolRegistry
@@ -45,6 +46,54 @@ def _should_force_lf(p: Path, content: str) -> bool:
     return False
 
 
+_OUTLINE_PATTERNS = [
+    # Python
+    (re.compile(r"^(class\s+\w+|def\s+\w+|async\s+def\s+\w+)"), "python"),
+    # JavaScript/TypeScript
+    (
+        re.compile(r"^(export\s+)?(function\s+\w+|class\s+\w+|const\s+\w+\s*=\s*(async\s+)?\()"),
+        "js",
+    ),
+    # Rust
+    (
+        re.compile(r"^(pub\s+)?(fn\s+\w+|struct\s+\w+|enum\s+\w+|impl\s+|trait\s+\w+|mod\s+\w+)"),
+        "rust",
+    ),
+    # Go
+    (re.compile(r"^(func\s+(\(\w+\s+\*?\w+\)\s+)?\w+|type\s+\w+\s+(struct|interface))"), "go"),
+    # Lua
+    (re.compile(r"^(local\s+)?function\s+[\w.:]+"), "lua"),
+    # Generic markers
+    (re.compile(r"^#{1,3}\s+"), "heading"),
+]
+
+
+def _build_outline(lines: list[str], max_entries: int = 60) -> str:
+    """Extract structural outline from file lines (functions, classes, headings).
+
+    Returns a compact string with line numbers and symbol names, or empty
+    string if no structure is detected.
+    """
+    entries: list[str] = []
+    for i, line in enumerate(lines):
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+        # Check indent level — only top-level and one-indent-level definitions
+        indent = len(line) - len(line.lstrip())
+        if indent > 8:  # skip deeply nested definitions
+            continue
+        for pattern, _lang in _OUTLINE_PATTERNS:
+            if pattern.search(stripped.lstrip()):
+                prefix = "  " * (indent // 4) if indent > 0 else ""
+                entries.append(f"  {i + 1:>5}: {prefix}{stripped.lstrip()[:80]}")
+                break
+        if len(entries) >= max_entries:
+            entries.append(f"  ... ({len(lines)} total lines, outline truncated)")
+            break
+    return "\n".join(entries)
+
+
 def register_filesystem_tools(registry: ToolRegistry) -> None:
     """Register all filesystem tools into the given registry."""
 
@@ -72,14 +121,22 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         if s >= total:
             return f"start_line {start_line} is beyond end of file ({total} lines)."
 
-        # If no range specified and file is large, return a summary
+        # If no range specified and file is large, return outline + preview
         if start_line <= 0 and end_line <= 0 and total > 500:
-            return (
-                f"File {p} has {total} lines — too large to return in full.\n"
-                f"Use start_line / end_line to read a specific section.\n"
-                f"First 50 lines preview:\n\n"
-                + "".join(f"{i + 1:>6}\t{lines[i]}" for i in range(min(50, total)))
-            )
+            outline = _build_outline(lines)
+            parts = [
+                f"File {p} has {total} lines — too large to return in full.",
+                "Use start_line / end_line to read a specific section.",
+            ]
+            if outline:
+                parts.append("")
+                parts.append("Outline:")
+                parts.append(outline)
+            parts.append("")
+            parts.append("First 30 lines preview:")
+            parts.append("")
+            parts.append("".join(f"{i + 1:>6}\t{lines[i]}" for i in range(min(30, total))))
+            return "\n".join(parts)
 
         selected = lines[s:e]
         numbered = "".join(f"{s + i + 1:>6}\t{line}" for i, line in enumerate(selected))
@@ -148,6 +205,12 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             prompt_snippet=(
                 "Read file contents (supports line ranges; large files return a preview)"
             ),
+            prompt_guidelines=[
+                "After grep returns file:line matches, use read_file with start_line/end_line "
+                "to read only the relevant section — do NOT read the entire file.",
+                "For files >500 lines, read_file returns a preview with the first 50 lines. "
+                "Use the line numbers from grep results or the preview to request specific ranges.",
+            ],
             input_schema={
                 "type": "object",
                 "properties": {

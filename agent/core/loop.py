@@ -26,12 +26,19 @@ from agent.core.guardrails import LoopGuardrails
 from agent.core.loop_helpers import (
     append_internal_user_message,
     apply_usage_and_budget,
+    detect_truncated_tool_call,
     emit,
     emit_provider_observation,
     parse_stop,
 )
 from agent.core.provider_runner import ProviderRequestFailed, provider_request
-from agent.core.session import Session, compact_to_token_budget, estimate_token_count, trim_to_token_budget
+from agent.core.session import (
+    Session,
+    compact_to_token_budget,
+    estimate_token_count,
+    trim_to_token_budget,
+    truncate_old_tool_results,
+)
 from agent.core.state import AgentState
 from agent.extensions.api import BlockResult
 from agent.extensions.manager import ExtensionManager
@@ -126,6 +133,14 @@ async def run_loop(
             elif _ctx_window > 0 and config.context_strategy == "compact":
                 messages = compact_to_token_budget(messages, _ctx_window)
 
+            # Age old tool results to reduce context growth
+            if config.compaction.truncate_old_results:
+                messages = truncate_old_tool_results(
+                    messages,
+                    keep_recent=config.compaction.truncate_keep_recent,
+                    max_chars=config.compaction.truncate_max_chars,
+                )
+
             # Emit a context-window fill event so the UI can show a live indicator.
             # Fired unconditionally when a context window is configured so the bar
             # updates every turn, not only when messages are dropped.
@@ -202,6 +217,61 @@ async def run_loop(
                 len(response.tool_calls),
                 extra=log_extra,
             )
+
+            # --- Detect max_tokens-induced tool-argument truncation ---
+            # Some providers return stop_reason="tool_use" with truncated,
+            # unparsable argument JSON when the response hit the max_tokens
+            # cap.  Route this through the same recovery path as a real
+            # ``stop_reason="max_tokens"`` event so we don't silently dispatch
+            # a broken tool call (and burn the token budget retrying it).
+            _max_tokens_cap = config.resolve_provider().max_tokens
+            _truncated = detect_truncated_tool_call(response, _max_tokens_cap)
+            if _truncated is not None:
+                _bad_tc, _raw_payload = _truncated
+                _out_tokens = (
+                    response.meta.usage.get("output_tokens", 0)
+                    if response.meta and response.meta.usage
+                    else 0
+                )
+                _clipped = _raw_payload[:500] + ("…[clipped]" if len(_raw_payload) > 500 else "")
+                log.warning(
+                    "Truncated tool-call detected at step %d: tool=%s "
+                    "output_tokens=%d max_tokens=%d raw=%r",
+                    session.step_count,
+                    _bad_tc.tool_name,
+                    _out_tokens,
+                    _max_tokens_cap,
+                    _clipped,
+                    extra=log_extra,
+                )
+                # Emit a synthetic AssistantMessage so the rest of the
+                # loop machinery (and any persisted session) sees a
+                # MAX_TOKENS stop, but DO NOT emit ToolCall events for
+                # the broken call — we never want to dispatch it.
+                emit(
+                    session,
+                    on_event,
+                    AssistantMessage(content=response.content, stop_reason=StopReason.MAX_TOKENS),
+                )
+                if guardrails.should_continue_after_max_tokens(session):
+                    append_internal_user_message(
+                        session,
+                        on_event,
+                        guardrails.max_tokens_followup(),
+                        reason="max_tokens_recovery",
+                    )
+                    continue
+                # Recoveries exhausted — surface a clear, actionable error.
+                _err_msg = (
+                    f"{_bad_tc.tool_name} argument JSON truncated at "
+                    f"output_tokens={_out_tokens} (max_tokens={_max_tokens_cap}); "
+                    f"aborting after {guardrails.config.max_tokens_recoveries} recoveries"
+                )
+                session.state = AgentState.ERROR
+                emit(session, on_event, ErrorEvent(message=_err_msg, recoverable=False))
+                if extension_manager is not None:
+                    await extension_manager.fire_event("session_end", SessionEvent(action="ended"))
+                return session
 
             if response.tool_calls:
                 # --- Extension: tool_call filtering ---
@@ -286,6 +356,26 @@ async def run_loop(
 
                 for tr in results:
                     emit(session, on_event, tr)
+
+                # --- Guardrail: bash→acp_terminal pivot hint ---
+                hint = guardrails.observe_tool_results(
+                    session, results, set(tool_executor.registry.names())
+                )
+                if hint:
+                    append_internal_user_message(session, on_event, hint, reason="bash_pivot_hint")
+
+                # --- Guardrail: read-only loop nudge ---
+                nudge = guardrails.get_read_only_nudge(session)
+                if nudge:
+                    log.info(
+                        "Read-only loop detected at step %d — injecting nudge",
+                        session.step_count,
+                        extra=log_extra,
+                    )
+                    append_internal_user_message(
+                        session, on_event, nudge, reason="read_only_loop_nudge"
+                    )
+
                 session.state = AgentState.RUNNING
                 continue
 
@@ -303,6 +393,22 @@ async def run_loop(
                     on_event,
                     guardrails.max_tokens_followup(),
                     reason="max_tokens_recovery",
+                )
+                continue
+
+            if stop == StopReason.END_TURN and guardrails.should_continue_after_premature_end(
+                session, response.content
+            ):
+                log.info(
+                    "Premature end_turn detected at step %d — injecting continuation",
+                    session.step_count,
+                    extra=log_extra,
+                )
+                append_internal_user_message(
+                    session,
+                    on_event,
+                    guardrails.premature_end_followup(),
+                    reason="premature_end_recovery",
                 )
                 continue
 

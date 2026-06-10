@@ -397,6 +397,9 @@ class CompactionConfig(BaseModel):
     enabled: bool = False  # opt-in — triggers an extra LLM call per compaction
     reserve_tokens: int = 16_384  # tokens reserved for the next response
     keep_recent_tokens: int = 20_000  # tokens of recent context to preserve verbatim
+    truncate_old_results: bool = True
+    truncate_keep_recent: int = 6
+    truncate_max_chars: int = 500
 
 
 class AgentConfig(BaseModel):
@@ -412,6 +415,7 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3
+    max_rate_limit_retries: int = 5  # separate retry budget for rate-limit errors (longer delays)
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
     context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "summarize" | "none"

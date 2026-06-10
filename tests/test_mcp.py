@@ -6,6 +6,7 @@ The mock is injected via sys.modules before each import of the extension.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +15,6 @@ import pytest
 
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build a fake `mcp` module tree
@@ -371,6 +371,90 @@ class TestMCPClient:
             async with MCPClient(cfg):
                 pass
 
+    @pytest.mark.asyncio
+    async def test_aexit_from_different_task_succeeds(self, monkeypatch):
+        """Regression for the anyio "different task" error during MCP teardown.
+
+        Mimics ``mcp.client.stdio.stdio_client`` by wrapping the yield in a real
+        :func:`anyio.create_task_group` — the same construct that produces::
+
+            RuntimeError: Attempted to exit cancel scope in a different task
+                          than it was entered in
+
+        when ``__aenter__`` and ``__aexit__`` run in different tasks (the
+        actual ACP failure mode where ``session/new`` and ``session/close``
+        are dispatched on different handler tasks). MCPClient's dedicated
+        lifetime task keeps both ends of the cancel scope in the same task.
+        """
+        anyio = pytest.importorskip("anyio")
+
+        @asynccontextmanager
+        async def stdio_with_task_group(params):
+            async with anyio.create_task_group():
+                yield MagicMock(), MagicMock()
+
+        @asynccontextmanager
+        async def http_with_task_group(url, headers=None):
+            async with anyio.create_task_group():
+                yield MagicMock(), MagicMock(), None
+
+        mods, _ = _make_mcp_sys_modules()
+        mods["mcp.client.stdio"].stdio_client = stdio_with_task_group
+        mods["mcp.client.http"].streamablehttp_client = http_with_task_group
+        mods["mcp.client.streamable_http"].streamablehttp_client = http_with_task_group
+        for key, mod in mods.items():
+            monkeypatch.setitem(sys.modules, key, mod)
+
+        from agent.extensions.mcp import MCPClient, MCPServerConfig
+
+        cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
+        client = MCPClient(cfg)
+
+        # Enter in the current task...
+        await client.__aenter__()
+        assert client._session is not None
+
+        # ...exit from a different task. Without the dedicated-lifetime-task
+        # fix this raises the anyio RuntimeError.
+        await asyncio.create_task(client.__aexit__(None, None, None))
+
+        assert client._session is None
+        assert client._lifetime_task is None
+        assert client._stop_event is None
+
+    @pytest.mark.asyncio
+    async def test_bridge_aexit_from_different_task_succeeds(self, monkeypatch):
+        """MCPBridge inherits MCPClient's cross-task safety — same scenario,
+        one layer up. Exercised because ACP's ``_setup_mcp`` /
+        ``_teardown_mcp`` operate on the bridge, not on individual clients.
+        """
+        anyio = pytest.importorskip("anyio")
+
+        @asynccontextmanager
+        async def stdio_with_task_group(params):
+            async with anyio.create_task_group():
+                yield MagicMock(), MagicMock()
+
+        mods, _ = _make_mcp_sys_modules()
+        mods["mcp.client.stdio"].stdio_client = stdio_with_task_group
+        for key, mod in mods.items():
+            monkeypatch.setitem(sys.modules, key, mod)
+
+        from agent.extensions.mcp import MCPBridge, MCPServerConfig
+
+        cfgs = [
+            MCPServerConfig(name="a", transport="stdio", command="x"),
+            MCPServerConfig(name="b", transport="stdio", command="y"),
+        ]
+        bridge = MCPBridge(cfgs)
+
+        await bridge.__aenter__()
+        assert len(bridge.clients) == 2
+
+        await asyncio.create_task(bridge.__aexit__(None, None, None))
+
+        assert bridge.clients == []
+
 
 # ---------------------------------------------------------------------------
 # MCPBridge
@@ -419,7 +503,7 @@ class TestMCPBridge:
         from agent.extensions.mcp import MCPBridge, MCPClient, MCPServerConfig
 
         async def fake_list_tools_a(self_):
-            from agent.tools.schema import ToolSpec, SideEffect
+            from agent.tools.schema import SideEffect, ToolSpec
 
             return [
                 ToolSpec(
@@ -431,7 +515,7 @@ class TestMCPBridge:
             ]
 
         async def fake_list_tools_b(self_):
-            from agent.tools.schema import ToolSpec, SideEffect
+            from agent.tools.schema import SideEffect, ToolSpec
 
             return [
                 ToolSpec(
@@ -641,7 +725,7 @@ class TestRegisterBuiltinsPreservesExternal:
         async def dummy(**kwargs):
             return "ok"
 
-        from agent.tools.schema import ToolSpec, SideEffect
+        from agent.tools.schema import SideEffect, ToolSpec
 
         registry.add(
             ToolSpec(

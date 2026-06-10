@@ -12,7 +12,6 @@ tools/mcp_game.json
 jobs/
 start_live_agent_test.bat
 start_notlive_agent_test.bat
-CLAUDE.md
 .zed/
 tools/webclient/
 tools/sqllite_mcp/
@@ -22,3 +21,6 @@ tools/mcp_sqlite.json
 docs/loop_flow_explained.md
 .githooks/
 docs/!44_zed_chats/
+docs/shadow-branching-paper/
+scripts/test_shadow_branching.py
+docs/tool-optimization-plan.md

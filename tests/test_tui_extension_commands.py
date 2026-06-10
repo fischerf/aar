@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 from collections import Counter
 from io import StringIO
@@ -42,6 +43,17 @@ from agent.extensions.manager import ExtensionManager
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig, SectionConfig
 from agent.transports.tui import TUIRenderer
+
+# ---------------------------------------------------------------------------
+# Optional dependency: aar_ext_inspect (from aar-extensions-registry)
+# Tests that require it are skipped when the package is not installed.
+# ---------------------------------------------------------------------------
+
+_HAS_EXT_INSPECT = importlib.util.find_spec("aar_ext_inspect") is not None
+_skip_no_ext_inspect = pytest.mark.skipif(
+    not _HAS_EXT_INSPECT,
+    reason="aar_ext_inspect not installed (requires aar-extensions-registry)",
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -457,6 +469,7 @@ def _run_inspect(session: Session, args: str = "") -> str:
     return "\n".join(log_records)
 
 
+@_skip_no_ext_inspect
 class TestInspectExtensionOutput:
     def test_empty_session_shows_zeros(self) -> None:
         report = _run_inspect(Session())
@@ -617,6 +630,7 @@ class TestInspectExtensionOutput:
         assert "Tool results      : 1" in report
         assert "Here are your files" in report
 
+    @_skip_no_ext_inspect
     def test_full_session_with_update_session(self) -> None:
         """Regression: manager.update_session must propagate to the inspect command."""
         from aar_ext_inspect import register

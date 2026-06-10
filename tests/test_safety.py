@@ -386,6 +386,40 @@ class TestPermissions:
         assert pm.is_auto_approved(spec, tc)
 
     @pytest.mark.asyncio
+    async def test_concurrent_approvals_serialised_with_always(self):
+        """When multiple tool calls need approval concurrently (asyncio.gather),
+        an APPROVED_ALWAYS response to the first prompt must auto-approve all
+        sibling calls without deadlocking on concurrent stdin reads."""
+        import asyncio
+
+        call_count = 0
+
+        async def approve_always_once(spec, tc):
+            nonlocal call_count
+            call_count += 1
+            return ApprovalResult.APPROVED_ALWAYS
+
+        pm = PermissionManager(approval_callback=approve_always_once)
+        spec = ToolSpec(name="write_file", description="", side_effects=[SideEffect.WRITE])
+
+        # Simulate 5 concurrent write_file approvals (the batch-write scenario)
+        tool_calls = [
+            ToolCall(
+                tool_name="write_file",
+                tool_call_id=f"tc_{i}",
+                arguments={"path": f"f{i}.py", "content": ""},
+            )
+            for i in range(5)
+        ]
+        results = await asyncio.gather(*(pm.request_approval(spec, tc) for tc in tool_calls))
+
+        # All five must be ALLOW
+        assert all(r == PolicyDecision.ALLOW for r in results)
+        # The callback must have been invoked only ONCE — the lock serialises
+        # and lets subsequent waiters short-circuit via is_auto_approved.
+        assert call_count == 1
+
+    @pytest.mark.asyncio
     async def test_request_approval_denied_callback(self):
         async def deny_all(spec, tc):
             return ApprovalResult.DENIED

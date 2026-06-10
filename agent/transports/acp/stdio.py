@@ -870,7 +870,9 @@ class AarAcpAgent:
         update_tasks: list[asyncio.Task] = []
         streamed_chunks = False
         title_sent = False
-        _ctx_window_size: int = 0  # updated by ContextWindowEvent; used to fix UsageUpdate semantics
+        _ctx_window_size: int = (
+            0  # updated by ContextWindowEvent; used to fix UsageUpdate semantics
+        )
 
         if first_push:
             _push_now = self._spawn(
@@ -1319,6 +1321,48 @@ class AarAcpAgent:
                 logger.warning("ACP: MCP teardown error for session %s: %s", session_id, exc)
         self._session_registries.pop(session_id, None)
 
+    async def close_all_sessions(self) -> None:
+        """Tear down every active session's per-session state.
+
+        Called from :func:`run_acp_stdio`'s ``finally`` block so MCP
+        subprocesses, async generators, and prompt tasks are closed in an
+        orderly fashion *before* the event loop shuts down. Without this,
+        asyncio's async-generator GC would close ``stdio_client`` from an
+        arbitrary task, tripping anyio's same-task cancel-scope check::
+
+            RuntimeError: Attempted to exit cancel scope in a different task
+                          than it was entered in
+
+        Best-effort — individual session failures are logged and skipped
+        so one bad session can't block teardown of the others.
+        """
+        # Snapshot before iterating — _teardown_mcp mutates _mcp_bridges,
+        # and close_session (if we ever route through it) mutates more.
+        session_ids = list(self._sessions.keys() | self._mcp_bridges.keys())
+
+        for sid in session_ids:
+            # Cancel any prompt task still in flight so it doesn't hold a
+            # reference to the MCP-backed tool registry while we close it.
+            task = self._run_tasks.get(sid)
+            event = self._cancel_events.get(sid)
+            if event is not None:
+                event.set()
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup
+                    pass
+
+            try:
+                await self._teardown_mcp(sid)
+            except Exception as exc:  # noqa: BLE001 — best-effort shutdown
+                logger.warning("ACP: shutdown teardown error for session %s: %s", sid, exc)
+
+        # Flush any remaining fire-and-forget background tasks (session_update
+        # notifications, command pushes, etc.).
+        await self.shutdown()
+
 
 async def run_acp_stdio(
     config: AgentConfig | None = None,
@@ -1354,4 +1398,14 @@ async def run_acp_stdio(
         registry=registry,
         agent_name=agent_name,
     )
-    await run_agent(agent, use_unstable_protocol=True)
+    try:
+        await run_agent(agent, use_unstable_protocol=True)
+    finally:
+        # Orderly teardown of MCP subprocesses + background tasks before the
+        # event loop shuts down. Avoids the anyio cross-task cancel-scope
+        # error that surfaces when async-generator GC runs after the loop
+        # has started tearing tasks down.
+        try:
+            await agent.close_all_sessions()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup on exit
+            logger.warning("ACP: error during shutdown teardown: %s", exc)

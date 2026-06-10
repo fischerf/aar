@@ -169,6 +169,58 @@ class TestOpenAINormalization:
             provider = OpenAIProvider(config)
         return provider
 
+    def test_read_timeout_null_sets_unlimited(self):
+        """read_timeout=null should produce an httpx.Timeout with read=None (unlimited)."""
+        import httpx
+        from agent.providers.openai import OpenAIProvider
+
+        config = ProviderConfig(
+            name="openai",
+            model="gpt-4o-mini",
+            api_key="key",
+            extra={"read_timeout": None},
+        )
+        with patch("openai.AsyncOpenAI") as mock_cls:
+            OpenAIProvider(config)
+        _, kwargs = mock_cls.call_args
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.read is None
+        assert timeout.connect == 10.0
+
+    def test_read_timeout_value_sets_seconds(self):
+        """read_timeout=120 should produce httpx.Timeout(read=120, connect=10)."""
+        import httpx
+        from agent.providers.openai import OpenAIProvider
+
+        config = ProviderConfig(
+            name="openai",
+            model="gpt-4o-mini",
+            api_key="key",
+            extra={"read_timeout": 120},
+        )
+        with patch("openai.AsyncOpenAI") as mock_cls:
+            OpenAIProvider(config)
+        _, kwargs = mock_cls.call_args
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.read == 120.0
+
+    def test_explicit_timeout_overrides_read_timeout(self):
+        """extra.timeout takes precedence over extra.read_timeout."""
+        from agent.providers.openai import OpenAIProvider
+
+        config = ProviderConfig(
+            name="openai",
+            model="gpt-4o-mini",
+            api_key="key",
+            extra={"timeout": 30, "read_timeout": None},
+        )
+        with patch("openai.AsyncOpenAI") as mock_cls:
+            OpenAIProvider(config)
+        _, kwargs = mock_cls.call_args
+        assert kwargs.get("timeout") == 30.0
+
     @pytest.mark.asyncio
     async def test_plain_text_response(self):
         provider = self._make_provider()

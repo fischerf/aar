@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+- Loop now detects `max_tokens`-induced tool-argument truncation
+  (`stop_reason="tool_use"` + `output_tokens` at cap + unparsable JSON) and
+  routes it through the existing `max_tokens` recovery path. Previously the
+  truncated tool call was forwarded to the dispatcher, producing repeated
+  `invalid_arguments` errors and silently burning the token budget. The new
+  helper `detect_truncated_tool_call` is provider-agnostic and reuses
+  `guardrails.max_tokens_recoveries`; once recoveries are exhausted, the loop
+  aborts with a clear error naming the offending tool.
 
 ---
 
