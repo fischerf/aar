@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import Theme
+
+if TYPE_CHECKING:
+    from rich.text import Text
 
 
 def _side_effect_badge(side_effects: list[str], theme: Theme) -> str:

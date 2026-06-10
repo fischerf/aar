@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
-from collections import Counter
 from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock
@@ -301,7 +300,9 @@ class TestExtensionManagerCommandsProperty:
         assert ExtensionManager().commands == {}
 
     def test_single_extension(self) -> None:
-        fn = lambda a, c: None
+        def fn(a, c):
+            return None
+
         api = ExtensionAPI(name="e1")
         api._commands["foo"] = ("Foo", fn)
         mgr = ExtensionManager()
@@ -327,8 +328,12 @@ class TestExtensionManagerCommandsProperty:
         assert "cmd1" in cmds and "cmd2" in cmds
 
     def test_later_extension_shadows_earlier(self) -> None:
-        winner = lambda a, c: "winner"
-        loser = lambda a, c: "loser"
+        def winner(a, c):
+            return "winner"
+
+        def loser(a, c):
+            return "loser"
+
         api1 = ExtensionAPI(name="first")
         api1._commands["shared"] = ("first", loser)
         api2 = ExtensionAPI(name="second")

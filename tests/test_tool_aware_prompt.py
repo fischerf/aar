@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from agent.core.config import build_system_prompt
 from agent.tools.registry import ToolRegistry
-from agent.tools.schema import SideEffect, ToolSpec
+from agent.tools.schema import ToolSpec
 
 # ---------------------------------------------------------------------------
 # ToolSpec — prompt_snippet and prompt_guidelines defaults

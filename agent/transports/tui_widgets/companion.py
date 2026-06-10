@@ -43,7 +43,7 @@ except ImportError as exc:  # pragma: no cover
         'Install it with: pip install "aar-agent[tui-fixed]"'
     ) from exc
 
-from agent.transports.companion_state import CompanionEngine, GitHealth, Mood
+from agent.transports.companion_state import CompanionEngine, GitHealth
 from agent.transports.themes.models import CompanionConfig, Theme
 
 # ---------------------------------------------------------------------------

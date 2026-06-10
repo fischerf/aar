@@ -246,12 +246,16 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ## Requirements
 
-- Python 3.11+
-- `pydantic >= 2.0`
-- `httpx >= 0.27`
-- `typer >= 0.12`
-- `rich >= 13.0`
-- Provider SDK as needed: `anthropic`, `openai`
+- Python 3.12+
+- `pydantic >= 2.12`
+- `httpx >= 0.28`
+- `typer >= 0.24`
+- `rich >= 14.3`
+- `textual >= 8.2` (TUI / fixed TUI)
+- `jsonschema >= 4.0`
+- Provider SDK as needed: `anthropic`, `openai`, `google-genai`
+- ACP transport: `agent-client-protocol >= 0.10`
+- MCP bridge: `mcp >= 1.27`
 
 ### Windows — `bash` tool
 
@@ -297,6 +301,7 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
 | [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
+| [PyPI release](docs/pypi-release.md) | _Deferred._ Procedure for eventually publishing `aar-agent` to PyPI — account setup, token rotation, TestPyPI smoke-test, upload, launcher revert |
 
 ---
 

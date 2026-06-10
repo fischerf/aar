@@ -212,12 +212,12 @@ class ContextWindowEvent(Event):
     """
 
     type: EventType = EventType.CONTEXT_WINDOW
-    ctx_tokens: int = 0      # estimated tokens in the (possibly trimmed) window
-    ctx_window: int = 0      # hard token limit (effective_context_window)
-    msgs_before: int = 0     # message count *before* any trimming this turn
-    msgs_after: int = 0      # message count *after* trimming
-    msgs_dropped: int = 0    # msgs_before - msgs_after  (0 when nothing was dropped)
-    strategy: str = ""       # "sliding_window" | "compact" | "summarize" | "none"
+    ctx_tokens: int = 0  # estimated tokens in the (possibly trimmed) window
+    ctx_window: int = 0  # hard token limit (effective_context_window)
+    msgs_before: int = 0  # message count *before* any trimming this turn
+    msgs_after: int = 0  # message count *after* trimming
+    msgs_dropped: int = 0  # msgs_before - msgs_after  (0 when nothing was dropped)
+    strategy: str = ""  # "sliding_window" | "compact" | "summarize" | "none"
 
 
 # Union type for type-safe event handling

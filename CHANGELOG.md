@@ -14,14 +14,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
-- Loop now detects `max_tokens`-induced tool-argument truncation
-  (`stop_reason="tool_use"` + `output_tokens` at cap + unparsable JSON) and
-  routes it through the existing `max_tokens` recovery path. Previously the
-  truncated tool call was forwarded to the dispatcher, producing repeated
-  `invalid_arguments` errors and silently burning the token budget. The new
+
+---
+
+## [0.4.0] - 2026-06-10
+
+
+### Added
+
+#### Core / Prompting
+- **Skills** — lazy-loaded instruction modules discovered from `~/.aar/skills/`
+  and `.agent/skills/`. Each skill is a `.md` file with YAML frontmatter; the
+  loader validates them and renders an `<available_skills>` section into the
+  system prompt. New module `agent/core/skills.py`.
+- **Tool-aware system prompt** — `ToolSpec` gained `prompt_snippet: str` and
+  `prompt_guidelines: list[str]`. The registry harvests both
+  (`get_prompt_snippets()`, `get_prompt_guidelines()`) and `build_system_prompt`
+  inserts an "Available tools" + "Guidelines" layer between the base prompt and
+  the rules. `_rebuild_system_prompt()` is called after built-ins and again
+  after extension tools register. All seven built-ins ship snippets; `grep`
+  carries guidelines distinguishing it from `find_files`.
+- **LLM-based context compaction** — new `agent/core/compaction/` package with
+  token estimation, cut-point detection, structured summarization, and
+  file-operation tracking. New `"compact"` context strategy keeps the first +
+  last N messages and inserts a summary marker for dropped middle turns.
+- **Two new built-in tools**: `grep` (regex content search) and `find_files`
+  (glob path search); both promoted to ACP.
+- **`aar prompt --layers`** — shows ordered prompt sources with file paths,
+  character counts, and skipped files.
+
+#### Providers
+- **Multi-provider configuration** — all providers now live in one config
+  file; `cfg.resolve_provider()` returns the active one. The `/model` slash
+  command lists, shows, and switches the active provider mid-session
+  (`/model`, `/model <key>`, `/model <vendor>/<model>` for ad-hoc switches).
+- **`ProviderSwitchEvent`** — typed Pydantic event emitted on every switch;
+  surfaced in CLI + TUI transports.
+- **Capability mismatch warning** — switching to a provider that lacks tools
+  or vision support raises a structured warning before proceeding.
+- **Token / cost tallies persisted** — `session_store` saves and restores the
+  running totals so resumed sessions stay cost-aware.
+- **Configurable timeout precedence** — explicit `timeout` overrides
+  `read_timeout`; `read_timeout=null` disables the read timeout entirely
+  (useful for slow local models).
+
+#### ACP / Zed
+- **`agent-client-protocol` 0.10.0** support — new `message_id` field on
+  prompts, `additional_directories` on `session/new`.
+- **Extension slash commands** are now populated correctly over ACP.
+- **MCP server bridge** — stdio + HTTP MCP servers passed in `session/new` are
+  started and their tools registered for the lifetime of that session.
+
+#### TUI
+- **Context bar** in the fixed TUI header: `ctx: ████████░░░░ 4.1k/8.2k`,
+  reflecting live token usage; visible in all modes (chat / log / thinking).
+- **Queued prompts** — typing while the agent is busy queues prompts which
+  auto-dispatch when the loop becomes idle. New transport-agnostic
+  `agent/transports/prompt_queue.py`.
+- **Companion** — kaomoji digital companion widget in the fixed-TUI header;
+  progress saved as session metadata. Decoupled from `compact()` via the
+  `on_prune` hook.
+- **Status bar refresh** on `/model` provider switch.
+
+#### Extensions
+- **Plugin extension system** — new `agent/extensions/` package (`api`,
+  `loader`, `manager`, `contrib/`). Documented in `docs/extensions.md`.
+  `aar init` now scaffolds an example extension configuration.
+- **`aar install <package>`** CLI command — installs an extension from PyPI
+  or a local path via `pip install`.
+- **`aar extensions list` / `aar extensions inspect <name>`** — inspect what
+  extensions are discovered and what they register (events, tools,
+  commands).
+- **Pipeline transforms in `fire_event()`** — handlers can transform events;
+  results are chained sequentially through the pipeline.
+- **Async handler errors are logged** instead of silently swallowed by
+  fire-and-forget tasks.
+
+#### Dev / CI
+- **VSCode integration** — `.vscode/` configuration + launch profiles.
+- **`scripts/analyze_tokens.py`** — offline analysis of a session's token
+  usage.
+- **Sonnet 4.6 benchmark** added under `scripts/benchmarks/`.
+
+### Changed
+
+- **`/fork` slash command renamed to `/branch`.**
+- **Sample config consolidation** — obsolete provider-specific config files
+  removed; all providers sit in one config.
+- **Provider config isolation** — added a guard that prevents general
+  provider config from being forwarded to specific provider constructors.
+- **Rate-limit resilience** — provider runner adds jitter to retry backoff
+  and gains a structured `RateLimited` recovery path (Fix A + B in
+  `agent/core/provider_runner.py`).
+- **Rules / system prompt** — added a parallelism nudge encouraging the model
+  to batch independent writes into a single response; `rules.md` trimmed to
+  the essentials.
+- **ACP session init** — small delay added after session creation so editors
+  have time to register tool / command lists before the first prompt.
+- **Large-file handling** — improved truncation, summarization, and read
+  budgets when tools encounter very large files.
+- **`aar init`** — now copies `rules.md` and extension configuration
+  examples; recognises `wsl_user` and `restrict_to_workspace` profile fields.
+
+### Fixed
+
+- **Zed launcher scripts** — `scripts/zed/launch.sh` and `launch.cmd` no
+  longer attempt `pip install aar-agent>=X.Y.Z` from PyPI (the package is
+  not yet published, so the install silently 404'd on first run for any
+  user who didn't already have `aar` on `$PATH`). The scripts now hard-error
+  with a clear message pointing at the supported source install
+  (`pip install git+https://github.com/fischerf/aar.git@v0.4.0`). See
+  `docs/pypi-release.md` for the plan to re-enable the PyPI fallback once
+  the package is published.
+- **Truncated tool calls under `max_tokens`** — loop detects
+  `stop_reason="tool_use"` + `output_tokens` at cap + unparsable JSON and
+  routes the call through the existing `max_tokens` recovery path. Previously
+  the broken tool call was forwarded to the dispatcher, producing repeated
+  `invalid_arguments` errors and silently burning the token budget. New
   helper `detect_truncated_tool_call` is provider-agnostic and reuses
-  `guardrails.max_tokens_recoveries`; once recoveries are exhausted, the loop
+  `guardrails.max_tokens_recoveries`; once recoveries are exhausted the loop
   aborts with a clear error naming the offending tool.
+- **MCP stdio cancel-scope mismatch** — `MCPClient.__aenter__` /
+  `__aexit__` now run in the same `asyncio.Task` (previously `__aexit__`
+  could fire from a different RPC dispatcher task or the async-generator GC,
+  triggering `Attempted to exit cancel scope in a different task` on shutdown
+  or session close).
+- **Write-approval deadlock** — batched `write_file` calls under
+  `require_approval_for_writes: true` no longer race past `is_auto_approved()`
+  and block five threads on `console.input()` simultaneously. Approvals are
+  now serialised through the policy engine.
+- **`aar_ext_inspect` tests** — skipped cleanly when the extension package
+  isn't installed, instead of erroring on import.
+- **Large-file edits** — assorted fixes around partial-read truncation and
+  off-by-one line markers.
+- **Misc** — LF line-ending normalisation in repo, several lint fixes,
+  documentation gaps closed.
 
 ---
 
@@ -144,6 +271,7 @@ Internal release.
 
 ---
 
+[0.4.0]: https://github.com/fischerf/aar/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/fischerf/aar/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/fischerf/aar/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fischerf/aar/compare/v0.2.1...v0.3.0

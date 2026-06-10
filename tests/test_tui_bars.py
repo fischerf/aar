@@ -206,7 +206,9 @@ class TestFormatCtxWindowBar:
         from agent.transports.tui_utils.formatting import format_ctx_window_bar
 
         result = format_ctx_window_bar(
-            7500, 8192, tokens_warning_style="bold red"  # > 80 %
+            7500,
+            8192,
+            tokens_warning_style="bold red",  # > 80 %
         )
         assert result is not None
         assert result.style == "bold red"
@@ -220,7 +222,9 @@ class TestFormatCtxWindowBar:
         h = HeaderStyle()
         parts = _ctx_fill_bar(4000, 8192, 2, h)
         bar_text = format_ctx_window_bar(
-            4000, 8192, msgs_dropped=2,
+            4000,
+            8192,
+            msgs_dropped=2,
             tokens_style=h.tokens_style,
             tokens_warning_mid_style=h.tokens_warning_mid_style,
             tokens_warning_style=h.tokens_warning_style,
@@ -280,7 +284,5 @@ class TestTUIRendererContextState:
 
         buf = io.StringIO()
         r = TUIRenderer(console=Console(file=buf, width=120))
-        r.render_event(
-            ContextWindowEvent(ctx_tokens=3000, ctx_window=8192, msgs_dropped=0)
-        )
+        r.render_event(ContextWindowEvent(ctx_tokens=3000, ctx_window=8192, msgs_dropped=0))
         assert buf.getvalue() == ""

@@ -244,7 +244,7 @@ class AarAcpAgent:
                 prompt_capabilities=PromptCapabilities(embedded_context=True),
                 session_capabilities=SessionCapabilities(**session_caps_kwargs),
             ),
-            agent_info=Implementation(name="aar", title="Aar Agent", version="0.3.2"),
+            agent_info=Implementation(name="aar", title="Aar Agent", version="0.4.0"),
         )
 
     async def new_session(
