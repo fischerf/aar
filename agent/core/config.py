@@ -73,6 +73,9 @@ def _collect_layers(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    tool_snippets: dict[str, str] | None = None,  # deprecated — ignored
+    tool_guidelines: list[str] | None = None,
+    skills_text: str | None = None,
 ) -> list[PromptLayer]:
     """Return all prompt layers in assembly order, including missing ones."""
     layers: list[PromptLayer] = []
@@ -83,6 +86,16 @@ def _collect_layers(
         system_prompt_hint=system_prompt_hint,
     )
     layers.append(PromptLayer("aar-system", "[built-in]", None, base_text, True))
+
+    # Tools layer — only behavioural guidelines (snippets are redundant with
+    # the JSON tool schemas the provider already sends).
+    if tool_guidelines:
+        guidelines_text = "\n".join(["Tool guidelines:"] + [f"- {g}" for g in tool_guidelines])
+        layers.append(PromptLayer("tools", "[built-in]", None, guidelines_text, True))
+
+    # Skills layer — available skill names and descriptions for on-demand loading
+    if skills_text:
+        layers.append(PromptLayer("skills", "[built-in]", None, skills_text, True))
 
     global_dir = Path.home() / ".aar"
 
@@ -141,22 +154,32 @@ def build_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    tool_snippets: dict[str, str] | None = None,  # deprecated — kept for back-compat
+    tool_guidelines: list[str] | None = None,
+    skills_text: str | None = None,
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
 
     Layers (all optional except base):
       1. Base             — runtime facts (OS, cwd, shell)
-      2. Global           — ~/.aar/rules.md (user-wide preferences)
-      3. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
-      4. Project          — <project_rules_dir>/rules.md (project-specific instructions)
-      5. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
+      2. Tools            — behavioural guidelines only (tool schemas are sent
+                            separately via the provider's ``tools`` parameter)
+      3. Skills           — available skill names for on-demand loading
+      4. Global           — ~/.aar/rules.md (user-wide preferences)
+      5. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
+      6. Project          — <project_rules_dir>/rules.md (project-specific instructions)
+      7. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
     layers = _collect_layers(
         project_rules_dir=project_rules_dir,
         sandbox_mode=sandbox_mode,
         wsl_distro=wsl_distro,
         system_prompt_hint=system_prompt_hint,
+        tool_snippets=tool_snippets,
+        tool_guidelines=tool_guidelines,
+        skills_text=skills_text,
     )
+
     return "\n---\n".join(layer.text for layer in layers if layer.loaded)
 
 
@@ -167,6 +190,9 @@ class ProviderConfig(BaseModel):
     base_url: str = ""
     max_tokens: int = 4096
     temperature: float = 0.0
+    context_window: int | None = None  # overrides AgentConfig.context_window when set
+    token_budget: int | None = None  # overrides AgentConfig.token_budget when set
+    cost_limit: float | None = None  # overrides AgentConfig.cost_limit when set
     response_format: str = ""  # "" | "json" | "json_schema"
     json_schema: dict = Field(default_factory=dict)  # schema when response_format="json_schema"
     extra: dict = Field(default_factory=dict)
@@ -174,7 +200,15 @@ class ProviderConfig(BaseModel):
 
 class ToolConfig(BaseModel):
     enabled_builtins: list[str] = Field(
-        default_factory=lambda: ["read_file", "write_file", "edit_file", "list_directory", "bash"]
+        default_factory=lambda: [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_directory",
+            "bash",
+            "grep",
+            "find_files",
+        ]
     )
     # Default timeout (seconds) for bash commands when the model omits the timeout argument.
     # Set higher for long-running tasks (package installs, builds, docker pulls, etc.).
@@ -225,6 +259,15 @@ class WslSandboxConfig(BaseModel):
 
     distro: str = "aar-sandbox"
     shell: str = "sh"  # shell binary inside the distro
+    # Set wsl_user to a non-root account (e.g. "user") to reduce blast radius.
+    # The aar-sandbox Alpine distro created by `aar sandbox setup` adds a "user"
+    # account; set wsl_user = "user" to run as that account instead of root.
+    wsl_user: str | None = (
+        None  # Linux user to run commands as inside the distro; None = distro default (often root)
+    )
+    restrict_to_workspace: bool = (
+        True  # use wsl --cd to pin initial cwd; prevents cd-escape in command strings
+    )
     workspace: str | None = None  # Windows path, auto-translated to /mnt/…; None → cwd
     # Provisioning fields (used by aar sandbox setup / reset)
     install_path: str | None = None  # None → %LOCALAPPDATA%\aar\wsl-distros\<distro>
@@ -343,18 +386,39 @@ class TUIConfig(BaseModel):
     layout: dict = Field(default_factory=dict)
 
 
+class CompactionConfig(BaseModel):
+    """LLM-based context compaction settings.
+
+    When enabled, older conversation messages are periodically summarized
+    by the LLM and replaced with a structured checkpoint, keeping the
+    context within the model's window without simply dropping history.
+    """
+
+    enabled: bool = False  # opt-in — triggers an extra LLM call per compaction
+    reserve_tokens: int = 16_384  # tokens reserved for the next response
+    keep_recent_tokens: int = 20_000  # tokens of recent context to preserve verbatim
+    truncate_old_results: bool = True
+    truncate_keep_recent: int = 6
+    truncate_max_chars: int = 500
+
+
 class AgentConfig(BaseModel):
-    provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    provider: str | ProviderConfig = Field(default_factory=ProviderConfig)
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
+    compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    skills_dirs: list[str] = Field(default_factory=list)  # extra skill discovery paths
+    skills_enabled: bool = True  # set to False to disable skill loading
     max_steps: int = 50
     timeout: float = 0.0  # wall-clock seconds for the whole run; 0.0 = no limit
     max_retries: int = 3
+    max_rate_limit_retries: int = 5  # separate retry budget for rate-limit errors (longer delays)
     streaming: bool = False  # use token-level streaming when the provider supports it
     context_window: int = 0  # model context limit in tokens; 0 = no automatic management
-    context_strategy: str = "sliding_window"  # "sliding_window" | "none"
+    context_strategy: str = "sliding_window"  # "sliding_window" | "compact" | "summarize" | "none"
     token_budget: int = 0  # max total tokens across the run; 0 = unlimited
     cost_limit: float = 0.0  # max USD cost across the run; 0.0 = unlimited
     token_warning_threshold: float = 0.8  # fraction of budget to trigger warning style
@@ -364,6 +428,57 @@ class AgentConfig(BaseModel):
     system_prompt: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
     log_file: Path | None = None  # opt-in file logging (append mode)
+
+    def resolve_provider(self, key: str | None = None) -> ProviderConfig:
+        """Resolve a provider config by key, falling back to the active default.
+
+        When *key* is given it is looked up in ``providers``.  When the
+        active ``provider`` field is a string it is treated as a key into
+        ``providers``.  An inline ``ProviderConfig`` is returned as-is.
+        """
+        if key is not None:
+            if key in self.providers:
+                return self.providers[key]
+            raise ValueError(
+                f"Unknown provider key: '{key}'. "
+                f"Available: {', '.join(sorted(self.providers)) or '(none)'}"
+            )
+        if isinstance(self.provider, str):
+            if self.provider in self.providers:
+                return self.providers[self.provider]
+            raise ValueError(
+                f"Provider key '{self.provider}' not found in providers dict. "
+                f"Available: {', '.join(sorted(self.providers)) or '(none)'}"
+            )
+        return self.provider
+
+    @property
+    def active_provider_key(self) -> str | None:
+        """Return the active provider key, or None if provider is inline."""
+        if isinstance(self.provider, str):
+            return self.provider
+        return None
+
+    def effective_context_window(self) -> int:
+        """Return the active context window — provider override or global fallback."""
+        p = self.resolve_provider()
+        if p.context_window is not None:
+            return p.context_window
+        return self.context_window
+
+    def effective_token_budget(self) -> int:
+        """Return the active token budget — provider override or global fallback."""
+        p = self.resolve_provider()
+        if p.token_budget is not None:
+            return p.token_budget
+        return self.token_budget
+
+    def effective_cost_limit(self) -> float:
+        """Return the active cost limit — provider override or global fallback."""
+        p = self.resolve_provider()
+        if p.cost_limit is not None:
+            return p.cost_limit
+        return self.cost_limit
 
     def model_post_init(self, __context: Any) -> None:
         """Build the system prompt from config if not explicitly provided."""

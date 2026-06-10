@@ -127,6 +127,20 @@ def register_acp_terminal_tool(
                 "Run a shell command through the connected ACP client's terminal "
                 "(instead of a local subprocess). Returns captured stdout/stderr."
             ),
+            prompt_snippet=(
+                "Run a command in the editor's terminal (native host environment, user's PATH)"
+            ),
+            prompt_guidelines=[
+                "When running inside an editor (Zed, VS Code), prefer acp_terminal"
+                " over bash. acp_terminal runs commands in the user's native host"
+                " environment (with the user's PATH, Python, pip, project CLIs),"
+                " while bash routes through WSL which has a different filesystem,"
+                " PATH, and installed packages.",
+                "Use acp_terminal for: python/pip, project CLIs (pytest, ruff, npm,"
+                " etc.), and any command that needs the project's virtualenv or"
+                " installed tools. Use bash only when you explicitly need a"
+                " Linux/WSL environment.",
+            ],
             input_schema={
                 "type": "object",
                 "properties": {

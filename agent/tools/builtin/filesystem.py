@@ -2,30 +2,159 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
 
+# Extensions that must keep LF line-endings even on Windows (WSL compat)
+_LF_EXTENSIONS = frozenset(
+    {
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".py",
+        ".rb",
+        ".pl",
+        ".lua",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".json",
+        ".jsonl",
+    }
+)
+_LF_FILENAMES = frozenset({"Makefile", "Dockerfile", ".gitattributes"})
+
+
+def _should_force_lf(p: Path, content: str) -> bool:
+    """Return True when the file should be written with LF, not CRLF.
+
+    On Windows + WSL, CRLF in shell scripts causes 'set: -\\r: invalid option'.
+    We force LF for known script/config extensions, shebang-bearing files, and
+    common filenames that must stay Unix-compatible.
+    """
+    if p.suffix.lower() in _LF_EXTENSIONS:
+        return True
+    if p.name in _LF_FILENAMES:
+        return True
+    if content.startswith("#!"):  # shebang
+        return True
+    return False
+
+
+_OUTLINE_PATTERNS = [
+    # Python
+    (re.compile(r"^(class\s+\w+|def\s+\w+|async\s+def\s+\w+)"), "python"),
+    # JavaScript/TypeScript
+    (
+        re.compile(r"^(export\s+)?(function\s+\w+|class\s+\w+|const\s+\w+\s*=\s*(async\s+)?\()"),
+        "js",
+    ),
+    # Rust
+    (
+        re.compile(r"^(pub\s+)?(fn\s+\w+|struct\s+\w+|enum\s+\w+|impl\s+|trait\s+\w+|mod\s+\w+)"),
+        "rust",
+    ),
+    # Go
+    (re.compile(r"^(func\s+(\(\w+\s+\*?\w+\)\s+)?\w+|type\s+\w+\s+(struct|interface))"), "go"),
+    # Lua
+    (re.compile(r"^(local\s+)?function\s+[\w.:]+"), "lua"),
+    # Generic markers
+    (re.compile(r"^#{1,3}\s+"), "heading"),
+]
+
+
+def _build_outline(lines: list[str], max_entries: int = 60) -> str:
+    """Extract structural outline from file lines (functions, classes, headings).
+
+    Returns a compact string with line numbers and symbol names, or empty
+    string if no structure is detected.
+    """
+    entries: list[str] = []
+    for i, line in enumerate(lines):
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+        # Check indent level — only top-level and one-indent-level definitions
+        indent = len(line) - len(line.lstrip())
+        if indent > 8:  # skip deeply nested definitions
+            continue
+        for pattern, _lang in _OUTLINE_PATTERNS:
+            if pattern.search(stripped.lstrip()):
+                prefix = "  " * (indent // 4) if indent > 0 else ""
+                entries.append(f"  {i + 1:>5}: {prefix}{stripped.lstrip()[:80]}")
+                break
+        if len(entries) >= max_entries:
+            entries.append(f"  ... ({len(lines)} total lines, outline truncated)")
+            break
+    return "\n".join(entries)
+
 
 def register_filesystem_tools(registry: ToolRegistry) -> None:
     """Register all filesystem tools into the given registry."""
 
-    async def read_file(path: str) -> str:
-        """Read a file and return its contents."""
+    async def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
+        """Read a file and return its contents with line numbers.
+
+        When *start_line* / *end_line* are provided, only that slice is returned
+        (1-based, inclusive).  When omitted (or 0), the entire file is returned.
+
+        For files exceeding 500 lines with no line range specified, an outline
+        summary is returned instead of the full content, showing line counts and
+        a hint to use start_line/end_line.
+        """
         p = Path(path).resolve()
         if not p.is_file():
             raise FileNotFoundError(f"File not found: {p}")
         content = p.read_text(encoding="utf-8", errors="replace")
         lines = content.splitlines(keepends=True)
-        numbered = "".join(f"{i + 1:>6}\t{line}" for i, line in enumerate(lines))
+        total = len(lines)
+
+        # Determine slice bounds (1-based inclusive → 0-based)
+        s = max(start_line - 1, 0) if start_line > 0 else 0
+        e = min(end_line, total) if end_line > 0 else total
+
+        if s >= total:
+            return f"start_line {start_line} is beyond end of file ({total} lines)."
+
+        # If no range specified and file is large, return outline + preview
+        if start_line <= 0 and end_line <= 0 and total > 500:
+            outline = _build_outline(lines)
+            parts = [
+                f"File {p} has {total} lines — too large to return in full.",
+                "Use start_line / end_line to read a specific section.",
+            ]
+            if outline:
+                parts.append("")
+                parts.append("Outline:")
+                parts.append(outline)
+            parts.append("")
+            parts.append("First 30 lines preview:")
+            parts.append("")
+            parts.append("".join(f"{i + 1:>6}\t{lines[i]}" for i in range(min(30, total))))
+            return "\n".join(parts)
+
+        selected = lines[s:e]
+        numbered = "".join(f"{s + i + 1:>6}\t{line}" for i, line in enumerate(selected))
+        if start_line > 0 or end_line > 0:
+            shown_range = f"[lines {s + 1}–{s + len(selected)} of {total}]"
+            return f"{shown_range}\n{numbered}"
         return numbered
 
     async def write_file(path: str, content: str) -> str:
         """Write content to a file, creating directories as needed."""
         p = Path(path).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        if os.name == "nt" and _should_force_lf(p, content):
+            # Write raw bytes to avoid Python's text-mode CRLF conversion.
+            # The LLM sends \n — we must not let Windows corrupt that to \r\n.
+            p.write_bytes(content.encode("utf-8"))
+        else:
+            p.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} bytes to {p}"
 
     async def edit_file(path: str, old_string: str, new_string: str) -> str:
@@ -69,14 +198,42 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
     registry.add(
         ToolSpec(
             name="read_file",
-            description="Read a file and return its contents with line numbers. Accepts relative or absolute paths (Windows or Unix style).",
+            description=(
+                "Read a file and return its contents with line numbers. "
+                "Large files (>500 lines) return a preview — use start_line/end_line to read sections."
+            ),
+            prompt_snippet=(
+                "Read file contents (supports line ranges; large files return a preview)"
+            ),
+            prompt_guidelines=[
+                "After grep returns file:line matches, use read_file with start_line/end_line "
+                "to read only the relevant section — do NOT read the entire file.",
+                "For files >500 lines, read_file returns a preview with the first 50 lines. "
+                "Use the line numbers from grep results or the preview to request specific ranges.",
+            ],
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "File path, e.g. README.md or subdir\\file.py",
-                    }
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": (
+                            "First line to return (1-based, inclusive). "
+                            "Omit or pass 0 to start from the beginning."
+                        ),
+                        "default": 0,
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": (
+                            "Last line to return (1-based, inclusive). "
+                            "Omit or pass 0 to read to the end."
+                        ),
+                        "default": 0,
+                    },
                 },
                 "required": ["path"],
             },
@@ -89,6 +246,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="write_file",
             description="Write content to a file. Creates parent directories if needed. Use paths relative to the working directory, e.g. src\\main.py.",
+            prompt_snippet="Create or overwrite a file",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -109,6 +267,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="edit_file",
             description="Replace an exact string in a file. The old_string must appear exactly once. Use paths relative to the working directory.",
+            prompt_snippet="Replace an exact unique string in a file",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -130,6 +289,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="list_directory",
             description="List files and directories at a given path. Shows the resolved absolute path. Defaults to the current working directory.",
+            prompt_snippet="List files and directories at a path",
             input_schema={
                 "type": "object",
                 "properties": {

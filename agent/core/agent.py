@@ -12,6 +12,7 @@ from agent.core.events import ContentBlock, Event, SessionEvent
 from agent.core.loop import run_loop
 from agent.core.session import Session
 from agent.core.state import AgentState
+from agent.extensions.manager import ExtensionManager
 from agent.providers.base import Provider
 from agent.safety.permissions import ApprovalCallback
 from agent.tools.builtin.filesystem import register_filesystem_tools
@@ -57,7 +58,7 @@ class Agent:
         approval_callback: ApprovalCallback | None = None,
     ) -> None:
         self.config = config or AgentConfig()
-        self.provider = provider or _create_provider(self.config.provider)
+        self.provider = provider or _create_provider(self.config.resolve_provider())
         self.registry = registry or ToolRegistry()
         self.executor = ToolExecutor(
             self.registry,
@@ -66,14 +67,21 @@ class Agent:
             approval_callback,
         )
         self._on_event: list[Callable[[Event], Any]] = []
+        self._extension_manager: ExtensionManager | None = None
 
         # Register built-in tools based on config
         self._register_builtins()
 
+        # Build tool-aware system prompt
+        self._rebuild_system_prompt()
+
     def _register_builtins(self) -> None:
+        from agent.tools.builtin.search import register_search_tools
+
         enabled = set(self.config.tools.enabled_builtins)
         fs_tools = {"read_file", "write_file", "edit_file", "list_directory"}
         shell_tools = {"bash"}
+        search_tools = {"grep", "find_files"}
 
         # Track pre-existing tools (e.g. MCP) so we don't prune them
         pre_existing = set(self.registry.names())
@@ -86,12 +94,41 @@ class Agent:
                 sandbox=self.executor.sandbox,
                 default_timeout=self.config.tools.bash_default_timeout,
             )
+        if enabled & search_tools:
+            register_search_tools(self.registry)
 
         # Only prune builtins we just added that weren't explicitly enabled
         newly_added = set(self.registry.names()) - pre_existing
         for name in newly_added - enabled:
             if name in self.registry._tools:
                 del self.registry._tools[name]
+
+    def _rebuild_system_prompt(self) -> None:
+        """Rebuild the system prompt with current tool snippets, guidelines, and skills."""
+        from agent.core.config import build_system_prompt
+
+        # Load skills if enabled
+        skills_text: str | None = None
+        if self.config.skills_enabled:
+            from agent.core.skills import format_skills_for_prompt, load_skills
+
+            result = load_skills(
+                project_rules_dir=self.config.project_rules_dir,
+                extra_dirs=self.config.skills_dirs or None,
+            )
+            if result.skills:
+                skills_text = format_skills_for_prompt(result.skills)
+
+        sb = self.config.safety.sandbox
+        self.config.system_prompt = build_system_prompt(
+            project_rules_dir=self.config.project_rules_dir,
+            sandbox_mode=sb.mode,
+            wsl_distro=sb.wsl.distro,
+            system_prompt_hint=sb.wsl.system_prompt_hint,
+            tool_snippets=self.registry.get_prompt_snippets() or None,
+            tool_guidelines=self.registry.get_prompt_guidelines() or None,
+            skills_text=skills_text,
+        )
 
     def on_event(self, callback: Callable[[Event], Any]) -> None:
         """Register a callback that fires for every event during a run.
@@ -104,6 +141,99 @@ class Agent:
     def off_event(self, callback: Callable[[Event], Any]) -> None:
         """Remove a previously registered event callback."""
         self._on_event = [cb for cb in self._on_event if cb != callback]
+
+    def switch_provider(
+        self, key_or_spec: str | ProviderConfig, session: Session | None = None
+    ) -> str:
+        """Switch the active provider between turns.
+
+        Args:
+            key_or_spec: Either a key from ``config.providers`` or an
+                ad-hoc ``ProviderConfig``.
+            session: Optional session to emit a :class:`ProviderSwitchEvent` into.
+
+        Returns:
+            Human-readable description of the new provider,
+            e.g. ``"anthropic/claude-sonnet-4-6"``.
+        """
+        old_name = self.provider.config.name
+        old_model = self.provider.config.model
+
+        if isinstance(key_or_spec, str):
+            if key_or_spec in self.config.providers:
+                cfg = self.config.providers[key_or_spec]
+            elif "/" in key_or_spec:
+                provider_name, model = key_or_spec.split("/", 1)
+                cfg = ProviderConfig(name=provider_name, model=model)
+            else:
+                raise ValueError(
+                    f"'{key_or_spec}' is not a known provider key and "
+                    f"doesn't match 'provider/model' format. "
+                    f"Available keys: "
+                    f"{', '.join(sorted(self.config.providers)) or '(none)'}"
+                )
+        else:
+            cfg = key_or_spec
+
+        self.provider = _create_provider(cfg)
+
+        if session is not None:
+            from agent.core.events import ProviderSwitchEvent
+
+            event = ProviderSwitchEvent(
+                from_provider=old_name,
+                from_model=old_model,
+                to_provider=cfg.name,
+                to_model=cfg.model,
+            )
+            session.append(event)
+            self._warn_capability_mismatch(session)
+
+        return f"{cfg.name}/{cfg.model}"
+
+    def _warn_capability_mismatch(self, session: Session) -> None:
+        """Log warnings if the new provider lacks capabilities used in the session so far."""
+        from agent.core.events import ToolCall, UserMessage
+
+        has_tool_calls = any(isinstance(e, ToolCall) for e in session.events)
+        has_images = any(isinstance(e, UserMessage) and e.is_multimodal for e in session.events)
+
+        if has_tool_calls and not self.provider.supports_tools:
+            logger.warning(
+                "New provider %s/%s does not support tools, but session has tool call history",
+                self.provider.config.name,
+                self.provider.config.model,
+            )
+        if has_images and not self.provider.supports_vision:
+            logger.warning(
+                "New provider %s/%s does not support vision, but session has image content",
+                self.provider.config.name,
+                self.provider.config.model,
+            )
+
+    async def _init_extensions(
+        self,
+        session: Session,
+        cancel_event: asyncio.Event | None = None,
+    ) -> None:
+        """Initialize the extension manager and register extension tools."""
+        mgr = ExtensionManager()
+        await mgr.initialize(session, self.config, cancel_event)
+
+        # Register extension tools
+        count = mgr.register_tools(self.registry)
+        if count:
+            logger.info("Registered %d extension tool(s)", count)
+
+        # Rebuild prompt with updated tool set (includes extension tools)
+        self._rebuild_system_prompt()
+
+        # Append system prompt additions from extensions
+        additions = mgr.get_system_prompt_additions()
+        if additions:
+            self.config.system_prompt = self.config.system_prompt + "\n---\n" + additions
+
+        self._extension_manager = mgr
 
     async def run(
         self,
@@ -141,6 +271,14 @@ class Agent:
                 except Exception:
                     logger.exception("Event callback %r failed on %s", cb, event.type)
 
+        if self._extension_manager is None:
+            await self._init_extensions(session, cancel_event)
+
+        # Keep the extension context in sync with the live session so that
+        # extension slash-commands (e.g. /inspect) see current data.
+        if self._extension_manager is not None:
+            self._extension_manager.update_session(session)
+
         session = await run_loop(
             session=session,
             provider=self.provider,
@@ -148,6 +286,7 @@ class Agent:
             config=self.config,
             on_event=_dispatch if self._on_event else None,
             cancel_event=cancel_event,
+            extension_manager=self._extension_manager,
         )
 
         return session

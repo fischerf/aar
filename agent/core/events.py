@@ -91,6 +91,8 @@ class EventType(str, Enum):
     PROVIDER_META = "provider_meta"
     ERROR = "error"
     SESSION = "session"
+    PROVIDER_SWITCH = "provider_switch"
+    CONTEXT_WINDOW = "context_window"
 
 
 class StopReason(str, Enum):
@@ -194,6 +196,30 @@ class SessionEvent(Event):
     action: str = ""  # "started", "resumed", "paused", "ended"
 
 
+class ProviderSwitchEvent(Event):
+    type: EventType = EventType.PROVIDER_SWITCH
+    from_provider: str = ""
+    from_model: str = ""
+    to_provider: str = ""
+    to_model: str = ""
+
+
+class ContextWindowEvent(Event):
+    """Emitted once per loop turn after context-management trimming.
+
+    Carries the current context fill so transports can render a live
+    progress indicator without needing direct access to the message list.
+    """
+
+    type: EventType = EventType.CONTEXT_WINDOW
+    ctx_tokens: int = 0  # estimated tokens in the (possibly trimmed) window
+    ctx_window: int = 0  # hard token limit (effective_context_window)
+    msgs_before: int = 0  # message count *before* any trimming this turn
+    msgs_after: int = 0  # message count *after* trimming
+    msgs_dropped: int = 0  # msgs_before - msgs_after  (0 when nothing was dropped)
+    strategy: str = ""  # "sliding_window" | "compact" | "summarize" | "none"
+
+
 # Union type for type-safe event handling
 AnyEvent = (
     UserMessage
@@ -205,6 +231,8 @@ AnyEvent = (
     | ProviderMeta
     | ErrorEvent
     | SessionEvent
+    | ProviderSwitchEvent
+    | ContextWindowEvent
 )
 
 EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
@@ -217,6 +245,8 @@ EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.PROVIDER_META: ProviderMeta,
     EventType.ERROR: ErrorEvent,
     EventType.SESSION: SessionEvent,
+    EventType.PROVIDER_SWITCH: ProviderSwitchEvent,
+    EventType.CONTEXT_WINDOW: ContextWindowEvent,
 }
 
 

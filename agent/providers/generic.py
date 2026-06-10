@@ -647,7 +647,12 @@ def _raise_for_status(resp: httpx.Response) -> None:
     if status == 200:
         return
 
-    body: str = resp.text or ""
+    # The response may be a streaming response that hasn't been read yet.
+    # Guard against httpx.ResponseNotRead by falling back to an empty body.
+    try:
+        body: str = resp.text or ""
+    except httpx.ResponseNotRead:
+        body = ""
 
     if status in (401, 403):
         raise PermissionError(

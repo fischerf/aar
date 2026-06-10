@@ -81,6 +81,8 @@ def _make_sdk_agent(provider: MockProvider) -> AarAcpAgent:
     """Return an AarAcpAgent with the mock provider injected."""
     config = _make_config()
     agent = AarAcpAgent(config=config, agent_name="test-agent")
+    # Disable the delay so optimistic pushes complete immediately in tests.
+    agent._PUSH_COMMANDS_DELAY = 0
 
     def patched_make(session_id: str = "", approval_callback=None):
         from agent.core.agent import Agent
@@ -629,6 +631,88 @@ class TestAarAcpAgentCloseSession:
         await agent.close_session(session_id="unknown-session-id")
 
 
+class TestAarAcpAgentCloseAllSessions:
+    """Shutdown teardown path called from ``run_acp_stdio``'s ``finally`` block.
+
+    Exists to avoid the anyio cross-task cancel-scope error that surfaces
+    when async-generator GC closes still-open MCP transports during process
+    exit instead of letting us close them in the correct task context.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tears_down_all_mcp_bridges(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r1 = await agent.new_session()
+        r2 = await agent.new_session()
+
+        bridge1 = AsyncMock()
+        bridge2 = AsyncMock()
+        agent._mcp_bridges[r1.session_id] = bridge1
+        agent._mcp_bridges[r2.session_id] = bridge2
+
+        await agent.close_all_sessions()
+
+        bridge1.__aexit__.assert_awaited_once_with(None, None, None)
+        bridge2.__aexit__.assert_awaited_once_with(None, None, None)
+        assert agent._mcp_bridges == {}
+
+    @pytest.mark.asyncio
+    async def test_cancels_in_flight_prompt_tasks(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r = await agent.new_session()
+        sid = r.session_id
+
+        started = asyncio.Event()
+
+        async def _parked() -> None:
+            started.set()
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(_parked())
+        agent._run_tasks[sid] = task
+        await started.wait()
+
+        await agent.close_all_sessions()
+
+        assert task.done()
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_no_sessions_is_noop(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        # Must not raise even when there's nothing to clean up.
+        await agent.close_all_sessions()
+
+    @pytest.mark.asyncio
+    async def test_continues_when_one_bridge_raises(self, tmp_path):
+        """One failing bridge mustn't prevent the rest from being torn down."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+
+        r1 = await agent.new_session()
+        r2 = await agent.new_session()
+
+        bad = AsyncMock()
+        bad.__aexit__.side_effect = RuntimeError("boom")
+        good = AsyncMock()
+        agent._mcp_bridges[r1.session_id] = bad
+        agent._mcp_bridges[r2.session_id] = good
+
+        await agent.close_all_sessions()
+
+        good.__aexit__.assert_awaited_once()
+        assert agent._mcp_bridges == {}
+
+
 class TestAarAcpAgentCancel:
     @pytest.mark.asyncio
     async def test_cancel_sets_event(self, tmp_path):
@@ -969,6 +1053,77 @@ class TestSetSessionModel:
         assert session_cfg.provider.model == "claude-sonnet-4-6"
 
     @pytest.mark.asyncio
+    async def test_switches_model_by_registry_key(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "session_dir": tmp_path,
+                "providers": {
+                    "fast": ProviderConfig(name="openai", model="gpt-4o-mini", api_key="k1"),
+                    "smart": ProviderConfig(
+                        name="anthropic", model="claude-sonnet-4-6", api_key="k2"
+                    ),
+                },
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        await agent.set_session_model(model_id="fast", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "openai"
+        assert session_cfg.provider.model == "gpt-4o-mini"
+        assert session_cfg.provider.api_key == "k1"
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_model_by_registry_key(self, tmp_path):
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "session_dir": tmp_path,
+                "providers": {
+                    "fast": ProviderConfig(name="openai", model="gpt-4o-mini", api_key="k1"),
+                    "smart": ProviderConfig(
+                        name="anthropic", model="claude-sonnet-4-6", api_key="k2"
+                    ),
+                },
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        resp = await agent.set_config_option(config_id="model", value="smart", session_id=sid)
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+        assert session_cfg.provider.api_key == "k2"
+        # Response should include updated config_options
+        assert resp is not None
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_model_fallback_to_prefix(self, tmp_path):
+        """When model_id is not a registry key, fall back to _model_id_to_provider."""
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        agent = AarAcpAgent(config=config)
+        r = await agent.new_session()
+        sid = r.session_id
+
+        resp = await agent.set_config_option(
+            config_id="model", value="claude-sonnet-4-6", session_id=sid
+        )
+
+        session_cfg = agent._session_configs[sid]
+        assert session_cfg.provider.name == "anthropic"
+        assert session_cfg.provider.model == "claude-sonnet-4-6"
+        # Response should include updated config_options (matches the by-registry-key test)
+        assert resp is not None
+
+    @pytest.mark.asyncio
     async def test_different_sessions_have_independent_models(self, tmp_path):
         config = _make_config()
         config = config.model_copy(update={"session_dir": tmp_path})
@@ -1008,11 +1163,11 @@ class TestAvailableCommands:
         assert "tools" in names
         assert "policy" in names
 
-    def test_no_model_or_clear_commands(self):
+    def test_model_command_present_clear_absent(self):
         from agent.transports.acp import _available_commands
 
         names = {c.name for c in _available_commands()}
-        assert "model" not in names
+        assert "model" in names
         assert "clear" not in names
 
     def test_all_commands_have_descriptions(self):
@@ -1200,6 +1355,24 @@ class TestSlashCommandHandler:
         # Built-in tools must also appear (the bug was they were missing)
         assert "read_file" in reply
         assert "write_file" in reply
+
+    def test_tools_includes_search_builtins(self, tmp_path):
+        """When grep/find_files are enabled, /tools must list them."""
+        from agent.core.config import ToolConfig
+        from agent.core.session import Session
+
+        config = _make_config()
+        config = config.model_copy(
+            update={
+                "tools": ToolConfig(enabled_builtins=["read_file", "bash", "grep", "find_files"])
+            }
+        )
+        agent = AarAcpAgent(config=config)
+        session = Session(session_id="x")
+        reply = agent._handle_slash_command("/tools", "x", session)
+        assert "grep" in reply
+        assert "find_files" in reply
+        assert "read_file" in reply
 
     def test_policy_contains_approval_fields(self, tmp_path):
         from agent.core.session import Session
@@ -1925,6 +2098,112 @@ class TestAcpModels:
         assert data["name"] == "aar"
         assert "text/plain" in data["input_content_types"]
 
+    # Context-window fields on AcpRun
+    def test_acp_run_ctx_fields_default_zero(self):
+        run = AcpRun(agent_name="aar")
+        assert run.ctx_tokens == 0
+        assert run.ctx_window == 0
+        assert run.msgs_dropped == 0
+
+    def test_acp_run_ctx_fields_set(self):
+        run = AcpRun(agent_name="aar", ctx_tokens=4096, ctx_window=8192, msgs_dropped=3)
+        assert run.ctx_tokens == 4096
+        assert run.ctx_window == 8192
+        assert run.msgs_dropped == 3
+
+    def test_acp_run_ctx_fields_in_serialisation(self):
+        run = AcpRun(agent_name="aar", ctx_tokens=1000, ctx_window=8192)
+        data = run.model_dump()
+        assert data["ctx_tokens"] == 1000
+        assert data["ctx_window"] == 8192
+
+
+class TestContextWindowUpdatedEvent:
+    """ContextWindowUpdatedEvent — new SSE event type in the ACP HTTP transport."""
+
+    def test_default_fields(self):
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        evt = ContextWindowUpdatedEvent(run_id="abc123")
+        assert evt.type == "context_window_updated"
+        assert evt.run_id == "abc123"
+        assert evt.ctx_tokens == 0
+        assert evt.ctx_window == 0
+        assert evt.msgs_dropped == 0
+        assert evt.msgs_before == 0
+        assert evt.msgs_after == 0
+        assert evt.strategy == ""
+
+    def test_fields_set(self):
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        evt = ContextWindowUpdatedEvent(
+            run_id="abc",
+            ctx_tokens=4096,
+            ctx_window=8192,
+            msgs_dropped=5,
+            msgs_before=20,
+            msgs_after=15,
+            strategy="sliding_window",
+        )
+        assert evt.ctx_tokens == 4096
+        assert evt.msgs_dropped == 5
+        assert evt.strategy == "sliding_window"
+
+    def test_serialises_correctly(self):
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        evt = ContextWindowUpdatedEvent(run_id="xyz", ctx_tokens=3000, ctx_window=8192)
+        data = evt.model_dump()
+        assert data["type"] == "context_window_updated"
+        assert data["run_id"] == "xyz"
+        assert data["ctx_tokens"] == 3000
+
+    @pytest.mark.asyncio
+    async def test_in_sse_stream_when_context_window_set(self):
+        """ContextWindowUpdatedEvent should appear in the SSE stream when ctx window is configured."""
+        from agent.transports.acp.http import ContextWindowUpdatedEvent
+
+        provider = MockProvider()
+        provider.enqueue_text("hi", stop="end_turn")
+
+        config = _make_config()
+        config = config.model_copy(
+            update={"context_window": 8192, "context_strategy": "sliding_window"}
+        )
+        transport = AcpTransport(config=config, agent_name="test-agent", agent_description="Test")
+
+        def patched_make():
+            from agent.core.agent import Agent
+
+            return Agent(
+                config=transport.config,
+                provider=provider,
+                approval_callback=transport.approval_callback,
+                registry=transport.registry,
+            )
+
+        transport._make_agent = patched_make  # type: ignore[method-assign]
+
+        run, queue = await transport.create_run(
+            agent_name="test-agent",
+            input_messages=[_user_msg("hello")],
+            mode=RunMode.STREAM,
+        )
+        events = []
+        while True:
+            evt = await queue.get()
+            if evt is None:
+                break
+            events.append(evt)
+
+        ctx_events = [e for e in events if isinstance(e, ContextWindowUpdatedEvent)]
+        assert len(ctx_events) >= 1
+        assert ctx_events[0].ctx_window == 8192
+        assert ctx_events[0].run_id == run.run_id
+        # The run object itself should also have the fill state
+        assert run.ctx_window == 8192
+
 
 class TestSseLine:
     def test_sse_line_format(self):
@@ -2608,3 +2887,181 @@ class TestCollectOutput:
         output = _collect_output(session)
         assert len(output) == 1
         assert output[0].text == "non-empty"
+
+
+class TestExtensionCommands:
+    """Extension slash commands are dispatched in the ACP transport (not sent to the LLM)."""
+
+    def test_available_commands_includes_extension_commands(self):
+        from agent.transports.acp import _available_commands
+
+        cmds = _available_commands({"inspect": "Inspect current state"})
+        names = {c.name for c in cmds}
+        assert "status" in names
+        assert "tools" in names
+        assert "policy" in names
+        assert "inspect" in names
+
+    def test_available_commands_description_preserved(self):
+        from agent.transports.acp import _available_commands
+
+        cmds = _available_commands({"mycommand": "Does something useful"})
+        by_name = {c.name: c for c in cmds}
+        assert by_name["mycommand"].description == "Does something useful"
+
+    def test_available_commands_empty_extra_unchanged(self):
+        from agent.transports.acp import _available_commands
+
+        baseline = {c.name for c in _available_commands()}
+        with_empty = {c.name for c in _available_commands({})}
+        assert baseline == with_empty
+
+    @pytest.mark.asyncio
+    async def test_extension_command_dispatched_without_agent_loop(self, tmp_path):
+        """A /extcmd prompt calls the extension handler, not the provider."""
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        called_with: list[tuple[str, Any]] = []
+
+        def my_handler(args_str: str, ctx: Any) -> str:
+            called_with.append((args_str, ctx))
+            return "extension output"
+
+        mock_mgr = MagicMock()
+        mock_mgr.commands = {"extcmd": ("My extension command", my_handler)}
+        sdk_agent._extension_managers[sid] = mock_mgr
+
+        response = await sdk_agent.prompt(prompt=[{"text": "/extcmd some args"}], session_id=sid)
+
+        assert response.stop_reason == "end_turn"
+        assert len(called_with) == 1
+        assert called_with[0][0] == "some args"
+        assert len(provider.call_history) == 0
+
+    @pytest.mark.asyncio
+    async def test_extension_command_reply_sent_to_client(self, tmp_path):
+        """The extension handler's return value is pushed as an agent message."""
+        from acp.schema import AgentMessageChunk
+
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        mock_mgr = MagicMock()
+        mock_mgr.commands = {"greet": ("Say hello", lambda a, c: "hello from extension")}
+        sdk_agent._extension_managers[sid] = mock_mgr
+
+        await sdk_agent.prompt(prompt=[{"text": "/greet"}], session_id=sid)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        agent_msgs = [u for u in all_updates if isinstance(u, AgentMessageChunk)]
+        assert any("hello from extension" in getattr(m.content, "text", "") for m in agent_msgs)
+
+    @pytest.mark.asyncio
+    async def test_extension_command_no_args(self, tmp_path):
+        """Handler receives empty string when no args follow the command."""
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        received: list[str] = []
+        mock_mgr = MagicMock()
+        mock_mgr.commands = {"noargs": ("No-arg command", lambda a, c: received.append(a) or "")}
+        sdk_agent._extension_managers[sid] = mock_mgr
+
+        await sdk_agent.prompt(prompt=[{"text": "/noargs"}], session_id=sid)
+
+        assert received == [""]
+
+    @pytest.mark.asyncio
+    async def test_extension_commands_in_available_commands_push(self, tmp_path):
+        """AvailableCommandsUpdate includes extension commands from the session's manager."""
+        from acp.schema import AvailableCommandsUpdate
+
+        from agent.extensions.api import ExtensionAPI
+        from agent.extensions.loader import ExtensionInfo
+        from agent.extensions.manager import ExtensionManager
+
+        provider = MockProvider()
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        sid = r.session_id
+
+        mgr = ExtensionManager()
+        api = ExtensionAPI("test-ext")
+        api._commands["inspect"] = ("Inspect session state", lambda a, c: None)
+        info = ExtensionInfo(name="test-ext", source="project", path=None)
+        info.api = api
+        mgr._extensions = [info]
+        sdk_agent._extension_managers[sid] = mgr
+
+        mock_conn.reset_mock()
+        await sdk_agent._push_available_commands(sid)
+
+        all_updates = [call.kwargs["update"] for call in mock_conn.session_update.call_args_list]
+        cmd_updates = [u for u in all_updates if isinstance(u, AvailableCommandsUpdate)]
+        assert cmd_updates
+        names = {c.name for c in cmd_updates[-1].available_commands}
+        assert "inspect" in names
+        assert "status" in names
+
+    @pytest.mark.asyncio
+    async def test_unknown_slash_command_not_intercepted(self, tmp_path):
+        """An unknown /slash is passed through to the LLM, not silently dropped."""
+        provider = MockProvider()
+        provider.enqueue_text("I don't know that command.", stop="end_turn")
+        config = _make_config()
+        config = config.model_copy(update={"session_dir": tmp_path})
+        sdk_agent = _make_sdk_agent(provider)
+        sdk_agent._config = config
+        from agent.memory.session_store import SessionStore
+
+        sdk_agent._store = SessionStore(tmp_path)
+        mock_conn = AsyncMock()
+        sdk_agent._conn = mock_conn
+
+        r = await sdk_agent.new_session()
+        await sdk_agent.prompt(prompt=[{"text": "/unknown_cmd"}], session_id=r.session_id)
+
+        assert len(provider.call_history) == 1

@@ -40,6 +40,7 @@ class HeaderStyle(BaseModel):
     provider_style: str = "bold cyan"
     tokens_style: str = "dim green"
     tokens_warning_style: str = "bold red"
+    tokens_warning_mid_style: str = "bold yellow"  # context fill 60-80 %
     session_style: str = "dim"
     state_style: str = "bold yellow"
 
@@ -159,6 +160,18 @@ class ThinkingPanelConfig(BaseModel):
     scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
 
 
+class CompanionConfig(BaseModel):
+    """Configuration for the living ASCII companion widget in the fixed TUI."""
+
+    enabled: bool = True
+    name: str = "Bit"
+    git_poll_interval: int = 60  # seconds between git status probes
+    # Rendering order for the inline header companion.
+    # Valid part names: "kaomoji", "xp_bar", "level", "mood", "name", "steps"
+    parts: list[str] = Field(default_factory=lambda: ["kaomoji", "xp_bar", "level", "mood"])
+    animation_interval: float = 0.4  # seconds between kaomoji animation frames
+
+
 class FixedLayoutConfig(BaseModel):
     """Layout configuration for the full-screen fixed TUI.
 
@@ -179,6 +192,7 @@ class FixedLayoutConfig(BaseModel):
     selected_block_style: str = "on #2a2a3a"  # highlight color for selected blocks
     scrollbar: ScrollbarConfig = Field(default_factory=ScrollbarConfig)
     thinking_panel: ThinkingPanelConfig = Field(default_factory=ThinkingPanelConfig)
+    companion: CompanionConfig = Field(default_factory=CompanionConfig)
 
 
 class SectionConfig(BaseModel):

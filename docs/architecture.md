@@ -54,8 +54,13 @@ agent/
 │   └── session_store.py      # JSONL event persistence + compaction
 │
 ├── extensions/
+│   ├── api.py                # ExtensionAPI, BlockResult, ExtensionContext, Protocols
+│   ├── loader.py             # Three-tier auto-discovery + module loading
+│   ├── manager.py            # ExtensionManager — wires extensions into the core loop
 │   ├── mcp.py                # MCP bridge (stdio + HTTP transports)
-│   └── observability.py      # session_metrics() — reads event history only
+│   ├── observability.py      # session_metrics() — reads event history only
+│   └── contrib/              # Built-in example extensions
+│       └── companion.py      # Living companion (mood, level, XP) as extension
 │
 └── transports/               # Thin I/O adapters — no business logic
     ├── cli.py                # Typer CLI (chat, run, tui, serve, acp)
@@ -64,6 +69,7 @@ agent/
     ├── web.py                # ASGI web server + SSE streaming
     ├── stream.py             # EventStream — cross-request pub/sub
     ├── keybinds.py           # keyboard shortcuts for fixed TUI
+    ├── prompt_queue.py       # transport-agnostic prompt queue
     ├── acp_permissions.py    # ACP approval callback
     ├── acp/                  # ACP transport package
     │   ├── common.py         # shared types + helpers
@@ -211,13 +217,15 @@ Side effects drive policy decisions (read-only mode blocks WRITE+EXECUTE, approv
 
 ### Built-in tools
 
-| Tool | Side effects | Source |
-|------|-------------|--------|
-| `read_file` | READ | `tools/builtin/filesystem.py` |
-| `write_file` | WRITE | `tools/builtin/filesystem.py` |
-| `edit_file` | WRITE | `tools/builtin/filesystem.py` |
-| `list_directory` | READ | `tools/builtin/filesystem.py` |
-| `bash` | EXECUTE | `tools/builtin/shell.py` |
+| Tool | Side effects | Source | Description |
+|------|-------------|--------|-------------|
+| `read_file` | READ | `tools/builtin/filesystem.py` | Read file contents with line numbers. Supports `start_line`/`end_line` for surgical reads. Files >500 lines return a preview + hint to use line ranges. |
+| `write_file` | WRITE | `tools/builtin/filesystem.py` | Create or overwrite a file. |
+| `edit_file` | WRITE | `tools/builtin/filesystem.py` | Find-and-replace a unique string in a file. |
+| `list_directory` | READ | `tools/builtin/filesystem.py` | List directory contents with types and sizes. |
+| `bash` | EXECUTE | `tools/builtin/shell.py` | Execute a shell command (sandboxed when configured). |
+| `grep` | READ | `tools/builtin/search.py` | Regex content search across files. Returns matches with paths and line numbers. Skips hidden/generated dirs. Paginated. |
+| `find_files` | READ | `tools/builtin/search.py` | Glob-based file path search. Returns relative paths. Skips hidden/generated dirs. |
 
 Built-ins are opt-in via `ToolConfig.enabled_builtins`. The agent constructor registers only the enabled set.
 
@@ -326,7 +334,7 @@ Transports are thin I/O adapters. They create an `Agent`, wire up event handlers
 |-----------|--------|-------------|-------|
 | CLI | `transports/cli.py` | `aar chat`, `aar run`, etc. | Typer app, terminal approval callback |
 | TUI | `transports/tui.py` | `aar tui` | Rich inline TUI, scrollable terminal UI |
-| TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer |
+| TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer, prompt queue |
 | Web | `transports/web.py` | `aar serve` | ASGI app, SSE streaming, per-request safety override |
 | Stream | `transports/stream.py` | (internal) | `EventStream` for cross-request pub/sub |
 
@@ -336,6 +344,7 @@ Shared TUI sub-packages:
 |---------|----------|
 | `transports/tui_utils/` | Formatting helpers shared by both TUI transports |
 | `transports/keybinds.py` | Keyboard shortcut definitions for the fixed TUI |
+| `transports/prompt_queue.py` | Transport-agnostic prompt queue for auto-dispatching when idle |
 | `transports/tui_widgets/` | Textual widget classes: bars, blocks, chat body, input, log viewer, thinking panel |
 | `transports/themes/` | Theme models, built-in themes, theme registry |
 
@@ -343,6 +352,21 @@ All transports share the same `AgentConfig` schema. Transport-specific behavior 
 - How user input is collected
 - How events are displayed
 - The approval callback implementation (terminal prompt vs. auto-deny vs. custom)
+
+### Prompt queue (TUI Fixed)
+
+The TUI Fixed transport supports **prompt queueing** — users can type and submit
+messages while the agent is running. Queued prompts auto-dispatch in FIFO order
+once the agent becomes idle.
+
+| Aspect | Detail |
+|--------|--------|
+| Module | `transports/prompt_queue.py` (`PromptQueue`) |
+| Trigger | `Ctrl+S` while agent is busy |
+| Feedback | "Queued (N pending)" in chat + header badge |
+| Drain | 100 ms poll on `session.state` via `start_drain()` |
+| Cancel | `Ctrl+X` clears the queue along with the running agent |
+| Commands | `/queue` (list), `/queue clear` (flush) |
 
 ## MCP (Model Context Protocol)
 
@@ -360,3 +384,14 @@ All transports share the same `AgentConfig` schema. Transport-specific behavior 
 - Per-step breakdown with the same metrics
 
 No live provider or executor needed — it reads the event history only.
+
+## Extensions
+
+The extension system (`agent/extensions/`) lets third-party code hook into the agent lifecycle without touching core internals.
+
+- **`api.py`** — public surface: `ExtensionAPI` (the stable interface extensions program against), `BlockResult` (return type for blocking hooks), `ExtensionContext` (read-only snapshot of loop state passed to every hook)
+- **`loader.py`** — three-tier discovery: built-in extensions → `~/.aar/extensions/` user dir → workspace `.aar/extensions/` dir. Each tier can override the previous.
+- **`manager.py`** — runtime integration: loads extensions via the loader, wires them into the core loop, and dispatches lifecycle events (init, pre/post-step, shutdown)
+- **`contrib/`** — example/reference extensions shipped with Aar
+
+See [docs/extensions.md](extensions.md) for the full developer guide.

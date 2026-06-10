@@ -384,6 +384,133 @@ class TestSessionPersistence:
 
 
 # ---------------------------------------------------------------------------
+# Compact — companion baseline watermark
+# ---------------------------------------------------------------------------
+
+
+class TestCompactCompanionBaseline:
+    """compact() must roll ToolCall / ErrorEvent counts into companion_baseline
+    before truncating events so the companion's lifetime progress is never lost."""
+
+    def test_compact_writes_companion_baseline(self, tmp_dir: Path):
+        """After compaction companion_stats_from_session still returns the
+        full lifetime counts (baseline covers pruned events, remaining events
+        are added on top — no double-counting)."""
+        from agent.core.events import ErrorEvent, ToolCall
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(8):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        for _ in range(2):
+            s.events.append(ErrorEvent(message="boom"))
+        store.save(s)
+
+        store.compact(s.session_id, max_events=5, on_prune=companion_on_prune)
+        reloaded = store.load(s.session_id)
+
+        # Only 5 events remain, but the full 8 steps / 2 errors are recoverable
+        assert len(reloaded.events) == 5
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 8
+        assert stats["errors"] == 2
+
+    def test_compact_baseline_accumulates_across_multiple_compactions(self, tmp_dir: Path):
+        """A second compaction adds to the watermark set by the first, and
+        companion_stats_from_session always returns the correct lifetime total."""
+        from agent.core.events import ToolCall
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        # First batch: 6 tool calls
+        for _ in range(6):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+        store.compact(
+            s.session_id, max_events=3, on_prune=companion_on_prune
+        )  # prunes 3, baseline steps=3, keeps 3
+
+        # Add 4 more tool calls to the saved session, then compact again
+        s2 = store.load(s.session_id)
+        for _ in range(4):
+            s2.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s2)
+        store.compact(
+            s2.session_id, max_events=3, on_prune=companion_on_prune
+        )  # prunes 4 more, baseline=3+4=7, keeps 3
+
+        # The end-to-end check: lifetime total is always 6 + 4 = 10
+        reloaded = store.load(s.session_id)
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 10
+
+    def test_compact_baseline_is_saved_to_disk(self, tmp_dir: Path):
+        """The baseline watermark survives a save/load round-trip, and
+        companion_stats_from_session recovers the correct lifetime total."""
+        from agent.core.events import ToolCall
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(5):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+        store.compact(s.session_id, max_events=2, on_prune=companion_on_prune)
+
+        reloaded = store.load(s.session_id)
+        # 2 events remain; the other 3 were pruned and recorded in the baseline.
+        assert len(reloaded.events) == 2
+        # End-to-end: full lifetime count is still recoverable.
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 5
+
+    def test_compact_no_op_does_not_write_baseline(self, tmp_dir: Path):
+        """When events are under the limit, no baseline is written."""
+        from agent.core.events import ToolCall
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(3):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+
+        compacted = store.compact(s.session_id, max_events=100)
+        assert "companion_baseline" not in compacted.metadata
+
+    def test_compact_baseline_used_by_companion_stats(self, tmp_dir: Path):
+        """companion_stats_from_session recovers lifetime totals after compaction."""
+        from agent.core.events import ToolCall
+        from agent.transports.companion_state import (
+            companion_on_prune,
+            companion_stats_from_session,
+        )
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        for _ in range(12):
+            s.events.append(ToolCall(tool_name="bash", tool_call_id="x"))
+        store.save(s)
+        store.compact(s.session_id, max_events=4, on_prune=companion_on_prune)
+
+        reloaded = store.load(s.session_id)
+        # Only 4 events remain, but the baseline covers the other 8
+        assert len(reloaded.events) == 4
+        stats = companion_stats_from_session(reloaded)
+        assert stats["steps"] == 12
+
+
+# ---------------------------------------------------------------------------
 # Session resumption
 # ---------------------------------------------------------------------------
 
@@ -532,3 +659,101 @@ class TestContextManagement:
         msgs = [{"role": "user", "content": "a" * 10000}]
         result = trim_to_token_budget(msgs, 1)
         assert len(result) == 1  # keeps at least one message
+
+
+class TestTruncateOldToolResults:
+    def _make_tool_result_msg(self, content: str, tool_use_id: str = "id") -> dict:
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": False,
+                }
+            ],
+        }
+
+    def test_no_truncation_when_few_results(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("x" * 1000, "t1"),
+            self._make_tool_result_msg("y" * 1000, "t2"),
+            self._make_tool_result_msg("z" * 1000, "t3"),
+            self._make_tool_result_msg("w" * 1000, "t4"),
+            self._make_tool_result_msg("v" * 1000, "t5"),
+        ]
+        # With keep_recent=3, threshold is 3+2=5 — so 5 results still don't truncate
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+        # Should return original list (no copy needed)
+        assert result is msgs
+
+    def test_old_results_truncated(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("a" * 1000, "t1"),
+            self._make_tool_result_msg("b" * 1000, "t2"),
+            self._make_tool_result_msg("c" * 1000, "t3"),
+            self._make_tool_result_msg("d" * 1000, "t4"),
+            self._make_tool_result_msg("e" * 1000, "t5"),
+            self._make_tool_result_msg("f" * 1000, "t6"),
+            self._make_tool_result_msg("g" * 1000, "t7"),
+        ]
+        # 7 tool results > keep_recent(3) + 2 = 5, so truncation activates
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+        assert len(result) == 8
+
+        # First four tool result messages (indices 1-4) should be truncated
+        block1 = result[1]["content"][0]
+        assert len(block1["content"]) < 1000
+        assert "truncated" in block1["content"]
+        assert "1000" in block1["content"]
+
+        block2 = result[2]["content"][0]
+        assert len(block2["content"]) < 1000
+        assert "truncated" in block2["content"]
+
+    def test_recent_results_preserved(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("a" * 1000, "t1"),
+            self._make_tool_result_msg("b" * 1000, "t2"),
+            self._make_tool_result_msg("c" * 1000, "t3"),
+            self._make_tool_result_msg("d" * 1000, "t4"),
+            self._make_tool_result_msg("e" * 1000, "t5"),
+            self._make_tool_result_msg("f" * 1000, "t6"),
+            self._make_tool_result_msg("g" * 1000, "t7"),
+        ]
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+
+        # Last 3 tool result messages (indices 5, 6, 7) should keep full content
+        assert result[5]["content"][0]["content"] == "e" * 1000
+        assert result[6]["content"][0]["content"] == "f" * 1000
+        assert result[7]["content"][0]["content"] == "g" * 1000
+
+    def test_short_results_not_truncated(self):
+        from agent.core.session import truncate_old_tool_results
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            self._make_tool_result_msg("short", "t1"),  # under max_chars
+            self._make_tool_result_msg("also short", "t2"),  # under max_chars
+            self._make_tool_result_msg("c" * 1000, "t3"),
+            self._make_tool_result_msg("d" * 1000, "t4"),
+            self._make_tool_result_msg("e" * 1000, "t5"),
+            self._make_tool_result_msg("f" * 1000, "t6"),
+            self._make_tool_result_msg("g" * 1000, "t7"),
+            self._make_tool_result_msg("h" * 1000, "t8"),
+        ]
+        result = truncate_old_tool_results(msgs, keep_recent=3, max_chars=500)
+
+        # First two are old but short — should NOT be truncated
+        assert result[1]["content"][0]["content"] == "short"
+        assert result[2]["content"][0]["content"] == "also short"

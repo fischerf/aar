@@ -47,6 +47,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import AsyncExitStack
@@ -100,6 +101,20 @@ class MCPServerConfig(BaseModel):
 class MCPClient:
     """Manages a single dedicated connection to one MCP server.
 
+    The underlying transport (``stdio_client`` / ``streamablehttp_client``) is
+    opened inside a dedicated background task. This guarantees that the anyio
+    cancel scopes those clients create are always *entered and exited in the
+    same task* — even when ``__aenter__`` and ``__aexit__`` happen to be
+    called from different :class:`asyncio.Task` instances (a common pattern
+    in long-lived ACP servers, where ``session/new`` and ``session/close``
+    are dispatched on different handler tasks).
+
+    Without this indirection, exiting an ``stdio_client`` from a different
+    task than the one that opened it raises::
+
+        RuntimeError: Attempted to exit cancel scope in a different task
+                      than it was entered in
+
     Use as an async context manager::
 
         async with MCPClient(config) as client:
@@ -109,34 +124,120 @@ class MCPClient:
 
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
-        self._exit_stack = AsyncExitStack()
-        self._session = None
+        self._session: Any = None
+        # Lifetime plumbing — created in ``__aenter__``, cleared in ``__aexit__``.
+        self._stop_event: asyncio.Event | None = None
+        self._ready: asyncio.Future[Any] | None = None
+        self._lifetime_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> MCPClient:
         _require_mcp()
 
-        if self.config.transport == "stdio":
-            read, write = await self._connect_stdio()
-        elif self.config.transport == "http":
-            read, write = await self._connect_http()
-        else:
-            raise ValueError(
-                f"Unknown MCP transport: {self.config.transport!r}. Use 'stdio' or 'http'."
-            )
+        loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
+        self._ready = loop.create_future()
+        self._lifetime_task = asyncio.create_task(
+            self._run_lifetime(),
+            name=f"mcp-client-{self.config.name}",
+        )
 
-        from mcp import ClientSession
-
-        self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
-        await self._session.initialize()
-        logger.info("Connected to MCP server %r (%s)", self.config.name, self.config.transport)
+        try:
+            self._session = await self._ready
+        except BaseException:
+            # Startup failed, or our caller was cancelled before connect
+            # completed. Signal the lifetime task to unwind in its own task
+            # context (so anyio cancel scopes close cleanly) and propagate.
+            self._stop_event.set()
+            task = self._lifetime_task
+            if task is not None and not task.done():
+                try:
+                    # ``shield`` lets the lifetime task finish cleanup even
+                    # if we ourselves are being cancelled. The outer await
+                    # may still raise CancelledError immediately; that's
+                    # fine — the shielded task runs to completion in the
+                    # background.
+                    await asyncio.shield(task)
+                except BaseException:
+                    pass
+            raise
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        await self._exit_stack.aclose()
+        stop_event = self._stop_event
+        lifetime_task = self._lifetime_task
+
+        if stop_event is not None:
+            stop_event.set()
+
+        if lifetime_task is not None:
+            try:
+                await lifetime_task
+            except asyncio.CancelledError:
+                # Lifetime task was cancelled internally; cleanup still ran
+                # inside its own task, so we're safe to swallow this.
+                pass
+            except BaseException as exc:  # noqa: BLE001 — log + continue cleanup
+                logger.warning(
+                    "MCP lifetime task for %r errored on close: %s",
+                    self.config.name,
+                    exc,
+                )
+
         self._session = None
+        self._stop_event = None
+        self._lifetime_task = None
+        self._ready = None
         logger.info("Disconnected from MCP server %r", self.config.name)
 
-    async def _connect_stdio(self):
+    async def _run_lifetime(self) -> None:
+        """Dedicated task that owns the transport's full lifecycle.
+
+        Opens the transport + ClientSession inside an :class:`AsyncExitStack`,
+        publishes the live session via ``self._ready``, parks on the stop
+        event, and then unwinds the stack in this same task. anyio cancel
+        scopes from ``stdio_client`` / ``streamablehttp_client`` are
+        therefore always exited in the task that entered them.
+        """
+        from mcp import ClientSession
+
+        assert self._ready is not None and self._stop_event is not None
+        ready = self._ready
+        stop_event = self._stop_event
+
+        try:
+            async with AsyncExitStack() as stack:
+                if self.config.transport == "stdio":
+                    read, write = await self._open_stdio(stack)
+                elif self.config.transport == "http":
+                    read, write = await self._open_http(stack)
+                else:
+                    raise ValueError(
+                        f"Unknown MCP transport: {self.config.transport!r}. Use 'stdio' or 'http'."
+                    )
+
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                logger.info(
+                    "Connected to MCP server %r (%s)",
+                    self.config.name,
+                    self.config.transport,
+                )
+
+                if not ready.done():
+                    ready.set_result(session)
+
+                # Park here until ``__aexit__`` (or cancellation) wakes us.
+                await stop_event.wait()
+        except BaseException as exc:
+            if not ready.done():
+                # Surface startup errors to ``__aenter__`` without re-raising
+                # here — the awaiter will re-raise on our behalf.
+                ready.set_exception(exc)
+                return
+            # Already running — let ``__aexit__``'s await observe the error.
+            raise
+
+    async def _open_stdio(self, stack: AsyncExitStack) -> tuple[Any, Any]:
         from mcp import StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -152,10 +253,10 @@ class MCPClient:
             args=self.config.args,
             env=merged_env,
         )
-        read, write = await self._exit_stack.enter_async_context(stdio_client(params))
+        read, write = await stack.enter_async_context(stdio_client(params))
         return read, write
 
-    async def _connect_http(self):
+    async def _open_http(self, stack: AsyncExitStack) -> tuple[Any, Any]:
         if not self.config.url:
             raise ValueError(
                 f"MCP server {self.config.name!r}: 'url' is required for http transport"
@@ -166,7 +267,7 @@ class MCPClient:
             # Older SDK versions used a different module path
             from mcp.client.http import streamablehttp_client  # type: ignore[no-redef]
 
-        read, write, _ = await self._exit_stack.enter_async_context(
+        read, write, _ = await stack.enter_async_context(
             streamablehttp_client(self.config.url, headers=self.config.headers or None)
         )
         return read, write

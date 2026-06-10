@@ -26,6 +26,11 @@ class ToolSpec(BaseModel):
     side_effects: list[SideEffect] = Field(default_factory=lambda: [SideEffect.NONE])
     requires_approval: bool = False
 
+    # One-line summary shown in the system prompt's "Available tools" section.
+    prompt_snippet: str = ""
+    # Conditional guidelines injected into the system prompt when this tool is active.
+    prompt_guidelines: list[str] = Field(default_factory=list)
+
     # The actual callable (excluded from serialization)
     handler: Callable[..., Coroutine[Any, Any, str]] | Callable[..., str] | None = Field(
         default=None, exclude=True

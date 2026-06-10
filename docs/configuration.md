@@ -15,11 +15,18 @@ config = AgentConfig(
         api_key="...",                             # or set via env var
         max_tokens=4096,
         temperature=0.0,
+        context_window=None,                       # override AgentConfig.context_window per provider
+        token_budget=None,                         # override AgentConfig.token_budget per provider
+        cost_limit=None,                           # override AgentConfig.cost_limit per provider
         response_format="",                        # "" | "json" | "json_schema"
         json_schema={},                            # schema when response_format="json_schema"
     ),
+    providers={                                    # named provider profiles for runtime switching
+        "claude": ProviderConfig(name="anthropic", model="claude-sonnet-4-6"),
+        "gpt4": ProviderConfig(name="openai", model="gpt-4o"),
+    },
     tools=ToolConfig(
-        enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash"],
+        enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash", "grep", "find_files"],
         command_timeout=30,                        # per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
     ),
@@ -46,7 +53,7 @@ config = AgentConfig(
     timeout=0.0,                                   # wall-clock limit in seconds for the whole run; 0.0 = no limit
     streaming=False,                               # use token-level streaming when supported
     context_window=0,                              # model context limit in tokens; 0 = no management
-    context_strategy="sliding_window",             # "sliding_window" | "none"
+    context_strategy="sliding_window",             # "sliding_window" | "compact" | "none"
     system_prompt="You are a helpful assistant.",
     tui=TUIConfig(
         theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name
@@ -62,6 +69,30 @@ config = AgentConfig(
     log_file=None,                                 # opt-in file logging path (append mode)
 )
 ```
+
+### Named provider profiles (`providers`)
+
+The `providers` dict lets you pre-configure multiple LLM providers and switch between them at runtime with `/model <key>`. Each entry is a full `ProviderConfig` — API keys, temperature, max_tokens, and provider-specific `extra` settings are all per-profile.
+
+The `provider` field selects the active profile:
+- **String** — key into `providers` (e.g. `"provider": "claude"`)
+- **Inline object** — a `ProviderConfig` dict (backward compatible with existing configs)
+
+See [Providers — Runtime provider switching](providers.md#runtime-provider-switching) for usage details.
+
+#### Per-provider runtime overrides
+
+`ProviderConfig` accepts three optional override fields that take effect when that provider is active:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `context_window` | `int \| null` | `null` | Model context limit in tokens; overrides global `context_window` |
+| `token_budget` | `int \| null` | `null` | Max total tokens per run; overrides global `token_budget` |
+| `cost_limit` | `float \| null` | `null` | Max USD cost per run; overrides global `cost_limit` |
+
+When `null` (the default), the global `AgentConfig` value is used. Set to `0` explicitly to disable budgets for local/free models.
+
+This lets you configure context windows and cost limits per model — a 32k Ollama model doesn't need a 200k sliding window, and a free local model doesn't need a $5 cost cap.
 
 ## Timeouts
 
@@ -83,6 +114,7 @@ Aar has several independent timeouts that operate at different layers. They inte
 |----------|------|---------|-------|
 | **Ollama** | `extra.read_timeout` | `null` | Controls the streaming read phase only. `null` is strongly recommended for local models — response generation can take many minutes. |
 | **Anthropic** | `extra.timeout` | `null` → SDK default (600 s) | Passed directly to `AsyncAnthropic(timeout=...)`. `null` uses the SDK's own default. |
+| **Anthropic** | `extra.prompt_caching` | `false` | Enable [prompt caching](providers.md#prompt-caching) to cut repeated system-prompt costs by ~90% on turns 2+. |
 | **OpenAI** | `extra.timeout` | `null` → SDK default (600 s) | Passed directly to `AsyncOpenAI(timeout=...)`. `null` uses the SDK's own default. |
 | **Gemini** | `extra.timeout` | `120.0` s | Passed to `httpx.Timeout(timeout, connect=10.0)` (HTTP mode) or SDK client (SDK mode). Increase for Pro with large thinking budgets. |
 | **Generic** | `extra.timeout` | `60.0` s | Passed to `httpx.Timeout(timeout, connect=10.0)`. Covers the full round-trip. Increase for slow proxies. |
@@ -166,6 +198,7 @@ The generic provider defaults to 60 s — suitable for fast proxies but may be t
     }
   }
 }
+```
 
 ## Config loading and precedence
 
@@ -413,7 +446,7 @@ If no rules files exist, only the base prompt is used. When present, the layers 
 
 **Project drop-ins** — place `.md` files in `<project_rules_dir>/rules.d/` for per-contributor or per-machine additions. Add `rules.d/` to `.gitignore` if you don't want them committed, or commit them for shared team overrides.
 
-Run `aar init` to create the skeleton files and directories (`rules.md`, `rules.d/`) for both global and project layers.
+Run `aar init` to create the skeleton files and directories. The init command pre-installs default agent rules at `~/.aar/rules.md` and a multi-provider reference config at `~/.aar/config.example.json`. Edit the rules file to add your own global preferences, or use the example config as a starting point for new provider profiles.
 
 **Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
 

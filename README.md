@@ -1,7 +1,7 @@
 [![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)](#)
-[![Zed](https://img.shields.io/badge/Zed-white?logo=zedindustries&logoColor=084CCF)](#)
+[![Zed](https://img.shields.io/badge/Zed-white?logo=zedindustries&logoColor=084CCF)](https://zed.dev/)
 [![ACP](https://img.shields.io/badge/ACP-0.10.5-green)](https://agentclientprotocol.com/)
-[![VS Code](https://img.shields.io/badge/VS%20Code-Insiders-blue)](https://code.visualstudio.com/)
+[![VS Code](https://img.shields.io/badge/VS%20Code-Insiders-blue)](#)
 [![IntelliJ IDEA](https://img.shields.io/badge/IntelliJIDEA-000000.svg?logo=intellij-idea&logoColor=white)](#)
 [![Claude](https://img.shields.io/badge/Claude-D97757?logo=claude&logoColor=fff)](#)
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-886FBF?logo=googlegemini&logoColor=fff)](#)
@@ -24,12 +24,12 @@
 
 </div>
 
-A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, and pluggable transports.
+A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, pluggable transports, and an extension API.
 
 <table width="100%">
   <tr>
     <td width="33%" align="center" valign="top">
-      <img src="https://raw.githubusercontent.com/fischerf/fischerf.github.io/07d6318c4b304f44e67e228588165eb6f9f2f5b3/aar/aar.gif" alt="AAR Agent — with CLI/TUI" width="100%" />
+      <img src="https://fischerf.github.io/aar/aar.gif" alt="AAR Agent — with CLI/TUI" width="100%" />
       <br/><sub><b>AAR Agent — with CLI/TUI</b></sub>
     </td>
     <td width="33%" align="center" valign="top">
@@ -48,12 +48,14 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Thin core loop** — the main execution path is small and readable at a glance
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
 - **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint without changing agent code
+- **Runtime provider switching** — switch between configured providers mid-session with `/model`; conversation history is preserved
 - **Safe by default** — path restrictions, command deny-lists, and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable
 - **Observable** — every provider call and tool execution is timed; sessions carry a `trace_id`
 - **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
+- **Extensible** — pluggable extension API with three-tier auto-discovery, event hooks, custom tools, and slash-commands
 
 ### Operating modes
 
@@ -128,6 +130,10 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or point `base_url`
 
 # Start the HTTP/SSE web server
 > aar serve --host 0.0.0.0 --port 8080
+
+# Switch providers mid-session with /model (in chat, tui, or tui --fixed)
+> /model gpt4
+> /model ollama/llama3
 ```
 
 ## ACP — IDE integration
@@ -182,16 +188,54 @@ aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
 
 See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint reference, and programmatic embedding.
 
+## Extensions
+
+Aar has a pluggable extension system. Extensions are Python modules that expose a `register(api)` entry point and can hook into agent lifecycle events, register custom tools, add slash-commands, and append to the system prompt.
+
+```bash
+# Install an extension from PyPI
+aar install aar-ext-permission-gate
+
+# List discovered extensions
+aar extensions list
+
+# Inspect what an extension registers
+aar extensions inspect permission_gate
+```
+
+Extensions are auto-discovered from three tiers (later tiers shadow earlier ones by name):
+
+| Priority | Location | Scope |
+|----------|----------|-------|
+| 1 | `aar_extensions` entry-point group | Global (pip-installed) |
+| 2 | `~/.aar/extensions/` | Per-user |
+| 3 | `.agent/extensions/` | Per-project |
+
+### First-party extensions
+
+A curated registry of extensions is maintained at [**aar-extensions-registry**](https://github.com/fischerf/aar-extensions-registry):
+
+| Package | Description |
+|---------|-------------|
+| `aar-ext-permission-gate` | Block dangerous bash commands (rm -rf, sudo, mkfs, etc.) |
+| `aar-ext-protected-paths` | Block writes to .env, secrets, credentials, SSH keys |
+| `aar-ext-git-checkpoint` | Auto-commit at turn boundaries + rollback tool |
+| `aar-ext-mcp-tools` | MCP server tool discovery via the extension API |
+| `aar-ext-observability` | Structured metrics and logging per turn |
+
+See [`docs/extensions.md`](docs/extensions.md) for the full developer guide on creating extensions.
+
 ## Architecture
 
 ```
 agent/
 ├── core/           # Loop, agent, events, session, config
 ├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic)
-├── tools/          # Tool registry, schema, execution engine
+├── tools/          # Tool registry, schema, execution engine, built-in tools — each tool carries prompt metadata
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
-├── extensions/     # MCP bridge, observability
+├── extensions/     # Extension API, loader, manager, MCP bridge, observability
+│   └── contrib/    # Built-in example extensions (companion)
 └── transports/     # CLI, TUI, web, event stream
     ├── themes/     # Theme models, built-in themes, registry
     ├── tui_utils/  # Shared formatting helpers for TUI transports
@@ -202,12 +246,16 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ## Requirements
 
-- Python 3.11+
-- `pydantic >= 2.0`
-- `httpx >= 0.27`
-- `typer >= 0.12`
-- `rich >= 13.0`
-- Provider SDK as needed: `anthropic`, `openai`
+- Python 3.12+
+- `pydantic >= 2.12`
+- `httpx >= 0.28`
+- `typer >= 0.24`
+- `rich >= 14.3`
+- `textual >= 8.2` (TUI / fixed TUI)
+- `jsonschema >= 4.0`
+- Provider SDK as needed: `anthropic`, `openai`, `google-genai`
+- ACP transport: `agent-client-protocol >= 0.10`
+- MCP bridge: `mcp >= 1.27`
 
 ### Windows — `bash` tool
 
@@ -247,12 +295,19 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
 | [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut reference |
+| [Extensions](docs/extensions.md) | Extension API, creating extensions, event hooks, tools, commands, auto-discovery, publishing to PyPI |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
+| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
+| [PyPI release](docs/pypi-release.md) | _Deferred._ Procedure for eventually publishing `aar-agent` to PyPI — account setup, token rotation, TestPyPI smoke-test, upload, launcher revert |
 
 ---
+
+## Author
+
+**Florian Fischer** — [Discord](https://discord.gg/xYJNHJV7Bh)
 
 ## License
 

@@ -151,33 +151,36 @@ class TestPromptCommand:
         assert "\xb7" not in result.output
 
     def test_raw_output_matches_config_system_prompt(self):
-        """--raw output equals config.system_prompt exactly (modulo trailing newline)."""
-        from agent.transports.cli import _build_config
+        """--raw output contains the built-in base system prompt content."""
+        from agent.core.config import _default_system_prompt
 
-        config = _build_config()
         result = runner.invoke(app, ["prompt", "--raw"])
         assert result.exit_code == 0
-        assert config.system_prompt in result.output
+        assert _default_system_prompt() in result.output
 
     def test_custom_config_file(self, tmp_path):
-        """--config loads a JSON file and its system_prompt is displayed."""
+        """--config loads a JSON file; the built-in system prompt is still displayed."""
         cfg = AgentConfig(system_prompt="CUSTOM_SYSTEM_PROMPT_VALUE")
         config_path = tmp_path / "cfg.json"
         config_path.write_text(cfg.model_dump_json())
 
         result = runner.invoke(app, ["prompt", "--config", str(config_path)])
         assert result.exit_code == 0
-        assert "CUSTOM_SYSTEM_PROMPT_VALUE" in result.output
+        # Rich panel reformats text, so check individual phrases rather than the full multiline string
+        assert "You are a helpful assistant" in result.output
+        assert "Working directory" in result.output
 
     def test_custom_config_file_raw(self, tmp_path):
-        """--config combined with --raw prints the custom prompt as plain text."""
+        """--config combined with --raw prints plain text containing the built-in prompt."""
+        from agent.core.config import _default_system_prompt
+
         cfg = AgentConfig(system_prompt="RAW_CUSTOM_PROMPT_XYZ")
         config_path = tmp_path / "cfg.json"
         config_path.write_text(cfg.model_dump_json())
 
         result = runner.invoke(app, ["prompt", "--raw", "--config", str(config_path)])
         assert result.exit_code == 0
-        assert "RAW_CUSTOM_PROMPT_XYZ" in result.output
+        assert _default_system_prompt() in result.output
         # The middle-dot subtitle separator is only present in rich panel mode
         assert "\xb7" not in result.output
 

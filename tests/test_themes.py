@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 
 from agent.core.agent import Agent
 from agent.core.config import AgentConfig
@@ -53,6 +54,14 @@ from agent.transports.tui_fixed import (
     ThinkingPanel,
     _Block,
 )
+from agent.transports.tui_widgets.bars import _HeaderInfoStatic
+
+
+def _render_header(bar: HeaderBar) -> Text:
+    """Render the HeaderBar's info section as a Text without a mounted Textual app."""
+    info = _HeaderInfoStatic(bar)
+    return info.render()
+
 
 # ------------------------------------------------------------------
 # Model validation
@@ -460,7 +469,7 @@ class TestHeaderBar:
         bar = HeaderBar(DEFAULT_THEME)
         bar.provider_name = "ollama"
         bar.model_name = "llama3"
-        rendered = bar.render()
+        rendered = _render_header(bar)
         assert "ollama" in rendered.plain
         assert "llama3" in rendered.plain
 
@@ -476,13 +485,13 @@ class TestHeaderBar:
     def test_render_contains_session_id(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.session_id = "abcdef1234567890"
-        rendered = bar.render()
+        rendered = _render_header(bar)
         assert "abcdef12..." in rendered.plain
 
     def test_render_contains_state(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.state = "running"
-        rendered = bar.render()
+        rendered = _render_header(bar)
         assert "running" in rendered.plain
 
 
@@ -808,13 +817,13 @@ class TestHeaderBarThinking:
     def test_render_shows_thinking_on(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.thinking_enabled = True
-        rendered = bar.render()
+        rendered = _render_header(bar)
         assert "think:on" in rendered.plain
 
     def test_render_shows_thinking_off(self) -> None:
         bar = HeaderBar(DEFAULT_THEME)
         bar.thinking_enabled = False
-        rendered = bar.render()
+        rendered = _render_header(bar)
         assert "think:off" in rendered.plain
 
 
@@ -914,7 +923,7 @@ class TestAarFixedAppStartup:
         app = AarFixedApp(agent=agent, config=config)
         async with app.run_test(size=(120, 40)) as _pilot:
             header = app.query_one(HeaderBar)
-            rendered = header.render()
+            rendered = _render_header(header)
             assert config.provider.name in rendered.plain
 
     @pytest.mark.asyncio

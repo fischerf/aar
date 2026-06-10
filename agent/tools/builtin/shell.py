@@ -71,12 +71,17 @@ def register_shell_tools(
             name="bash",
             description=(
                 "Execute a shell command. Returns stdout, stderr, and exit code. "
-                "On Windows commands run via WSL (bash -c). Standard Unix/bash "
-                "syntax works (ls, cat, grep, find, …). Use Windows-style paths for "
-                "file tools, but bash syntax for shell commands. "
-                f"Pass a larger timeout for slow commands (package installs, builds, "
-                f"docker pulls); the default is {default_timeout}s."
+                f"Default timeout: {default_timeout}s — increase for slow commands."
             ),
+            prompt_snippet=("Execute a shell command (returns stdout, stderr, exit code)"),
+            prompt_guidelines=[
+                "On Windows, bash executes inside WSL (Linux subsystem). The Windows"
+                " project directory D:\\path is accessible at /mnt/d/path, but Python,"
+                " pip, and project CLIs installed on Windows may not be available in"
+                " WSL. If a command fails with 'command not found' or import errors,"
+                " switch to acp_terminal (if available) which uses the native Windows"
+                " host environment.",
+            ],
             input_schema={
                 "type": "object",
                 "properties": {

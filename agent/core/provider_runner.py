@@ -13,6 +13,7 @@ sentinel to know when to return early after an unrecoverable provider error.
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 
 from agent.core.config import AgentConfig
@@ -38,6 +39,11 @@ class ProviderRequestFailed(RuntimeError):
     """
 
 
+def _is_rate_limit(exc: BaseException) -> bool:
+    """Return True if *exc* is a rate-limit error from the provider."""
+    return "RateLimitError" in type(exc).__name__
+
+
 async def provider_request(
     *,
     provider: Provider,
@@ -54,7 +60,10 @@ async def provider_request(
     """Run a provider request with retry logic and return response plus duration."""
     t_provider = time.monotonic()
     response: ProviderResponse | None = None
-    for attempt in range(1, config.max_retries + 1):
+    general_attempt = 0
+    rate_limit_attempt = 0
+
+    while True:
         try:
             if use_streaming:
                 response = await _consume_stream(
@@ -67,19 +76,39 @@ async def provider_request(
             break
         except Exception as e:
             friendly, recoverable = _provider_error_message(e)
-            if recoverable and attempt < config.max_retries:
-                delay = 2 ** (attempt - 1)
-                log.info(
-                    "Recoverable error at step %d (attempt %d/%d), retrying in %ds: %s",
-                    session.step_count,
-                    attempt,
-                    config.max_retries,
-                    delay,
-                    friendly,
-                    extra=log_extra,
-                )
-                await asyncio.sleep(delay)
-                continue
+
+            if _is_rate_limit(e):
+                rate_limit_attempt += 1
+                if rate_limit_attempt < config.max_rate_limit_retries:
+                    delay = 30 * rate_limit_attempt
+                    log.info(
+                        "Rate limit at step %d (attempt %d/%d), retrying in %ds: %s",
+                        session.step_count,
+                        rate_limit_attempt,
+                        config.max_rate_limit_retries,
+                        delay,
+                        friendly,
+                        extra=log_extra,
+                    )
+                    await asyncio.sleep(random.uniform(0.8, 1.2) * delay)
+                    continue
+            elif recoverable:
+                general_attempt += 1
+                if general_attempt < config.max_retries:
+                    delay = 2 ** (general_attempt - 1)
+                    log.info(
+                        "Recoverable error at step %d (attempt %d/%d), retrying in %ds: %s",
+                        session.step_count,
+                        general_attempt,
+                        config.max_retries,
+                        delay,
+                        friendly,
+                        extra=log_extra,
+                    )
+                    await asyncio.sleep(random.uniform(0.5, 1.5) * delay)
+                    continue
+
+            # Exhausted retries or non-recoverable error
             log.warning(
                 "Provider error at step %d: %s",
                 session.step_count,
@@ -90,6 +119,7 @@ async def provider_request(
             session.state = AgentState.ERROR
             emit(session, on_event, ErrorEvent(message=friendly, recoverable=recoverable))
             raise ProviderRequestFailed from e
+
     if response is None:
         raise RuntimeError("Provider returned no response after retries")
     return response, (time.monotonic() - t_provider) * 1000

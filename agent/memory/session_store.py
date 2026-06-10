@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent.core.events import Event, deserialize_event
 from agent.core.session import Session
@@ -56,6 +56,9 @@ class SessionStore:
             "state": session.state.value,
             "step_count": session.step_count,
             "metadata": session.metadata,
+            "total_input_tokens": session.total_input_tokens,
+            "total_output_tokens": session.total_output_tokens,
+            "total_cost": session.total_cost,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -112,21 +115,38 @@ class SessionStore:
             step_count=header.get("step_count", 0),
             metadata=header.get("metadata", {}),
             events=events,
+            total_input_tokens=header.get("total_input_tokens", 0),
+            total_output_tokens=header.get("total_output_tokens", 0),
+            total_cost=header.get("total_cost", 0.0),
         )
 
         logger.info("Loaded session %s with %d events", session_id, len(events))
         return session
 
-    def compact(self, session_id: str, max_events: int = 200) -> Session:
+    def compact(
+        self,
+        session_id: str,
+        max_events: int = 200,
+        *,
+        on_prune: Callable[[list[Event], dict], None] | None = None,
+    ) -> Session:
         """Truncate a session to its most recent *max_events* events and rewrite the file.
 
         Compaction keeps the session file from growing without bound in long-running
         or resumed conversations. The compacted session is saved back to disk and
         returned. Callers are responsible for re-injecting any system context that
         may have been pruned (e.g. via the system_prompt in AgentConfig).
+
+        If *on_prune* is provided, it is called with the list of pruned events and
+        the session metadata dict before truncation.  This allows extensions (e.g.
+        the companion) to roll up statistics from the about-to-be-discarded events
+        into session metadata without coupling the store to any specific extension.
         """
         session = self.load(session_id)
         if len(session.events) > max_events:
+            pruned = session.events[:-max_events]
+            if on_prune is not None:
+                on_prune(pruned, session.metadata)
             session.events = session.events[-max_events:]
             logger.info("Compacted session %s to %d events", session_id, len(session.events))
         self.save(session)

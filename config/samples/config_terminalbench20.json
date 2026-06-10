@@ -23,7 +23,9 @@
       "write_file",
       "edit_file",
       "list_directory",
-      "bash"
+      "bash",
+      "grep",
+      "find_files"
     ],
     "bash_default_timeout": 300,
     "command_timeout": 360,
@@ -75,10 +77,13 @@
         "use_low_integrity": true
       },
       "wsl": {
-        "profile": "~/.aar/distros/ubuntu.json",
         "distro": "aar-ubuntu",
+        "shell": "sh",
+        "wsl_user": null,
+        "restrict_to_workspace": true,
         "workspace": null,
-        "install_path": null
+        "install_path": null,
+        "profile": "~/.aar/distros/ubuntu.json"
       }
     },
     "log_all_commands": true,
@@ -109,8 +114,18 @@
   "guardrails": {
     "max_tokens_recoveries": 2,
     "max_repeated_tool_steps": 3,
+    "max_premature_end_recoveries": 2,
     "reserve_tokens": 512,
-    "reserve_cost_fraction": 0.1
+    "reserve_cost_fraction": 0.1,
+    "bash_failure_threshold": 2
+  },
+  "compaction": {
+    "enabled": false,
+    "reserve_tokens": 16384,
+    "keep_recent_tokens": 20000,
+    "truncate_old_results": true,
+    "truncate_keep_recent": 6,
+    "truncate_max_chars": 500
   },
   "max_steps": 150,
   "timeout": 0.0,

@@ -249,22 +249,37 @@ def _acp_server_to_mcp_config(srv: Any) -> Any:
 def _model_id_to_provider(model_id: str) -> tuple[str, str]:
     """Map a model ID string to (provider_name, model).
 
-    Uses simple prefix matching so new model releases work automatically.
-    Falls back to Ollama for unknown IDs (safe for local models).
+    Accepts explicit ``provider/model`` format (e.g. ``openai/gpt-4o``) or
+    uses prefix matching for bare model names.  Falls back to Ollama for
+    unknown IDs (safe for local models).
     """
+    if "/" in model_id:
+        provider_name, model = model_id.split("/", 1)
+        provider_name = provider_name.lower()
+        if provider_name in {"anthropic", "openai", "ollama", "gemini", "generic"}:
+            return provider_name, model
     mid = model_id.lower()
     if mid.startswith("claude"):
         return "anthropic", model_id
     if any(mid.startswith(p) for p in ("gpt-", "o1", "o3", "o4", "chatgpt")):
         return "openai", model_id
+    if mid.startswith("gemini"):
+        return "gemini", model_id
     return "ollama", model_id
 
 
-def _available_commands() -> list[Any]:
-    """Return the list of slash commands Aar exposes to ACP editors."""
+def _available_commands(extra: dict[str, str] | None = None) -> list[Any]:
+    """Return the list of slash commands Aar exposes to ACP editors.
+
+    *extra* maps command name → description for extension-registered commands.
+    """
     from acp.schema import AvailableCommand
 
-    return [
+    cmds = [
+        AvailableCommand(
+            name="model",
+            description="Show active provider or switch: /model <key> or /model <provider/model>",
+        ),
         AvailableCommand(
             name="status",
             description="Show current session info: model, provider, step count, and session ID",
@@ -278,6 +293,10 @@ def _available_commands() -> list[Any]:
             description="Show the active safety policy: approval mode and path restrictions",
         ),
     ]
+    if extra:
+        for name, desc in extra.items():
+            cmds.append(AvailableCommand(name=name, description=desc or ""))
+    return cmds
 
 
 def _derive_mode_id(safety_cfg: Any, current_mode_id: str | None = None) -> str:
@@ -339,13 +358,14 @@ def _build_config_options(
     safety_cfg: Any,
     provider_cfg: Any = None,
     current_mode_id: str | None = None,
+    providers: dict | None = None,
 ) -> list[Any]:
     """Build the ``configOptions`` list for session setup and ``set_config_option`` responses.
 
     Returns options in priority order (per ACP spec, order drives prominent placement):
 
-    1. **Model** select  (``category="model"``) — only the active model from config;
-       no built-in catalogue so the picker shows exactly what ``config.json`` has wired up.
+    1. **Model** select  (``category="model"``) — all named providers from ``providers``
+       dict, plus the active model.  Editors show these in the model picker.
     2. **Mode** select   (``category="mode"``)  — ``auto`` / ``review`` / ``read-only``.
     3. ``auto_approve_writes`` boolean toggle.
     4. ``auto_approve_execute`` boolean toggle.
@@ -361,10 +381,55 @@ def _build_config_options(
 
     opts: list[Any] = []
 
-    # 1. Model picker (category="model", type="select") — active model only.
+    # 1. Model picker — all named providers + active model.
     if provider_cfg is not None:
         model_id = str(getattr(provider_cfg, "model", "") or "aar")
         provider_name = str(getattr(provider_cfg, "name", "") or "")
+
+        select_options: list[Any] = []
+        seen_values: set[str] = set()
+
+        # Add all named provider profiles from the providers registry
+        if providers:
+            for key, pcfg in providers.items():
+                p_model = str(getattr(pcfg, "model", key))
+                p_name = str(getattr(pcfg, "name", ""))
+                # Use the registry key as the value — set_config_option resolves it
+                if key not in seen_values:
+                    seen_values.add(key)
+                    label = f"{p_name}/{p_model}" if p_name else p_model
+                    select_options.append(
+                        SessionConfigSelectOption(
+                            value=key,
+                            name=label,
+                            description=f"{key} — {p_name} provider" if p_name else key,
+                        )
+                    )
+
+        # current_value: use the registry key if the active model matches one
+        current_key = model_id
+        for key, pcfg in (providers or {}).items():
+            if (
+                getattr(pcfg, "name", None) == provider_name
+                and getattr(pcfg, "model", None) == model_id
+            ):
+                current_key = key
+                break
+
+        # Ensure the current active model appears even if it's not in the registry
+        # (e.g. ad-hoc switch via /model openai/gpt-4o without a named key)
+        if current_key not in seen_values:
+            select_options.insert(
+                0,
+                SessionConfigSelectOption(
+                    value=model_id,
+                    name=model_id,
+                    description=f"Active model ({provider_name})"
+                    if provider_name
+                    else "Active model",
+                ),
+            )
+
         opts.append(
             SessionConfigOptionSelect(
                 id="model",
@@ -372,16 +437,8 @@ def _build_config_options(
                 type="select",
                 category="model",
                 description="The AI model to use for this session.",
-                current_value=model_id,
-                options=[
-                    SessionConfigSelectOption(
-                        value=model_id,
-                        name=model_id,
-                        description=f"Active model ({provider_name})"
-                        if provider_name
-                        else "Active model",
-                    )
-                ],
+                current_value=current_key,
+                options=select_options,
             )
         )
 

@@ -102,10 +102,13 @@ Ollama caveat).
 
 ### 3.2 Per-provider notes
 
-**Anthropic** — Usage is reliably present in every response. Cache token breakdowns
-(`cache_read_input_tokens`, `cache_creation_input_tokens`) are included when
-prompt caching is active. These are captured but not yet surfaced in the default
-display.
+**Anthropic** — Usage is reliably present in every response. When
+[prompt caching](providers.md#prompt-caching) is enabled (`"prompt_caching": true`
+in the provider’s `extra` config), the response includes two additional fields:
+`cache_read_input_tokens` and `cache_creation_input_tokens`.  Aar captures these as
+`cache_read_tokens` and `cache_write_tokens` in `ProviderMeta.usage`.  Cost
+estimation uses the `cache_read_per_million` and `cache_write_per_million` pricing
+fields to compute accurate costs when caching is active.
 
 **OpenAI** — Aar explicitly opts in to usage reporting on streamed responses by
 sending `stream_options: {include_usage: true}`. Without this, OpenAI omits usage
@@ -227,6 +230,12 @@ the up-to-date totals.
 **Reset behaviour:** the `Session` object is created fresh at the start of each
 `agent.run()` call. Limits therefore apply per-run, not across the lifetime of the
 `Agent` instance.
+
+**Session restore:** when resuming a persisted session (e.g. via `aar chat --resume`
+or the ACP `session/load` endpoint), token and cost tallies (`total_input_tokens`,
+`total_output_tokens`, `total_cost`) are restored from the saved state. This means
+budget enforcement continues from where the previous run left off rather than
+resetting to zero.
 
 ---
 

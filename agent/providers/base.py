@@ -9,6 +9,27 @@ from typing import Any, AsyncIterator
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, ToolCall
 
+# Keys in ``ProviderConfig.extra`` consumed by the framework, extensions, or
+# adapter constructors.  These must **never** be forwarded to an upstream API
+# call.  Individual providers may extend this set, but every provider should
+# at least strip these.
+FRAMEWORK_EXTRA_KEYS: frozenset[str] = frozenset(
+    {
+        "auth_header",
+        "include_thoughts",
+        "keep_alive",
+        "prompt_caching",
+        "quota",
+        "read_timeout",
+        "supports_audio",
+        "supports_reasoning",
+        "supports_tools",
+        "supports_vision",
+        "thinking_budget",
+        "timeout",
+    }
+)
+
 
 @dataclass
 class ProviderResponse:

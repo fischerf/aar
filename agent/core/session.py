@@ -92,75 +92,96 @@ class Session(BaseModel):
         string so that every provider adapter receives properly structured
         image blocks.
         """
-        messages: list[dict[str, Any]] = []
-        pending_tool_calls: list[ToolCall] = []
-        pending_tool_results: list[ToolResult] = []
+        return events_to_messages(self.events)
 
-        for event in self.events:
-            if isinstance(event, UserMessage):
-                # Flush any pending tool results first
-                if pending_tool_results:
-                    messages.append(_tool_results_message(pending_tool_results))
-                    pending_tool_results = []
-                if event.is_multimodal:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": [p.model_dump(exclude_none=True) for p in event.parts],
-                        }
-                    )
-                else:
-                    messages.append({"role": "user", "content": event.content})
+    def apply_compaction(self, cut_event_index: int, summary_content: str) -> None:
+        """Replace events before *cut_event_index* with a summary UserMessage.
 
-            elif isinstance(event, AssistantMessage):
-                # Flush pending tool results before the next assistant message
-                if pending_tool_results:
-                    messages.append(_tool_results_message(pending_tool_results))
-                    pending_tool_results = []
+        This is called by the compaction module after generating a
+        structured summary of older conversation messages.  The session's
+        event list is modified in-place so subsequent ``to_messages()``
+        calls return the compacted context.
+        """
+        summary_event = UserMessage(content=summary_content)
+        self.events = [summary_event] + self.events[cut_event_index:]
 
-                if pending_tool_calls:
-                    # Assistant message with tool calls
-                    content_blocks: list[dict] = []
-                    if event.content:
-                        content_blocks.append({"type": "text", "text": event.content})
-                    for tc in pending_tool_calls:
-                        content_blocks.append(
-                            {
-                                "type": "tool_use",
-                                "id": tc.tool_call_id,
-                                "name": tc.tool_name,
-                                "input": tc.arguments,
-                            }
-                        )
-                    messages.append({"role": "assistant", "content": content_blocks})
-                    pending_tool_calls = []
-                else:
-                    messages.append({"role": "assistant", "content": event.content})
 
-            elif isinstance(event, ToolCall):
-                pending_tool_calls.append(event)
+def events_to_messages(events: list[Event]) -> list[dict[str, Any]]:
+    """Convert a list of events to a provider-friendly message list.
 
-            elif isinstance(event, ToolResult):
-                pending_tool_results.append(event)
+    Standalone version of :meth:`Session.to_messages` — accepts an
+    arbitrary event list so the compaction module can convert a subset
+    of events without constructing a full Session.
+    """
+    messages: list[dict[str, Any]] = []
+    pending_tool_calls: list[ToolCall] = []
+    pending_tool_results: list[ToolResult] = []
 
-        # Flush remaining
-        if pending_tool_calls:
-            content_blocks = []
-            for tc in pending_tool_calls:
-                content_blocks.append(
+    for event in events:
+        if isinstance(event, UserMessage):
+            # Flush any pending tool results first
+            if pending_tool_results:
+                messages.append(_tool_results_message(pending_tool_results))
+                pending_tool_results = []
+            if event.is_multimodal:
+                messages.append(
                     {
-                        "type": "tool_use",
-                        "id": tc.tool_call_id,
-                        "name": tc.tool_name,
-                        "input": tc.arguments,
+                        "role": "user",
+                        "content": [p.model_dump(exclude_none=True) for p in event.parts],
                     }
                 )
-            messages.append({"role": "assistant", "content": content_blocks})
+            else:
+                messages.append({"role": "user", "content": event.content})
 
-        if pending_tool_results:
-            messages.append(_tool_results_message(pending_tool_results))
+        elif isinstance(event, AssistantMessage):
+            # Flush pending tool results before the next assistant message
+            if pending_tool_results:
+                messages.append(_tool_results_message(pending_tool_results))
+                pending_tool_results = []
 
-        return messages
+            if pending_tool_calls:
+                # Assistant message with tool calls
+                content_blocks: list[dict] = []
+                if event.content:
+                    content_blocks.append({"type": "text", "text": event.content})
+                for tc in pending_tool_calls:
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.tool_call_id,
+                            "name": tc.tool_name,
+                            "input": tc.arguments,
+                        }
+                    )
+                messages.append({"role": "assistant", "content": content_blocks})
+                pending_tool_calls = []
+            else:
+                messages.append({"role": "assistant", "content": event.content})
+
+        elif isinstance(event, ToolCall):
+            pending_tool_calls.append(event)
+
+        elif isinstance(event, ToolResult):
+            pending_tool_results.append(event)
+
+    # Flush remaining
+    if pending_tool_calls:
+        content_blocks = []
+        for tc in pending_tool_calls:
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.tool_call_id,
+                    "name": tc.tool_name,
+                    "input": tc.arguments,
+                }
+            )
+        messages.append({"role": "assistant", "content": content_blocks})
+
+    if pending_tool_results:
+        messages.append(_tool_results_message(pending_tool_results))
+
+    return messages
 
 
 def estimate_token_count(messages: list[dict[str, Any]]) -> int:
@@ -204,6 +225,126 @@ def trim_to_token_budget(
             break
         result.insert(0, msg)
         budget -= msg_tokens
+
+    return result
+
+
+def compact_to_token_budget(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+) -> list[dict[str, Any]]:
+    """Compress older messages to fit within the token budget.
+
+    Unlike :func:`trim_to_token_budget` which simply drops the oldest
+    messages, this strategy preserves the **first message** (system
+    context) and the **last N messages** that fit within 75% of the
+    budget.  Dropped middle messages are replaced with a single synthetic
+    user message summarizing what was removed.
+
+    If messages already fit within *max_tokens*, they are returned as-is.
+    """
+    if max_tokens <= 0 or estimate_token_count(messages) <= max_tokens:
+        return messages
+
+    if len(messages) <= 2:
+        return messages
+
+    # Reserve 75% of the budget for the tail messages
+    tail_budget = int(max_tokens * 0.75)
+
+    # Always keep the first message
+    first_msg = messages[0]
+
+    # Collect tail messages that fit within the tail budget
+    tail: list[dict[str, Any]] = []
+    tail_tokens = 0
+    for msg in reversed(messages[1:]):
+        msg_tokens = estimate_token_count([msg])
+        if tail_tokens + msg_tokens > tail_budget and tail:
+            break
+        tail.insert(0, msg)
+        tail_tokens += msg_tokens
+
+    # Determine how many middle messages were dropped
+    kept_tail_count = len(tail)
+    dropped_messages = messages[1 : len(messages) - kept_tail_count]
+    n_dropped = len(dropped_messages)
+
+    if n_dropped == 0:
+        return messages
+
+    dropped_tokens = estimate_token_count(dropped_messages)
+
+    marker: dict[str, Any] = {
+        "role": "user",
+        "content": (
+            f"[Earlier conversation truncated \u2014 {n_dropped} messages comprising "
+            f"approximately {dropped_tokens} tokens were removed to fit context window]"
+        ),
+    }
+
+    return [first_msg, marker] + tail
+
+
+def truncate_old_tool_results(
+    messages: list[dict[str, Any]],
+    keep_recent: int = 6,
+    max_chars: int = 500,
+) -> list[dict[str, Any]]:
+    """Truncate tool result content in older messages to reduce context size.
+
+    Tool results in the last *keep_recent* user-role messages (containing
+    tool_result blocks) are preserved in full. Older tool results are
+    truncated to *max_chars* with a note showing the original size.
+
+    Truncation only activates when there are more than *keep_recent + 2*
+    tool-result messages total, preventing premature truncation in short
+    sessions where early reads are still needed.
+
+    This operates on the provider message format returned by
+    :func:`events_to_messages` and returns a new list — the input is not
+    mutated.
+    """
+    # Identify indices of messages containing tool_result blocks
+    tool_result_indices: list[int] = []
+    for i, msg in enumerate(messages):
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+        ):
+            tool_result_indices.append(i)
+
+    # Don't truncate until there are enough messages to justify it.
+    # This prevents early file reads from being truncated in short sessions.
+    if len(tool_result_indices) <= keep_recent + 2:
+        return messages  # nothing to truncate
+
+    # Indices to truncate = all except the last `keep_recent`
+    indices_to_truncate = set(tool_result_indices[:-keep_recent])
+
+    result = []
+    for i, msg in enumerate(messages):
+        if i not in indices_to_truncate:
+            result.append(msg)
+            continue
+
+        # Deep-copy and truncate this message's tool_result blocks
+        new_content = []
+        for block in msg["content"]:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                original = block.get("content", "")
+                if isinstance(original, str) and len(original) > max_chars:
+                    truncated = (
+                        original[:max_chars]
+                        + f"\n... [truncated: {len(original)} chars \u2192 {max_chars}]"
+                    )
+                    new_block = {**block, "content": truncated}
+                else:
+                    new_block = block
+                new_content.append(new_block)
+            else:
+                new_content.append(block)
+        result.append({**msg, "content": new_content})
 
     return result
 

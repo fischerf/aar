@@ -7,7 +7,48 @@ from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+
+# Extra keys that enable prompt caching when set in provider config
+_CACHE_EXTRA_KEY = "prompt_caching"
+
+
+def _apply_prompt_caching(
+    kwargs: dict[str, Any],
+    enabled: bool,
+) -> None:
+    """Rewrite ``system`` and ``tools`` in *kwargs* for Anthropic prompt caching.
+
+    Anthropic caches everything from the start of the request up to a
+    ``cache_control`` breakpoint.  We mark two breakpoints:
+
+    1. The **last system content block** — caches the full system prompt.
+    2. The **last tool definition** — caches the tool schemas too.
+
+    On turn 2+ the API returns ``cache_read_input_tokens`` instead of
+    re-processing the prefix, cutting input costs by ~90% for the static part.
+
+    Enable via ``config.json``::
+
+        "extra": { "prompt_caching": true }
+    """
+    if not enabled:
+        return
+
+    cache_marker = {"type": "ephemeral"}
+
+    # System prompt: convert plain string → list-of-blocks with cache marker
+    system = kwargs.get("system")
+    if isinstance(system, str) and system:
+        kwargs["system"] = [{"type": "text", "text": system, "cache_control": cache_marker}]
+    elif isinstance(system, list) and system:
+        # Already a list of blocks — mark the last one
+        system[-1] = {**system[-1], "cache_control": cache_marker}
+
+    # Tools: mark the last tool so the entire tools array is cached
+    tools = kwargs.get("tools")
+    if tools:
+        tools[-1] = {**tools[-1], "cache_control": cache_marker}
 
 
 class AnthropicProvider(Provider):
@@ -58,7 +99,9 @@ class AnthropicProvider(Provider):
             kwargs["tools"] = tools
         if self.config.temperature > 0:
             kwargs["temperature"] = self.config.temperature
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
+
+        _apply_prompt_caching(kwargs, bool(self.config.extra.get(_CACHE_EXTRA_KEY)))
 
         response = await self._client.messages.create(**kwargs)
 
@@ -137,7 +180,9 @@ class AnthropicProvider(Provider):
             kwargs["tools"] = tools
         if self.config.temperature > 0:
             kwargs["temperature"] = self.config.temperature
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
+
+        _apply_prompt_caching(kwargs, bool(self.config.extra.get(_CACHE_EXTRA_KEY)))
 
         # Track active content blocks by index
         active_blocks: dict[int, dict[str, Any]] = {}
@@ -186,7 +231,7 @@ class AnthropicProvider(Provider):
                     # Build usage metadata from the final message
                     stream_meta: ProviderMeta | None = None
                     try:
-                        final_msg = stream.get_final_message()
+                        final_msg = await stream.get_final_message()
                         usage: dict[str, int] = {
                             "input_tokens": final_msg.usage.input_tokens,
                             "output_tokens": final_msg.usage.output_tokens,

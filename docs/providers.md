@@ -2,6 +2,82 @@
 
 Aar is provider-agnostic — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint by changing one config field. No agent code changes required.
 
+## Runtime provider switching
+
+You can switch between providers mid-session without losing conversation history.
+
+### Configuration
+
+Define named providers in `config.json`:
+
+```json
+{
+  "provider": "claude",
+  "providers": {
+    "claude": {
+      "name": "anthropic", "model": "claude-sonnet-4-6",
+      "context_window": 1000000, "token_budget": 500000, "cost_limit": 5.0
+    },
+    "gpt4": {
+      "name": "openai", "model": "gpt-4o",
+      "context_window": 200000, "token_budget": 500000, "cost_limit": 5.0
+    },
+    "local": {
+      "name": "ollama", "model": "llama3", "base_url": "http://localhost:11434",
+      "context_window": 32768, "token_budget": 0, "cost_limit": 0.0
+    }
+  }
+}
+```
+
+Each provider profile can override `context_window`, `token_budget`, and `cost_limit`. These are model-coupled settings — context windows differ across models, and local models have no API cost. When a provider does not set these fields, the global values from `AgentConfig` apply as fallback.
+
+The `provider` field can be a string key referencing `providers`, or an inline object (backward compatible).
+
+### Slash command
+
+All interactive transports (CLI, TUI, TUI Fixed) support the `/model` command:
+
+| Command | Effect |
+|---------|--------|
+| `/model` | Show active provider and list available keys |
+| `/model gpt4` | Switch to a named provider key |
+| `/model openai/gpt-4o` | Ad-hoc switch by provider/model |
+
+Switching is instant — the next turn uses the new provider. Conversation history is preserved because the internal event model is provider-agnostic.
+
+### ACP
+
+ACP stdio already supports `set_session_model` — it now also resolves named provider keys from the config. ACP HTTP accepts `provider` in `POST /runs` to select a named key.
+
+### Web API
+
+Pass `"provider": "gpt4"` in the request body of `POST /chat` or `POST /chat/stream` to use a named provider for that request.
+
+### Programmatic
+
+```python
+from agent.core.agent import Agent
+from agent.core.config import AgentConfig, ProviderConfig
+
+config = AgentConfig(
+    provider="claude",
+    providers={
+        "claude": ProviderConfig(name="anthropic", model="claude-sonnet-4-6"),
+        "gpt4": ProviderConfig(name="openai", model="gpt-4o"),
+    },
+)
+agent = Agent(config=config)
+session = await agent.run("Hello from Claude", session=None)
+
+# Switch mid-session
+agent.switch_provider("gpt4")
+session = await agent.run("Now using GPT-4o", session=session)
+
+# Ad-hoc switch (no registry key needed)
+agent.switch_provider("ollama/llama3")
+```
+
 ## Anthropic
 
 ```python
@@ -14,7 +90,71 @@ config = AgentConfig(provider=ProviderConfig(
 ))
 ```
 
-Supports: tools, streaming, extended thinking (reasoning blocks).
+Supports: tools, streaming, extended thinking (reasoning blocks), prompt caching.
+
+### Prompt caching
+
+Anthropic’s prompt caching avoids re-processing the static prefix (system prompt +
+tool definitions) on every API call.  After the first turn the cached prefix is
+served at **10× lower cost**, which is significant because the prefix is re-sent
+with every step.
+
+**Enable** — add `"prompt_caching": true` to the provider’s `extra` block:
+
+```json
+{
+  "providers": {
+    "claude": {
+      "name": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "extra": {
+        "prompt_caching": true
+      }
+    }
+  }
+}
+```
+
+**How it works** — when enabled, Aar adds `cache_control: {"type": "ephemeral"}`
+breakpoints to the last system-prompt content block and the last tool definition.
+Anthropic caches everything from the start of the request up to these breakpoints.
+On turn 2+ the API returns `cache_read_input_tokens` instead of re-processing the
+prefix.
+
+**Cost implications:**
+
+| Turn | Without caching | With caching |
+|------|----------------|--------------|
+| Turn 1 (cold) | 2,400 tok at full price | 2,400 tok at 1.25× (cache write premium) |
+| Turns 2–N (warm) | 2,400 tok at full price each | 2,400 tok at 0.1× each (cache read) |
+| **6-turn session** | 14,400 full-price tokens | 3,000 + 12,000 × 0.1 = **4,200 tokens effective** |
+
+For a typical 6-step task, prompt caching reduces the overhead from the static
+prefix by roughly **70–80%**.
+
+**Metrics** — when caching is active, `ProviderMeta.usage` includes two extra keys:
+
+| Key | Meaning |
+|-----|--------|
+| `cache_read_tokens` | Tokens served from cache (cheap) |
+| `cache_write_tokens` | Tokens written to cache on the first call |
+
+These are already captured by Aar and used in cost estimation (see
+[Tokens §6](tokens.md#6-cost-estimation)).  The `/inspect` command and session
+JSONL files include them when present.
+
+**Requirements:**
+
+- Anthropic API (direct or via a proxy that preserves `cache_control` fields)
+- `anthropic` Python SDK ≥ 0.40
+- The cached prefix must be ≥ 1,024 tokens (Anthropic minimum); a typical Aar
+  system prompt + 7 built-in tools comfortably exceeds this
+
+**When to leave it off:**
+
+- Corporate API proxies that strip unknown fields from the request body
+- Single-turn `aar run` invocations (no second turn to benefit from the cache)
+- Providers other than Anthropic (the flag is ignored for OpenAI, Ollama, etc.)
 
 ## OpenAI
 

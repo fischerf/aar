@@ -72,6 +72,8 @@ def _make_aar_sdk_agent(config: AgentConfig, provider: MockProvider) -> Any:
     """
     agent_cls = type("_TestSdkAgent", (AarAcpAgent, SdkAgent), {})
     agent = agent_cls(config=config, agent_name="aar")
+    # Disable the delay so optimistic pushes complete immediately in tests.
+    agent._PUSH_COMMANDS_DELAY = 0
 
     def patched_make(session_id: str = "", approval_callback: Any = None) -> Any:
         from agent.core.agent import Agent as InnerAgent

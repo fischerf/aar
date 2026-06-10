@@ -1,6 +1,6 @@
 id = "aar-agent"
 name = "Aar Agent"
-version = "0.3.2"
+version = "0.4.0"
 schema_version = 1
 authors = ["fischerf"]
 description = "Aar adaptive action & reasoning agent — provider-agnostic AI agent with ACP support"
@@ -30,21 +30,26 @@ icon = "icon/aar.svg"
 AAR_LAUNCHED_BY = "zed"
 
 [agent_servers.aar.targets.darwin-aarch64]
-archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-darwin-aarch64.tar.gz"
+archive = "https://github.com/fischerf/aar/releases/download/v0.4.0/aar-zed-darwin-aarch64.tar.gz"
+sha256 = "c94fc075dc078b08fbfbb98052bfee146c45b12bd8f0700802ac05ad4c1bfa01"
 cmd = "./launch.sh"
 
 [agent_servers.aar.targets.darwin-x86_64]
-archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-darwin-x86_64.tar.gz"
+archive = "https://github.com/fischerf/aar/releases/download/v0.4.0/aar-zed-darwin-x86_64.tar.gz"
+sha256 = "c94fc075dc078b08fbfbb98052bfee146c45b12bd8f0700802ac05ad4c1bfa01"
 cmd = "./launch.sh"
 
 [agent_servers.aar.targets.linux-x86_64]
-archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-linux-x86_64.tar.gz"
+archive = "https://github.com/fischerf/aar/releases/download/v0.4.0/aar-zed-linux-x86_64.tar.gz"
+sha256 = "b3922103f8af00b7fa0aacef45ab2f2df3cca203fd3c2628357fb22caf0b28d0"
 cmd = "./launch.sh"
 
 [agent_servers.aar.targets.linux-aarch64]
-archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-linux-aarch64.tar.gz"
+archive = "https://github.com/fischerf/aar/releases/download/v0.4.0/aar-zed-linux-aarch64.tar.gz"
+sha256 = "b3922103f8af00b7fa0aacef45ab2f2df3cca203fd3c2628357fb22caf0b28d0"
 cmd = "./launch.sh"
 
 [agent_servers.aar.targets.windows-x86_64]
-archive = "https://github.com/fischerf/aar/releases/download/v0.3.2/aar-zed-windows-x86_64.zip"
+archive = "https://github.com/fischerf/aar/releases/download/v0.4.0/aar-zed-windows-x86_64.zip"
+sha256 = "2f6b298291e0f061924c42eb896c56813789751443c18de878ce4a7baaff8f21"
 cmd = "./launch.cmd"

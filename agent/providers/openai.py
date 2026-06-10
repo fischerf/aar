@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator
 
+import httpx
+
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
-from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
 
 
 class OpenAIProvider(Provider):
@@ -26,8 +28,16 @@ class OpenAIProvider(Provider):
             kwargs["api_key"] = config.api_key
         if config.base_url:
             kwargs["base_url"] = config.base_url
+        # Timeout: explicit `timeout` beats `read_timeout`.
+        # `read_timeout=null` means no read timeout (useful for slow local models).
         if (timeout := config.extra.get("timeout")) is not None:
             kwargs["timeout"] = float(timeout)
+        elif "read_timeout" in config.extra:
+            rt = config.extra["read_timeout"]
+            kwargs["timeout"] = httpx.Timeout(
+                None if rt is None else float(rt),
+                connect=10.0,
+            )
         self._client = openai.AsyncOpenAI(**kwargs)
 
     @property
@@ -95,7 +105,7 @@ class OpenAIProvider(Provider):
                 "json_schema": self.config.json_schema,
             }
 
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
 
         response = await self._client.chat.completions.create(**kwargs)
 
@@ -188,7 +198,7 @@ class OpenAIProvider(Provider):
                 "json_schema": self.config.json_schema,
             }
 
-        kwargs.update(self.config.extra)
+        kwargs.update({k: v for k, v in self.config.extra.items() if k not in FRAMEWORK_EXTRA_KEYS})
 
         # Accumulators for tool call fragments
         tool_acc: dict[int, dict[str, str]] = {}

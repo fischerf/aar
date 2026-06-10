@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import Theme
+
+if TYPE_CHECKING:
+    from rich.text import Text
 
 
 def _side_effect_badge(side_effects: list[str], theme: Theme) -> str:
@@ -98,3 +101,47 @@ def is_over_warning_threshold(
     if limit <= 0:
         return False
     return current >= limit * threshold
+
+
+def format_ctx_window_bar(
+    ctx_tokens: int,
+    ctx_window: int,
+    msgs_dropped: int = 0,
+    tokens_style: str = "dim",
+    tokens_warning_mid_style: str = "bold yellow",
+    tokens_warning_style: str = "bold red",
+) -> "Text | None":
+    """Build a Rich :class:`~rich.text.Text` fill bar for the context-window indicator.
+
+    Returns ``None`` when *ctx_window* is 0 (window management disabled).
+
+    Example output:  ``ctx: ████████░░ 4.1k/8.2k ↷2``
+
+    Colour transitions:
+    - < 60 % → *tokens_style*  (normal / dim)
+    - 60–80 % → *tokens_warning_mid_style* (amber)
+    - > 80 % → *tokens_warning_style* (red)
+    """
+    from rich.text import Text  # lazy to keep module importable without Rich installed
+
+    if ctx_window <= 0:
+        return None
+
+    _BAR_W = 10
+    fill = min(1.0, ctx_tokens / ctx_window)
+    filled = round(fill * _BAR_W)
+    bar = "█" * filled + "░" * (_BAR_W - filled)
+
+    def _k(n: int) -> str:
+        return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+    label = f"{_k(ctx_tokens)}/{_k(ctx_window)}"
+    if fill >= 0.8:
+        style = tokens_warning_style
+    elif fill >= 0.6:
+        style = tokens_warning_mid_style
+    else:
+        style = tokens_style
+
+    suffix = f" ↷{msgs_dropped}" if msgs_dropped > 0 else ""
+    return Text(f"ctx: {bar} {label}{suffix}", style=style)
