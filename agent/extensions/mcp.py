@@ -391,9 +391,21 @@ def _require_mcp() -> None:
     try:
         import mcp  # noqa: F401
     except ImportError as exc:
+        # Distinguish "mcp itself is not installed" from "mcp is installed but
+        # one of its transitive imports is broken" (e.g. a stale 'attrs' in
+        # site-packages). The latter case used to be misreported as "install
+        # 'aar-agent[mcp]'", which sent users down the wrong path.
+        missing = getattr(exc, "name", None)
+        if missing == "mcp":
+            raise ImportError(
+                "The 'mcp' package is required for MCP support. "
+                "Install it with: pip install 'aar-agent[mcp]'"
+            ) from exc
         raise ImportError(
-            "The 'mcp' package is required for MCP support. "
-            "Install it with: pip install 'aar-agent[mcp]'"
+            f"MCP support failed to load: {exc.__class__.__name__}: {exc}. "
+            "The 'mcp' package appears to be installed but one of its "
+            "dependencies is missing or broken. Try: "
+            "pip install -U 'aar-agent[mcp]'"
         ) from exc
 
 
