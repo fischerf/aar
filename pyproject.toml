@@ -11,7 +11,8 @@ dependencies = [
     "rich>=14.3.4",
     "textual>=8.2.3",
 	"textual-speedups==0.2.1",
-    "jsonschema>=4.0.0",
+    "jsonschema>=4.18",
+    "attrs>=22.2",
 ]
 
 [build-system]
@@ -51,3 +52,17 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Only collect the core agent test suite by default. The subprojects under
+# `aar-extensions-registry/` and `tools/` ship their own tests and dependencies
+# and are opt-in: run them explicitly, e.g.
+#   pytest aar-extensions-registry/packages/aar-ext-usage-tracker/tests
+testpaths = ["tests"]
+norecursedirs = [
+    ".agent",
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    "aar-extensions-registry",
+    "dist",
+    "tools",
+]
