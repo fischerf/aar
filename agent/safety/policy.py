@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import posixpath
 import re
+import shlex
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -181,6 +183,113 @@ def _redact_secrets(command: str) -> str:
     return redacted
 
 
+# S1 — Argument names that conventionally carry a filesystem path. The
+# policy engine inspects the tool's JSON schema and runs ``_check_path`` on
+# every property whose name appears here, ends with ``_path``, or is
+# annotated ``format: \"path\"``. Pre-S1 only the literal ``\"path\"`` key
+# was checked, so tools with ``source_path`` / ``destination_path`` /
+# ``directory`` etc. bypassed ``allowed_paths`` and ``denied_paths``
+# entirely.
+_PATH_ARG_NAMES = frozenset({"path", "filepath", "directory", "cwd"})
+
+
+def _is_path_property(name: str, prop_schema: dict[str, Any] | None) -> bool:
+    """Return True if a schema property describes a filesystem path."""
+    if name in _PATH_ARG_NAMES or name.endswith("_path"):
+        return True
+    if isinstance(prop_schema, dict) and prop_schema.get("format") == "path":
+        return True
+    return False
+
+
+def _iter_path_args(spec: ToolSpec, arguments: dict[str, Any]):
+    """Yield ``(arg_name, value)`` pairs for every path-like argument.
+
+    Schema-driven: walks ``spec.input_schema['properties']`` and yields any
+    property whose name or ``format`` annotation marks it as a path, provided
+    the call carries a non-empty string value for that argument.
+
+    When the spec has no schema (e.g. MCP tools registered without one), this
+    falls back to the legacy ``arguments['path']`` lookup so we still get
+    *some* protection.
+    """
+    schema = spec.input_schema if isinstance(spec.input_schema, dict) else None
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if isinstance(properties, dict):
+        for name, prop_schema in properties.items():
+            if not _is_path_property(name, prop_schema):
+                continue
+            val = arguments.get(name)
+            if isinstance(val, str) and val:
+                yield name, val
+        return
+    # Fallback: no schema — keep the legacy single-arg check.
+    val = arguments.get("path")
+    if isinstance(val, str) and val:
+        yield "path", val
+
+
+# S3 — Shell metacharacters that shlex cannot evaluate structurally.
+# Deny-list patterns containing any of these fall back to substring matching
+# so legacy rules like ``curl|sh`` or ``> /dev/sda`` still fire when the
+# literal text appears in the command.
+_SHELL_METACHARS = frozenset("|<>;&`$()")
+
+
+def _denied_matches(
+    denied: str,
+    raw_command: str,
+    cmd_tokens: list[str] | None,
+) -> bool:
+    """Decide whether *denied* matches *raw_command* under S3 rules.
+
+    - If *cmd_tokens* is None the command failed to tokenise; fall back to
+      substring matching for safety (don't let a malformed command escape).
+    - If *denied* contains shell metacharacters that shlex cannot model
+      structurally, use substring matching.
+    - Otherwise tokenise *denied* with shlex and require either an exact
+      single-token match against the leading executable (with basename
+      fallback) or, for multi-token patterns, a prefix-of-each-token match
+      starting at position 0.
+    """
+    if cmd_tokens is None:
+        return denied in raw_command
+
+    if any(ch in _SHELL_METACHARS for ch in denied):
+        return denied in raw_command
+
+    try:
+        denied_tokens = shlex.split(denied)
+    except ValueError:
+        # Author wrote something shlex can't parse — fall back to substring.
+        return denied in raw_command
+
+    if not denied_tokens or not cmd_tokens:
+        return False
+
+    # Compare leading executable: exact OR basename match. This catches
+    # ``/sbin/shutdown`` matching the denied ``shutdown`` pattern.
+    cmd_head = cmd_tokens[0]
+    cmd_head_base = posixpath.basename(cmd_head.replace("\\", "/"))
+    denied_head = denied_tokens[0]
+    if cmd_head != denied_head and cmd_head_base != denied_head:
+        return False
+
+    # Single-token denial: head match is enough.
+    if len(denied_tokens) == 1:
+        return True
+
+    # Multi-token denial: each subsequent denied token must be a prefix of
+    # the corresponding command token. ``dd if=`` matches ``dd if=/dev/zero``;
+    # ``chmod 777`` matches ``chmod 777 -R foo`` but NOT ``chmod 644``.
+    if len(cmd_tokens) < len(denied_tokens):
+        return False
+    for d_tok, c_tok in zip(denied_tokens[1:], cmd_tokens[1:]):
+        if not c_tok.startswith(d_tok):
+            return False
+    return True
+
+
 def _collapse_posix_path(p: Any) -> str:
     """Collapse ``.`` / ``..`` components in an absolute POSIX path."""
     segments: list[str] = []
@@ -248,11 +357,15 @@ class SafetyPolicy:
                 logger.info("Policy DENY (read-only mode): %s", spec.name)
                 return PolicyDecision.DENY
 
-        # 2. Path checks — hard deny for both reads and writes
+        # 2. Path checks — hard deny for both reads and writes. S1: walk
+        # every schema-declared path-like argument, not just the literal
+        # ``\"path\"`` key. ``allowed_paths`` and ``denied_paths`` must apply
+        # to tools that pass ``source_path``, ``destination_path``,
+        # ``directory``, etc.
         if SideEffect.READ in spec.side_effects or SideEffect.WRITE in spec.side_effects:
-            path = arguments.get("path", "")
-            if path:
-                decision = self._check_path(path, SideEffect.WRITE in spec.side_effects)
+            is_write = SideEffect.WRITE in spec.side_effects
+            for _arg_name, path_val in _iter_path_args(spec, arguments):
+                decision = self._check_path(path_val, is_write)
                 if decision != PolicyDecision.ALLOW:
                     return decision
 
@@ -396,11 +509,32 @@ class SafetyPolicy:
         return PolicyDecision.ALLOW
 
     def _check_command(self, command: str) -> PolicyDecision:
-        """Check a shell command against command rules."""
+        """Check a shell command against command rules.
+
+        S3 — The default ``denied_commands`` list is matched by tokenising
+        *command* with ``shlex`` instead of doing a naive substring search.
+        That eliminates noisy false positives like ``echo \"do not shutdown\"``
+        while still catching e.g. ``/sbin/shutdown`` via basename comparison.
+        Custom ``command_rules`` (which are explicit, user-authored regex or
+        substring rules) are unchanged.
+
+        Best-effort tradeoffs:
+          - Patterns built around shell metacharacters (``|``, ``>``, ``;``,
+            ``&``) cannot be evaluated structurally by shlex; for those we
+            fall back to the legacy substring match so the existing
+            ``curl|sh`` / ``> /dev/sda`` style rules still fire when the
+            literal substring appears.
+          - A command that hides a destructive verb inside ``sh -c '…'`` or
+            ``python -c '…'`` will pass token-based checks because the verb
+            isn't the leading executable. The deny-list has always been a
+            soft guardrail; users wanting true isolation should run under the
+            WSL sandbox.
+        """
         if self.config.log_all_commands:
             logger.info("Command audit: %s", _redact_secrets(command))
 
-        # Check explicit command rules first
+        # Check explicit command rules first — these are user-authored and
+        # explicit, so we honour the historical substring/regex semantics.
         for pattern, decision in self._compiled_command_rules:
             if isinstance(pattern, re.Pattern):
                 if pattern.search(command):
@@ -415,9 +549,16 @@ class SafetyPolicy:
                     )
                     return decision
 
-        # Check default denied commands
+        # Tokenise the command once. If shlex barfs (unterminated quote,
+        # invalid syntax), fall back entirely to substring matching so a
+        # malformed command can't bypass the deny-list.
+        try:
+            cmd_tokens = shlex.split(command)
+        except ValueError:
+            cmd_tokens = None  # signal: substring fallback for everything below
+
         for denied in self.config.denied_commands:
-            if denied in command:
+            if _denied_matches(denied, command, cmd_tokens):
                 logger.warning(
                     "Policy DENY (denied command): %s matches %s",
                     _redact_secrets(command),

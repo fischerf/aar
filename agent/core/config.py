@@ -275,6 +275,12 @@ class WslSandboxConfig(BaseModel):
         "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/"
         "alpine-minirootfs-3.23.0-x86_64.tar.gz"
     )
+    # S6 — Optional SHA-256 of the downloaded rootfs tarball. When set, the
+    # download is verified before import and aborted with a loud error on
+    # mismatch (a CDN compromise would otherwise install attacker-controlled
+    # rootfs). When unset (legacy configs), we log a warning and proceed; the
+    # bundled distro profiles in ``config/distros/*.json`` ship a checksum.
+    rootfs_sha256: str | None = None
     # Commands run inside the distro before package installation (e.g. enabling extra repos).
     pre_install_commands: list[str] = Field(default_factory=list)
     packages: list[str] = Field(default_factory=lambda: ["python3", "py3-pip"])

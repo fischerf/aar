@@ -9,7 +9,6 @@ import pytest
 
 from agent.safety.sandbox import WslDistroSandbox
 
-
 # ---------------------------------------------------------------------------
 # WslDistroSandbox — path translation (pure, no subprocess)
 # ---------------------------------------------------------------------------
@@ -294,6 +293,137 @@ class TestWslManager:
 
 
 # ---------------------------------------------------------------------------
+# S6 — rootfs sha256 verification
+# ---------------------------------------------------------------------------
+
+
+class TestS6RootfsSha256:
+    """S6: ``download_rootfs`` must verify a supplied SHA-256 and delete
+    the downloaded file on mismatch. Pre-S6 a CDN compromise would silently
+    install an attacker-controlled rootfs.
+    """
+
+    def _stub_urlretrieve(self, contents: bytes):
+        """Return a function suitable for patching ``urllib.request.urlretrieve``
+        that writes *contents* to the destination path and ignores the URL.
+        """
+
+        def _stub(url, dest, reporthook=None):
+            from pathlib import Path
+
+            Path(dest).write_bytes(contents)
+
+        return _stub
+
+    def test_matching_sha256_keeps_file(self, tmp_path):
+        from hashlib import sha256
+        from unittest.mock import patch
+
+        from agent.safety import wsl_manager as wm
+
+        payload = b"hello-rootfs"
+        expected = sha256(payload).hexdigest()
+        dest = tmp_path / "rootfs.tar.gz"
+
+        with patch("urllib.request.urlretrieve", new=self._stub_urlretrieve(payload)):
+            wm.download_rootfs("http://example/x.tgz", dest, expected_sha256=expected)
+
+        assert dest.exists()
+        assert dest.read_bytes() == payload
+
+    def test_mismatched_sha256_raises_and_unlinks(self, tmp_path):
+        from unittest.mock import patch
+
+        from agent.safety import wsl_manager as wm
+
+        payload = b"tampered-rootfs"
+        dest = tmp_path / "rootfs.tar.gz"
+
+        with patch("urllib.request.urlretrieve", new=self._stub_urlretrieve(payload)):
+            with pytest.raises(ValueError, match="SHA-256 mismatch"):
+                wm.download_rootfs(
+                    "http://example/x.tgz",
+                    dest,
+                    expected_sha256="00" * 32,
+                )
+
+        assert not dest.exists(), "download must be unlinked on mismatch"
+
+    def test_missing_sha256_logs_warning(self, tmp_path, caplog):
+        import logging
+        from unittest.mock import patch
+
+        from agent.safety import wsl_manager as wm
+
+        payload = b"unverified-rootfs"
+        dest = tmp_path / "rootfs.tar.gz"
+
+        with patch("urllib.request.urlretrieve", new=self._stub_urlretrieve(payload)):
+            with caplog.at_level(logging.WARNING, logger=wm.logger.name):
+                wm.download_rootfs("http://example/x.tgz", dest, expected_sha256=None)
+
+        assert dest.exists()
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("without sha256 verification" in m for m in msgs), msgs
+
+    def test_sha256_comparison_case_insensitive(self, tmp_path):
+        from hashlib import sha256
+        from unittest.mock import patch
+
+        from agent.safety import wsl_manager as wm
+
+        payload = b"case-test"
+        expected = sha256(payload).hexdigest().upper()  # uppercase
+        dest = tmp_path / "rootfs.tar.gz"
+
+        with patch("urllib.request.urlretrieve", new=self._stub_urlretrieve(payload)):
+            wm.download_rootfs("http://example/x.tgz", dest, expected_sha256=expected)
+
+        assert dest.exists()
+
+    def test_sha256_of_file_streams_chunks(self, tmp_path):
+        """Sanity: the helper accepts a tiny chunk size and produces the
+        right digest for a multi-chunk file.
+        """
+        from hashlib import sha256
+
+        from agent.safety.wsl_manager import _sha256_of_file
+
+        payload = b"x" * (3 * 1024 * 1024 + 17)  # 3 MiB + change
+        p = tmp_path / "big.bin"
+        p.write_bytes(payload)
+        assert _sha256_of_file(p, chunk_size=4096) == sha256(payload).hexdigest()
+
+
+class TestS6WslSandboxConfigSha256:
+    """S6: the ``rootfs_sha256`` field exists on ``WslSandboxConfig`` and
+    bundled distro profiles ship a checksum.
+    """
+
+    def test_config_field_defaults_to_none(self):
+        from agent.core.config import WslSandboxConfig
+
+        assert WslSandboxConfig().rootfs_sha256 is None
+
+    def test_config_field_can_be_set(self):
+        from agent.core.config import WslSandboxConfig
+
+        cfg = WslSandboxConfig(rootfs_sha256="de" * 32)
+        assert cfg.rootfs_sha256 == "de" * 32
+
+    def test_bundled_profiles_have_sha256(self):
+        import json
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        for name in ("alpine-base.json", "alpine-r.json", "ubuntu.json"):
+            p = repo_root / "config" / "distros" / name
+            data = json.loads(p.read_text(encoding="utf-8"))
+            assert data.get("rootfs_sha256"), f"{name} must ship a rootfs_sha256"
+            assert len(data["rootfs_sha256"]) == 64, name
+
+
+# ---------------------------------------------------------------------------
 # Config — new SafetyConfig fields
 # ---------------------------------------------------------------------------
 
@@ -324,6 +454,88 @@ class TestSafetyConfigWslFields:
         sb = _create_sandbox(sc)
         assert isinstance(sb, WslDistroSandbox)
         assert sb.distro_name == "my-distro"
+
+
+# ---------------------------------------------------------------------------
+# S4 — env-key validation
+# ---------------------------------------------------------------------------
+
+
+class TestEnvKeyValidation:
+    """S4: ``WslDistroSandbox`` must reject env keys that aren't valid POSIX
+    identifiers — ``shlex.quote`` only quotes *values*, so an attacker-supplied
+    key like ``"FOO; rm -rf /"`` would otherwise be spliced into the shell
+    command verbatim.
+    """
+
+    def _make_mock_proc(self):
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_proc.kill = MagicMock()
+        return mock_proc
+
+    @pytest.mark.asyncio
+    async def test_valid_keys_pass_through(self):
+        mock_proc = self._make_mock_proc()
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            sb = WslDistroSandbox()
+            result = await sb.execute("printenv", env={"FOO": "bar", "_X": "y", "A1": "z"})
+        assert result.exit_code == 0
+        assert mock_exec.called
+        shell_cmd = mock_exec.call_args[0][-1]
+        assert "FOO=bar" in shell_cmd
+
+    @pytest.mark.asyncio
+    async def test_semicolon_key_rejected(self):
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            sb = WslDistroSandbox()
+            result = await sb.execute("printenv", env={"FOO; rm -rf /": "y"})
+        assert result.exit_code == 1
+        assert "invalid environment variable name" in result.stderr
+        # subprocess must NOT have been invoked
+        assert not mock_exec.called
+
+    @pytest.mark.asyncio
+    async def test_space_in_key_rejected(self):
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            sb = WslDistroSandbox()
+            result = await sb.execute("printenv", env={"FOO BAR": "y"})
+        assert result.exit_code == 1
+        assert "invalid environment variable name" in result.stderr
+        assert not mock_exec.called
+
+    @pytest.mark.asyncio
+    async def test_empty_key_rejected(self):
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            sb = WslDistroSandbox()
+            result = await sb.execute("printenv", env={"": "y"})
+        assert result.exit_code == 1
+        assert "invalid environment variable name" in result.stderr
+        assert not mock_exec.called
+
+    @pytest.mark.asyncio
+    async def test_leading_digit_rejected(self):
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            sb = WslDistroSandbox()
+            result = await sb.execute("printenv", env={"1FOO": "y"})
+        assert result.exit_code == 1
+        assert "invalid environment variable name" in result.stderr
+        assert not mock_exec.called
+
+    @pytest.mark.asyncio
+    async def test_first_invalid_key_blocks_rest(self):
+        """Even one bad key fails the entire call — fail-closed."""
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            sb = WslDistroSandbox()
+            result = await sb.execute(
+                "printenv",
+                env={"GOOD": "a", "BAD KEY": "b", "ALSO_GOOD": "c"},
+            )
+        assert result.exit_code == 1
+        assert "invalid environment variable name" in result.stderr
+        assert not mock_exec.called
 
 
 # ---------------------------------------------------------------------------

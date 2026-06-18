@@ -1627,8 +1627,20 @@ def sandbox_setup(
                     console.print(f"  [dim]{pct}%[/]", end="\r")
                     _last[0] = pct
 
-        wm.download_rootfs(resolved_url, tmp_path, progress_cb=_progress)
+        wm.download_rootfs(
+            resolved_url,
+            tmp_path,
+            progress_cb=_progress,
+            expected_sha256=wsl_cfg.rootfs_sha256,
+        )
         console.print(f"  [green]Downloaded[/] → {tmp_path.stat().st_size // 1024} KB")
+        if wsl_cfg.rootfs_sha256:
+            console.print("  [green]SHA-256 verified[/]")
+        else:
+            console.print(
+                "  [yellow]Warning:[/] rootfs not verified — add `rootfs_sha256` "
+                "to your WSL profile for integrity protection."
+            )
 
         # Import distro
         console.print(f"Importing distro '[bold]{distro}[/]' to {resolved_install} …")
