@@ -277,10 +277,29 @@ class GenericProvider(Provider):
         tool_acc: dict[int, dict[str, str]] = {}
         stream_usage: dict[str, int] = {}
         stream_model: str = self.config.model
+        emitted_tools = False
 
         from agent.providers._thinking import StreamThinkingRouter
 
         router = StreamThinkingRouter() if self.supports_reasoning else None
+
+        def _emit_tool_calls() -> list[StreamDelta]:
+            out: list[StreamDelta] = []
+            for acc in tool_acc.values():
+                try:
+                    parsed_args = json.loads(acc["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    parsed_args = {"raw": acc["arguments"]}
+                out.append(
+                    StreamDelta(
+                        tool_call_delta={
+                            "tool_call_id": acc["id"],
+                            "tool_name": acc["name"],
+                            "arguments": parsed_args,
+                        }
+                    )
+                )
+            return out
 
         try:
             async with self._client.stream(
@@ -323,7 +342,7 @@ class GenericProvider(Provider):
                     delta: dict[str, Any] = choice.get("delta", {})
                     finish_reason: str = choice.get("finish_reason") or ""
 
-                    # ── Text delta ────────────────────────────────────────────
+                    # ── Text delta ────────────────────────────────
                     text_piece: str = delta.get("content") or ""
                     reasoning_piece: str = ""
                     if text_piece and router:
@@ -331,7 +350,7 @@ class GenericProvider(Provider):
                     if text_piece or reasoning_piece:
                         yield StreamDelta(text=text_piece, reasoning_delta=reasoning_piece)
 
-                    # ── Tool-call argument fragments ──────────────────────────
+                    # ── Tool-call argument fragments ──────────────────
                     for tc_delta in delta.get("tool_calls", []):
                         idx: int = tc_delta.get("index", 0)
                         fn: dict[str, Any] = tc_delta.get("function", {})
@@ -346,25 +365,17 @@ class GenericProvider(Provider):
                         if fn.get("arguments"):
                             tool_acc[idx]["arguments"] += fn["arguments"]
 
-                    # ── Done ─────────────────────────────────────────────────
-                    if finish_reason:
+                    # ── Done ─────────────────────────────────────
+                    # Emit exactly once — some compat backends send another
+                    # chunk after finish_reason that would re-emit. (#6)
+                    if finish_reason and not emitted_tools:
+                        emitted_tools = True
                         if router:
                             clean, leftover = router.flush()
                             if clean or leftover:
                                 yield StreamDelta(text=clean, reasoning_delta=leftover)
-                        # Emit fully-assembled tool calls at stream end
-                        for acc in tool_acc.values():
-                            try:
-                                parsed_args = json.loads(acc["arguments"] or "{}")
-                            except json.JSONDecodeError:
-                                parsed_args = {"raw": acc["arguments"]}
-                            yield StreamDelta(
-                                tool_call_delta={
-                                    "tool_call_id": acc["id"],
-                                    "tool_name": acc["name"],
-                                    "arguments": parsed_args,
-                                }
-                            )
+                        for delta_out in _emit_tool_calls():
+                            yield delta_out
                         stream_meta: ProviderMeta | None = None
                         if stream_usage:
                             stream_meta = ProviderMeta(
@@ -382,7 +393,16 @@ class GenericProvider(Provider):
         except httpx.RequestError as exc:
             raise RuntimeError(f"Generic provider stream network error: {exc}") from exc
 
-        # Fallback done sentinel if finish_reason never arrived
+        # Fallback path: stream ended without finish_reason (connection drop,
+        # server cut). Flush router state + any accumulated tool calls so the
+        # consumer doesn't lose them. (#6)
+        if not emitted_tools:
+            if router:
+                clean, leftover = router.flush()
+                if clean or leftover:
+                    yield StreamDelta(text=clean, reasoning_delta=leftover)
+            for delta_out in _emit_tool_calls():
+                yield delta_out
         stream_meta_fb: ProviderMeta | None = None
         if stream_usage:
             stream_meta_fb = ProviderMeta(
