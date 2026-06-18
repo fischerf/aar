@@ -1194,9 +1194,9 @@ class AarAcpAgent:
                     register_shell_tools(tmp_reg)
                 if enabled & {"grep", "find_files"}:
                     register_search_tools(tmp_reg)
-                for name in list(tmp_reg._tools):
+                for name in list(tmp_reg.names()):
                     if name not in enabled:
-                        del tmp_reg._tools[name]
+                        tmp_reg.unregister(name)
                 # Merge — skip any built-in whose name already exists in MCP registry
                 for t in tmp_reg.list_tools():
                     if t.name not in tool_names:

@@ -51,6 +51,16 @@ class ToolRegistry:
         """Register a tool from an existing ToolSpec."""
         self._tools[spec.name] = spec
 
+    def unregister(self, name: str) -> bool:
+        """Remove the tool named *name*. Returns True if it existed, else False.
+
+        Use this instead of ``del registry._tools[name]`` at call sites that
+        need to drop a built-in or MCP tool. Centralising removal lets us add
+        invalidation hooks (system-prompt rebuild, observer notification)
+        without hunting four-plus duplicated del-sites.
+        """
+        return self._tools.pop(name, None) is not None
+
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 

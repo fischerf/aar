@@ -58,6 +58,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from typing import Any, AsyncIterator
 
 import httpx
@@ -65,6 +66,7 @@ import httpx
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
 from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.errors import translate_provider_errors
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +193,7 @@ class GeminiProvider(Provider):
     # Public API
     # ------------------------------------------------------------------
 
+    @translate_provider_errors
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -201,6 +204,7 @@ class GeminiProvider(Provider):
             return await self._complete_http(messages, tools, system)
         return await self._complete_sdk(messages, tools, system)
 
+    @translate_provider_errors
     async def stream(
         self,
         messages: list[dict[str, Any]],
@@ -249,6 +253,10 @@ class GeminiProvider(Provider):
 
         tool_acc: list[dict[str, Any]] = []
         usage: dict[str, int] = {}
+        # #5 — Call-scoped UUID prefix so tool_call_ids stay unique across
+        # turns. The raw ``i`` index repeats every call and collisions break
+        # the loop's pending-result correlation.
+        call_uid = uuid.uuid4().hex[:8]
 
         async for chunk in await self._sdk_client.aio.models.generate_content_stream(
             model=self.config.model,
@@ -298,7 +306,7 @@ class GeminiProvider(Provider):
                 for i, fc in enumerate(tool_acc):
                     yield StreamDelta(
                         tool_call_delta={
-                            "tool_call_id": f"gemini_tc_{i}",
+                            "tool_call_id": f"gemini_tc_{call_uid}_{i}",
                             "tool_name": fc["name"],
                             "arguments": fc["args"],
                         }
@@ -396,6 +404,8 @@ class GeminiProvider(Provider):
 
         tool_acc: list[dict[str, Any]] = []
         usage: dict[str, int] = {}
+        # #5 — Per-call UUID prefix prevents tool_call_id collisions across turns.
+        call_uid = uuid.uuid4().hex[:8]
 
         try:
             async with self._http_client.stream(
@@ -465,7 +475,7 @@ class GeminiProvider(Provider):
                         for i, fc in enumerate(tool_acc):
                             yield StreamDelta(
                                 tool_call_delta={
-                                    "tool_call_id": f"gemini_tc_{i}",
+                                    "tool_call_id": f"gemini_tc_{call_uid}_{i}",
                                     "tool_name": fc["name"],
                                     "arguments": fc["args"],
                                 }
@@ -661,6 +671,9 @@ def _parse_sdk_response(response: Any, fallback_model: str) -> ProviderResponse:
     content_text = ""
     tool_calls: list[ToolCall] = []
     reasoning_blocks: list[ReasoningBlock] = []
+    # #5 — Per-call UUID prefix; otherwise every non-streaming response
+    # restarts the ``len(tool_calls)`` counter at 0 and collides with prior turns.
+    call_uid = uuid.uuid4().hex[:8]
 
     if response.candidates:
         candidate = response.candidates[0]
@@ -675,7 +688,7 @@ def _parse_sdk_response(response: Any, fallback_model: str) -> ProviderResponse:
                     tool_calls.append(
                         ToolCall(
                             tool_name=part.function_call.name,
-                            tool_call_id=f"gemini_tc_{len(tool_calls)}",
+                            tool_call_id=f"gemini_tc_{call_uid}_{len(tool_calls)}",
                             arguments=dict(part.function_call.args)
                             if part.function_call.args
                             else {},
@@ -726,6 +739,8 @@ def _parse_http_response(data: dict[str, Any], fallback_model: str) -> ProviderR
     content_text = ""
     tool_calls: list[ToolCall] = []
     reasoning_blocks: list[ReasoningBlock] = []
+    # #5 — Per-call UUID prefix prevents tool_call_id collisions across turns.
+    call_uid = uuid.uuid4().hex[:8]
 
     for part in parts:
         if part.get("thought", False):
@@ -738,7 +753,7 @@ def _parse_http_response(data: dict[str, Any], fallback_model: str) -> ProviderR
             tool_calls.append(
                 ToolCall(
                     tool_name=fc.get("name", ""),
-                    tool_call_id=f"gemini_tc_{len(tool_calls)}",
+                    tool_call_id=f"gemini_tc_{call_uid}_{len(tool_calls)}",
                     arguments=fc.get("args", {}),
                 )
             )

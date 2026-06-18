@@ -123,6 +123,30 @@ aar acp --http --host 0.0.0.0 --port 9000
 | `GET` | `/runs/{run_id}/events` | Full ACP event log for a run |
 | `GET` | `/sessions/{session_id}` | Session metadata |
 
+### Limitations vs stdio
+
+> **The HTTP transport implements only the run-execution subset of the
+> ACP protocol.** It is intended for simple programmatic / curl-based
+> use. For full editor integration (Zed, VS Code via ACP Client, etc.)
+> use the default stdio transport.
+
+Missing relative to stdio (as of the Wave 4 audit, 2026-06):
+
+| Capability | stdio | `--http` |
+|------------|:-----:|:--------:|
+| Run a prompt, stream assistant text | ✅ | ✅ |
+| MCP servers from the client (`initialize.mcp_servers`) | ✅ | ❌ |
+| Slash commands (`/model`, `/help`, `/clear`, …) | ✅ | ❌ |
+| Extension auto-discovery and `register(api)` hooks | ✅ | ❌ |
+| ACP `session/request_permission` round-trip | ✅ | ❌ (auto-approve fallback) |
+| `session/update` notifications for live IDEs | ✅ | ❌ (events buffered on the run only) |
+| `set_session_model` (provider/model switch mid-session) | ✅ | ❌ |
+| Session `fork` / `load` / list | ✅ | ❌ (`GET /sessions/{id}` metadata only) |
+
+If any of those features are required, run the stdio transport behind
+your own process supervisor instead.
+
+
 ### Run modes
 
 Set the `mode` field in `POST /runs`:

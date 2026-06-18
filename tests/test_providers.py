@@ -1230,3 +1230,238 @@ class TestStreamThinkingRouter:
         router = StreamThinkingRouter()
         clean, reasoning = router.feed("")
         assert clean == "" and reasoning == ""
+
+
+class TestProviderErrorTaxonomy:
+    """#4 — ``agent.providers.errors`` taxonomy + ``translate_provider_errors``.
+
+    The runner now decides retry / messaging via ``isinstance`` against
+    typed errors raised by each adapter. The classifier in ``errors.py``
+    centralises the SDK-name table that used to be duplicated in
+    ``provider_runner.py``.
+    """
+
+    # ---- classifier -----------------------------------------------------
+
+    def test_classify_rate_limit_by_name(self):
+        from agent.providers.errors import RateLimited, classify_provider_exception
+
+        class FakeSdkRateLimitError(Exception):
+            pass
+
+        result = classify_provider_exception(FakeSdkRateLimitError("slow down"))
+        assert isinstance(result, RateLimited)
+        assert "slow down" in str(result)
+
+    def test_classify_auth_failure_by_name(self):
+        from agent.providers.errors import AuthFailure, classify_provider_exception
+
+        class FakePermissionDeniedError(Exception):
+            pass
+
+        result = classify_provider_exception(FakePermissionDeniedError("nope"))
+        assert isinstance(result, AuthFailure)
+
+    def test_classify_transient_by_name(self):
+        from agent.providers.errors import Transient, classify_provider_exception
+
+        class FakeReadTimeout(Exception):
+            pass
+
+        result = classify_provider_exception(FakeReadTimeout("too slow"))
+        assert isinstance(result, Transient)
+
+    def test_classify_invalid_request_by_name(self):
+        from agent.providers.errors import InvalidRequest, classify_provider_exception
+
+        class FakeBadRequestError(Exception):
+            pass
+
+        result = classify_provider_exception(FakeBadRequestError("bad"))
+        assert isinstance(result, InvalidRequest)
+
+    def test_classify_unknown_returns_none(self):
+        """Exceptions outside the known families must NOT be wrapped; the caller
+        re-raises the original so we don't hide novel error types."""
+        from agent.providers.errors import classify_provider_exception
+
+        class Mystery(Exception):
+            pass
+
+        assert classify_provider_exception(Mystery("???")) is None
+
+    def test_classify_passes_through_already_typed(self):
+        """An already-typed ProviderError must not be double-wrapped."""
+        from agent.providers.errors import RateLimited, classify_provider_exception
+
+        original = RateLimited("hit")
+        result = classify_provider_exception(original)
+        assert result is original
+
+    def test_retryable_attribute(self):
+        """The ``retryable`` flag is part of the taxonomy contract —
+        rate-limits and transient errors are retryable, auth and invalid
+        requests are not."""
+        from agent.providers.errors import (
+            AuthFailure,
+            InvalidRequest,
+            RateLimited,
+            Transient,
+        )
+
+        assert RateLimited.retryable is True
+        assert Transient.retryable is True
+        assert AuthFailure.retryable is False
+        assert InvalidRequest.retryable is False
+
+    # ---- translate_sdk_errors context manager ---------------------------
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_wraps_sdk_exception(self):
+        from agent.providers.errors import RateLimited, translate_sdk_errors
+
+        class FakeRateLimitError(Exception):
+            pass
+
+        with pytest.raises(RateLimited) as exc_info:
+            async with translate_sdk_errors():
+                raise FakeRateLimitError("throttled")
+        # __cause__ preserves the original for debugging.
+        assert isinstance(exc_info.value.__cause__, FakeRateLimitError)
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_lets_unknown_propagate(self):
+        from agent.providers.errors import translate_sdk_errors
+
+        class Mystery(Exception):
+            pass
+
+        with pytest.raises(Mystery):
+            async with translate_sdk_errors():
+                raise Mystery("raw")
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_passes_typed_through(self):
+        from agent.providers.errors import AuthFailure, translate_sdk_errors
+
+        original = AuthFailure("bad key")
+        with pytest.raises(AuthFailure) as exc_info:
+            async with translate_sdk_errors():
+                raise original
+        # Same instance — not re-wrapped, no spurious __cause__.
+        assert exc_info.value is original
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_does_not_swallow_cancellation(self):
+        """``CancelledError`` is a ``BaseException`` — the context manager
+        must NOT classify it as a provider error or cooperative cancellation
+        in the loop will break."""
+        import asyncio
+
+        from agent.providers.errors import translate_sdk_errors
+
+        with pytest.raises(asyncio.CancelledError):
+            async with translate_sdk_errors():
+                raise asyncio.CancelledError()
+
+    # ---- @translate_provider_errors decorator ---------------------------
+
+    @pytest.mark.asyncio
+    async def test_decorator_wraps_coroutine_complete(self):
+        from agent.providers.errors import Transient, translate_provider_errors
+
+        class FakeConnectError(Exception):
+            pass
+
+        @translate_provider_errors
+        async def fake_complete(self):
+            raise FakeConnectError("down")
+
+        with pytest.raises(Transient):
+            await fake_complete(self=None)
+
+    @pytest.mark.asyncio
+    async def test_decorator_wraps_async_generator_stream(self):
+        """The decorator must auto-detect async generators (``yield`` inside)
+        and wrap them WITHOUT collapsing the generator into a single value."""
+        from agent.providers.errors import RateLimited, translate_provider_errors
+
+        class FakeRateLimitError(Exception):
+            pass
+
+        @translate_provider_errors
+        async def fake_stream(self):
+            yield "a"
+            yield "b"
+            raise FakeRateLimitError("slow down")
+
+        seen: list[str] = []
+        with pytest.raises(RateLimited):
+            async for x in fake_stream(self=None):
+                seen.append(x)
+        # Both pre-error yields surfaced; the error only fires on the third pull.
+        assert seen == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_decorator_passes_through_successful_stream(self):
+        """Regression: success path — every yielded value reaches the consumer
+        and the generator exits cleanly."""
+        from agent.providers.errors import translate_provider_errors
+
+        @translate_provider_errors
+        async def fake_stream(self):
+            for i in range(3):
+                yield i
+
+        result = []
+        async for v in fake_stream(self=None):
+            result.append(v)
+        assert result == [0, 1, 2]
+
+    # ---- runner uses isinstance ----------------------------------------
+
+    def test_runner_is_rate_limit_via_typed_error(self):
+        """`_is_rate_limit` returns True for our typed RateLimited without
+        falling back to substring matching."""
+        from agent.core.provider_runner import _is_rate_limit
+        from agent.providers.errors import RateLimited
+
+        assert _is_rate_limit(RateLimited("hit"))
+
+    def test_runner_is_rate_limit_via_legacy_name(self):
+        """Backwards-compat: an unwrapped SDK exception (e.g. raised by a
+        custom Provider subclass that didn't use the decorator) is still
+        classified correctly via the centralised name table."""
+        from agent.core.provider_runner import _is_rate_limit
+
+        class FakeRateLimitError(Exception):
+            pass
+
+        assert _is_rate_limit(FakeRateLimitError("slow"))
+
+    def test_runner_message_for_auth_failure(self):
+        from agent.core.provider_runner import _provider_error_message
+        from agent.providers.errors import AuthFailure
+
+        msg, recoverable = _provider_error_message(AuthFailure("bad key"))
+        assert "Authentication failed" in msg
+        assert recoverable is False
+
+    def test_runner_message_for_transient(self):
+        from agent.core.provider_runner import _provider_error_message
+        from agent.providers.errors import Transient
+
+        msg, recoverable = _provider_error_message(Transient("oops"))
+        assert recoverable is True
+
+    def test_runner_message_for_unknown(self):
+        """Mystery exceptions keep the legacy ``Provider error (Name): ...`` shape
+        so logs and TUIs that already parse it don't break."""
+        from agent.core.provider_runner import _provider_error_message
+
+        class Mystery(Exception):
+            pass
+
+        msg, recoverable = _provider_error_message(Mystery("???"))
+        assert "Mystery" in msg
+        assert recoverable is False

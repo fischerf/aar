@@ -29,6 +29,14 @@ from agent.core.loop_helpers import emit
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.providers.base import Provider, ProviderResponse
+from agent.providers.errors import (
+    AuthFailure,
+    InvalidRequest,
+    ProviderError,
+    RateLimited,
+    Transient,
+    classify_provider_exception,
+)
 
 
 class ProviderRequestFailed(RuntimeError):
@@ -40,8 +48,16 @@ class ProviderRequestFailed(RuntimeError):
 
 
 def _is_rate_limit(exc: BaseException) -> bool:
-    """Return True if *exc* is a rate-limit error from the provider."""
-    return "RateLimitError" in type(exc).__name__
+    """Return True if *exc* is a rate-limit error from the provider.
+
+    #4 — isinstance against ``RateLimited`` is the primary path; the
+    substring classifier covers exceptions that escaped without being
+    wrapped (e.g. a custom transport that didn't use ``translate_sdk_errors``).
+    """
+    if isinstance(exc, RateLimited):
+        return True
+    classified = classify_provider_exception(exc)
+    return isinstance(classified, RateLimited)
 
 
 async def provider_request(
@@ -211,36 +227,49 @@ def _provider_error_message(exc: BaseException) -> tuple[str, bool]:
 
     Keeps raw tracebacks out of user-facing output while still giving
     actionable context. The full traceback is still available at DEBUG level.
+
+    #4 — isinstance against the ``ProviderError`` taxonomy is the
+    primary path; the centralised classifier covers stray exceptions that
+    escaped a non-wrapped code path (custom provider subclasses, direct
+    use of the SDK, etc.). The substring matching that used to live here
+    has moved to ``agent.providers.errors._*_NAMES`` so every adapter
+    benefits from the same translation.
     """
     type_name = type(exc).__name__
     exc_str = str(exc).strip()
 
-    if any(
-        t in type_name for t in ("ReadTimeout", "WriteTimeout", "PoolTimeout", "ConnectTimeout")
-    ):
-        return (
-            "Request timed out — the provider took too long to respond. You can try again.",
-            True,
-        )
-    if any(t in type_name for t in ("ConnectError", "ConnectionError", "NetworkError")):
-        return (
-            "Could not connect to the provider — check that the server URL is correct"
-            " and the service is running.",
-            True,
-        )
-    if any(t in type_name for t in ("RemoteProtocolError", "LocalProtocolError")):
-        return (
-            f"Provider returned an unexpected response ({type_name}). You can try again.",
-            True,
-        )
+    # Promote raw SDK exceptions to typed errors so the isinstance ladder
+    # below behaves identically whether the adapter wrapped the call or not.
+    typed: ProviderError | None = (
+        exc if isinstance(exc, ProviderError) else classify_provider_exception(exc)
+    )
 
-    if any(
-        t in type_name for t in ("AuthenticationError", "PermissionDeniedError", "PermissionDenied")
-    ):
+    if isinstance(typed, AuthFailure):
         return "Authentication failed — check your API key.", False
-    if "RateLimitError" in type_name:
+    if isinstance(typed, RateLimited):
         return "Rate limit exceeded — wait a moment, then try again.", True
-    if any(t in type_name for t in ("APIStatusError", "HTTPStatusError")):
+    if isinstance(typed, InvalidRequest):
+        detail = exc_str or type_name
+        return f"Provider rejected the request: {detail}", False
+    if isinstance(typed, Transient):
+        # Provide a slightly more specific reason for the most common
+        # transient families; otherwise fall through to a generic message.
+        if any(t in type_name for t in ("Timeout",)):
+            return (
+                "Request timed out — the provider took too long to respond. You can try again.",
+                True,
+            )
+        if any(t in type_name for t in ("ConnectError", "ConnectionError", "NetworkError")):
+            return (
+                "Could not connect to the provider — check that the server URL is correct"
+                " and the service is running.",
+                True,
+            )
+        if any(t in type_name for t in ("RemoteProtocolError", "LocalProtocolError")):
+            return (
+                f"Provider returned an unexpected response ({type_name}). You can try again.",
+                True,
+            )
         detail = exc_str or type_name
         return f"Provider returned an error: {detail}", True
 
