@@ -109,8 +109,13 @@ class Agent:
 
         # Load skills if enabled
         skills_text: str | None = None
+        skill_read_globs: list[str] = []
         if self.config.skills_enabled:
-            from agent.core.skills import format_skills_for_prompt, load_skills
+            from agent.core.skills import (
+                format_skills_for_prompt,
+                load_skills,
+                skill_read_paths,
+            )
 
             result = load_skills(
                 project_rules_dir=self.config.project_rules_dir,
@@ -118,6 +123,13 @@ class Agent:
             )
             if result.skills:
                 skills_text = format_skills_for_prompt(result.skills)
+                skill_read_globs = skill_read_paths(result.skills)
+
+        # Grant the policy read-only access to discovered skill files so the
+        # model can load skill instructions even when allowed_paths restricts it
+        # to the workspace. Reassigned (not appended) each rebuild to stay
+        # idempotent across repeated calls (e.g. after extensions register).
+        self.executor.policy.config.read_only_paths = skill_read_globs
 
         sb = self.config.safety.sandbox
         self.config.system_prompt = build_system_prompt(

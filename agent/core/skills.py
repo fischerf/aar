@@ -263,6 +263,33 @@ def load_skills(
     return result
 
 
+# ── Policy integration ───────────────────────────────────────────────────
+
+
+def skill_read_paths(skills: list[Skill]) -> list[str]:
+    """Return glob patterns granting read-only access to *skills*.
+
+    Each skill's ``base_dir`` is exposed recursively (``<base_dir>/**``) so the
+    model can read the skill file plus any supporting resources bundled
+    alongside it. These patterns feed the safety policy's ``read_only_paths``
+    allowlist so skills stored outside the workspace (e.g. ``~/.aar/skills``)
+    stay readable even when ``allowed_paths`` restricts the agent to the
+    project directory. Duplicates are collapsed; order is preserved.
+    """
+    patterns: list[str] = []
+    seen: set[str] = set()
+    for skill in skills:
+        try:
+            base = str(skill.base_dir.resolve()).replace("\\", "/")
+        except OSError:
+            base = str(skill.base_dir).replace("\\", "/")
+        pattern = f"{base}/**"
+        if pattern not in seen:
+            seen.add(pattern)
+            patterns.append(pattern)
+    return patterns
+
+
 # ── Prompt formatting ────────────────────────────────────────────────────
 
 
