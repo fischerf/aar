@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>aar webchat</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+            :root {
+                --bg: #0f1115;
+                --panel: #161a22;
+                --panel-2: #1d2230;
+                --border: #2a3142;
+                --text: #e6e8ee;
+                --muted: #8a93a6;
+                --accent: #6aa1ff;
+                --user: #2b66c2;
+                --assistant: #2a3142;
+                --tool: #3a2f1a;
+                --tool-border: #6e5526;
+                --err: #b33a3a;
+                --ok: #2f8a4e;
+                --mono:
+                    ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo,
+                    Consolas, monospace;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            html,
+            body {
+                height: 100%;
+                margin: 0;
+            }
+            body {
+                background: var(--bg);
+                color: var(--text);
+                font:
+                    14px/1.45 system-ui,
+                    -apple-system,
+                    Segoe UI,
+                    Roboto,
+                    sans-serif;
+                display: flex;
+                flex-direction: column;
+            }
+            header {
+                padding: 10px 14px;
+                background: var(--panel);
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                gap: 10px;
+                align-items: center;
+                flex-wrap: wrap;
+            }
+            header h1 {
+                margin: 0;
+                font-size: 14px;
+                font-weight: 600;
+                letter-spacing: 0.5px;
+                color: var(--accent);
+            }
+            header .field {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            header label {
+                color: var(--muted);
+                font-size: 12px;
+            }
+            header input,
+            header select {
+                background: var(--panel-2);
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 12px;
+                font-family: var(--mono);
+            }
+            header input[type="text"] {
+                width: 230px;
+            }
+            header .session input {
+                width: 170px;
+            }
+            header button {
+                background: var(--panel-2);
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 5px 10px;
+                cursor: pointer;
+                font-size: 12px;
+            }
+            header button:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            header .status {
+                margin-left: auto;
+                font-size: 12px;
+                color: var(--muted);
+            }
+            header .status.ok {
+                color: var(--ok);
+            }
+            header .status.err {
+                color: var(--err);
+            }
+
+            #log {
+                flex: 1;
+                overflow-y: auto;
+                padding: 16px;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+            .msg {
+                max-width: 88%;
+                padding: 8px 12px;
+                border-radius: 8px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }
+            .msg.user {
+                align-self: flex-end;
+                background: var(--user);
+                color: #fff;
+            }
+            .msg.assistant {
+                align-self: flex-start;
+                background: var(--assistant);
+                border: 1px solid var(--border);
+            }
+            .msg.reasoning {
+                align-self: flex-start;
+                background: transparent;
+                border: 1px dashed var(--border);
+                color: var(--muted);
+                font-style: italic;
+            }
+            .msg.error {
+                align-self: flex-start;
+                background: var(--err);
+                color: #fff;
+            }
+            .msg.system {
+                align-self: center;
+                background: transparent;
+                color: var(--muted);
+                font-size: 12px;
+            }
+
+            .tool {
+                align-self: flex-start;
+                max-width: 88%;
+                background: var(--tool);
+                border: 1px solid var(--tool-border);
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-family: var(--mono);
+                font-size: 12px;
+            }
+            .tool .name {
+                color: #f4c777;
+                font-weight: 600;
+            }
+            .tool .duration {
+                color: var(--muted);
+                margin-left: 6px;
+            }
+            .tool pre {
+                margin: 6px 0 0;
+                padding: 6px 8px;
+                background: rgba(0, 0, 0, 0.3);
+                border-radius: 4px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                max-height: 240px;
+                overflow: auto;
+            }
+            .tool.error {
+                background: #3a1a1a;
+                border-color: var(--err);
+            }
+            .tool.error .name {
+                color: #ff9a9a;
+            }
+
+            .meta {
+                font-size: 11px;
+                color: var(--muted);
+                margin-top: 4px;
+            }
+
+            footer {
+                border-top: 1px solid var(--border);
+                background: var(--panel);
+                padding: 10px 14px;
+                display: flex;
+                gap: 8px;
+                align-items: flex-end;
+            }
+
+            /* --- main + side-panel layout --- */
+            #main {
+                flex: 1;
+                display: flex;
+                min-height: 0;
+            }
+            #log {
+                flex: 1;
+            }
+            #side {
+                width: 420px;
+                max-width: 50vw;
+                border-left: 1px solid var(--border);
+                background: var(--panel);
+                display: flex;
+                flex-direction: column;
+            }
+            #side[hidden] {
+                display: none;
+            }
+            #side .side-head {
+                padding: 8px 12px;
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 12px;
+                color: var(--muted);
+            }
+            #side .side-head .title {
+                color: var(--accent);
+                font-weight: 600;
+            }
+            #side .side-head .spacer {
+                flex: 1;
+            }
+            #side .side-head button {
+                background: var(--panel-2);
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 4px;
+                padding: 3px 8px;
+                cursor: pointer;
+                font-size: 11px;
+            }
+            #raw {
+                flex: 1;
+                overflow-y: auto;
+                padding: 8px;
+                font-family: var(--mono);
+                font-size: 11.5px;
+                line-height: 1.35;
+            }
+            .raw-item {
+                border-left: 3px solid var(--border);
+                background: var(--panel-2);
+                padding: 4px 8px;
+                margin-bottom: 6px;
+                border-radius: 0 4px 4px 0;
+            }
+            .raw-item .rtype {
+                color: var(--accent);
+                font-weight: 600;
+            }
+            .raw-item .rtime {
+                color: var(--muted);
+                margin-left: 6px;
+                font-size: 10px;
+            }
+            .raw-item pre {
+                margin: 4px 0 0;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                max-height: 180px;
+                overflow: auto;
+                color: var(--text);
+            }
+            .raw-item.stream_chunk {
+                border-left-color: #4a6b9a;
+            }
+            .raw-item.provider_meta {
+                border-left-color: #2f8a4e;
+            }
+            .raw-item.context_window {
+                border-left-color: #8a7a2f;
+            }
+            .raw-item.error {
+                border-left-color: var(--err);
+            }
+            .raw-item.session {
+                border-left-color: #6aa1ff;
+            }
+            .raw-item.tool_call,
+            .raw-item.tool_result {
+                border-left-color: #f4c777;
+            }
+            .raw-item.assistant_message,
+            .raw-item.reasoning {
+                border-left-color: #aaa;
+            }
+            #input {
+                flex: 1;
+                resize: vertical;
+                min-height: 38px;
+                max-height: 200px;
+                background: var(--panel-2);
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 8px 10px;
+                font:
+                    14px/1.4 system-ui,
+                    sans-serif;
+            }
+            #send {
+                background: var(--accent);
+                color: #fff;
+                border: none;
+                border-radius: 6px;
+                padding: 9px 16px;
+                cursor: pointer;
+                font-weight: 600;
+            }
+            #send:disabled {
+                background: #34507e;
+                cursor: not-allowed;
+            }
+            #stop {
+                background: var(--err);
+                color: #fff;
+                border: none;
+                border-radius: 6px;
+                padding: 9px 14px;
+                cursor: pointer;
+                font-weight: 600;
+            }
+            #stop[hidden] {
+                display: none;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>aar webchat</h1>
+            <div class="field">
+                <label for="server">Server</label>
+                <input id="server" type="text" value="http://localhost:8080" />
+            </div>
+            <div class="field session">
+                <label for="session">Session</label>
+                <input id="session" type="text" placeholder="(new)" />
+                <button id="newSession" title="Start a fresh session">
+                    New
+                </button>
+            </div>
+            <div class="field">
+                <label for="provider">Provider</label>
+                <input
+                    id="provider"
+                    type="text"
+                    placeholder="(default)"
+                    style="width: 120px"
+                />
+            </div>
+            <div class="field">
+                <label for="mode">Mode</label>
+                <select id="mode">
+                    <option value="stream" selected>stream</option>
+                    <option value="chat">chat</option>
+                </select>
+            </div>
+            <button id="clear" title="Clear the visible log">Clear</button>
+            <button id="ping" title="GET /health">Ping</button>
+            <button id="toggleSide" title="Show/hide raw event panel">
+                Events ▸
+            </button>
+            <div id="status" class="status">idle</div>
+        </header>
+
+        <main id="main">
+            <section id="log"></section>
+            <aside id="side" hidden>
+                <div class="side-head">
+                    <span class="title">Raw events</span>
+                    <span id="rawCount" class="rtime">0</span>
+                    <span class="spacer"></span>
+                    <button id="rawClear">Clear</button>
+                    <button id="rawCopy" title="Copy all events as JSON">
+                        Copy
+                    </button>
+                </div>
+                <div id="raw"></div>
+            </aside>
+        </main>
+
+        <footer>
+            <textarea
+                id="input"
+                placeholder="Type a message — Enter to send, Shift+Enter for newline"
+            ></textarea>
+            <button id="send">Send</button>
+            <button id="stop" hidden>Stop</button>
+        </footer>
+
+        <script>
+            (() => {
+                const $ = (id) => document.getElementById(id);
+                const log = $("log");
+                const input = $("input");
+                const sendBtn = $("send");
+                const stopBtn = $("stop");
+                const status = $("status");
+                const serverEl = $("server");
+                const sessionEl = $("session");
+                const providerEl = $("provider");
+                const modeEl = $("mode");
+
+                // ---------- persistence ----------
+                const LS = {
+                    get: (k, d) => {
+                        try {
+                            return localStorage.getItem(k) ?? d;
+                        } catch {
+                            return d;
+                        }
+                    },
+                    set: (k, v) => {
+                        try {
+                            localStorage.setItem(k, v);
+                        } catch {}
+                    },
+                };
+                serverEl.value = LS.get("aar.server", serverEl.value);
+                sessionEl.value = LS.get("aar.session", "");
+                providerEl.value = LS.get("aar.provider", "");
+                modeEl.value = LS.get("aar.mode", "stream");
+                for (const el of [serverEl, sessionEl, providerEl, modeEl]) {
+                    el.addEventListener("change", () => {
+                        LS.set("aar." + el.id, el.value);
+                    });
+                }
+
+                // ---------- helpers ----------
+                function genSessionId() {
+                    // 16 hex chars — matches aar's server-side default
+                    const a = new Uint8Array(8);
+                    crypto.getRandomValues(a);
+                    return Array.from(a, (b) =>
+                        b.toString(16).padStart(2, "0"),
+                    ).join("");
+                }
+                function ensureSessionId() {
+                    if (!sessionEl.value.trim()) {
+                        sessionEl.value = genSessionId();
+                        LS.set("aar.session", sessionEl.value);
+                    }
+                    return sessionEl.value.trim();
+                }
+                $("newSession").addEventListener("click", () => {
+                    sessionEl.value = genSessionId();
+                    LS.set("aar.session", sessionEl.value);
+                    addSystem("New session: " + sessionEl.value);
+                });
+                $("clear").addEventListener("click", () => {
+                    log.innerHTML = "";
+                });
+
+                // ---------- raw events side panel ----------
+                const side = $("side");
+                const raw = $("raw");
+                const rawCount = $("rawCount");
+                const toggleSideBtn = $("toggleSide");
+                const rawEvents = []; // {event, data, t}
+
+                function setSideHidden(hidden) {
+                    side.hidden = hidden;
+                    toggleSideBtn.textContent = hidden
+                        ? "Events \u25B8"
+                        : "Events \u25C2";
+                    LS.set("aar.sideOpen", hidden ? "0" : "1");
+                }
+                setSideHidden(LS.get("aar.sideOpen", "0") !== "1");
+                toggleSideBtn.addEventListener("click", () =>
+                    setSideHidden(!side.hidden),
+                );
+                $("rawClear").addEventListener("click", () => {
+                    rawEvents.length = 0;
+                    raw.innerHTML = "";
+                    rawCount.textContent = "0";
+                });
+                $("rawCopy").addEventListener("click", async () => {
+                    try {
+                        await navigator.clipboard.writeText(
+                            JSON.stringify(rawEvents, null, 2),
+                        );
+                        setStatus("events copied to clipboard", "ok");
+                    } catch (e) {
+                        setStatus("copy failed: " + e.message, "err");
+                    }
+                });
+
+                function addRaw(eventType, data) {
+                    const entry = { event: eventType, data, t: Date.now() };
+                    rawEvents.push(entry);
+                    rawCount.textContent = String(rawEvents.length);
+                    const div = document.createElement("div");
+                    div.className = "raw-item " + eventType;
+                    const ts = new Date(entry.t).toLocaleTimeString();
+                    const head = document.createElement("div");
+                    head.innerHTML = `<span class="rtype">${escapeHtml(eventType)}</span><span class="rtime">${ts}</span>`;
+                    div.appendChild(head);
+                    const pre = document.createElement("pre");
+                    pre.textContent = safeStringify(data);
+                    div.appendChild(pre);
+                    raw.appendChild(div);
+                    raw.scrollTop = raw.scrollHeight;
+                }
+                $("ping").addEventListener("click", async () => {
+                    setStatus("pinging…");
+                    try {
+                        const r = await fetch(
+                            serverEl.value.replace(/\/$/, "") + "/health",
+                        );
+                        const j = await r.json();
+                        setStatus(
+                            "health: " + JSON.stringify(j),
+                            r.ok ? "ok" : "err",
+                        );
+                    } catch (e) {
+                        setStatus("ping failed: " + e.message, "err");
+                    }
+                });
+
+                function setStatus(text, cls = "") {
+                    status.textContent = text;
+                    status.className = "status " + cls;
+                }
+
+                function addMsg(role, text) {
+                    const div = document.createElement("div");
+                    div.className = "msg " + role;
+                    div.textContent = text;
+                    log.appendChild(div);
+                    log.scrollTop = log.scrollHeight;
+                    return div;
+                }
+                function addSystem(text) {
+                    addMsg("system", text);
+                }
+                function appendTo(el, text) {
+                    el.textContent += text;
+                    log.scrollTop = log.scrollHeight;
+                }
+
+                function addToolCall(ev) {
+                    const div = document.createElement("div");
+                    div.className = "tool";
+                    const header = document.createElement("div");
+                    header.innerHTML = `<span class="name">▸ ${escapeHtml(ev.tool_name || "tool")}</span>`;
+                    div.appendChild(header);
+                    const pre = document.createElement("pre");
+                    pre.textContent = safeStringify(ev.arguments ?? {});
+                    div.appendChild(pre);
+                    div._args = pre;
+                    log.appendChild(div);
+                    log.scrollTop = log.scrollHeight;
+                    return div;
+                }
+                function addToolResult(ev) {
+                    const div = document.createElement("div");
+                    div.className = "tool" + (ev.is_error ? " error" : "");
+                    const dur =
+                        ev.duration_ms != null
+                            ? ` <span class="duration">${ev.duration_ms.toFixed?.(1) ?? ev.duration_ms}ms</span>`
+                            : "";
+                    div.innerHTML = `<div><span class="name">◂ ${escapeHtml(ev.tool_name || "tool")}</span>${dur}</div>`;
+                    const pre = document.createElement("pre");
+                    pre.textContent =
+                        typeof ev.output === "string"
+                            ? ev.output
+                            : safeStringify(ev.output);
+                    div.appendChild(pre);
+                    log.appendChild(div);
+                    log.scrollTop = log.scrollHeight;
+                    return div;
+                }
+
+                function escapeHtml(s) {
+                    return String(s).replace(
+                        /[&<>"']/g,
+                        (c) =>
+                            ({
+                                "&": "&amp;",
+                                "<": "&lt;",
+                                ">": "&gt;",
+                                '"': "&quot;",
+                                "'": "&#39;",
+                            })[c],
+                    );
+                }
+                function safeStringify(o) {
+                    try {
+                        return JSON.stringify(o, null, 2);
+                    } catch {
+                        return String(o);
+                    }
+                }
+
+                // ---------- send ----------
+                let currentController = null;
+
+                input.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        send();
+                    }
+                });
+                sendBtn.addEventListener("click", send);
+                stopBtn.addEventListener("click", () => {
+                    if (currentController) {
+                        currentController.abort();
+                        setStatus("aborted", "err");
+                    }
+                });
+
+                async function send() {
+                    const prompt = input.value.trim();
+                    if (!prompt) return;
+                    const server = serverEl.value.replace(/\/$/, "");
+                    const sessionId = ensureSessionId();
+                    const provider = providerEl.value.trim() || null;
+                    const mode = modeEl.value;
+
+                    addMsg("user", prompt);
+                    input.value = "";
+                    sendBtn.disabled = true;
+                    stopBtn.hidden = false;
+
+                    const body = {
+                        prompt,
+                        session_id: sessionId,
+                        ...(provider ? { provider } : {}),
+                    };
+
+                    currentController = new AbortController();
+                    try {
+                        if (mode === "stream") {
+                            await runStream(
+                                server,
+                                body,
+                                currentController.signal,
+                            );
+                        } else {
+                            await runChat(
+                                server,
+                                body,
+                                currentController.signal,
+                            );
+                        }
+                    } catch (e) {
+                        if (e.name === "AbortError") {
+                            addSystem("(stopped)");
+                        } else {
+                            addMsg("error", "Request failed: " + e.message);
+                            setStatus("error", "err");
+                        }
+                    } finally {
+                        sendBtn.disabled = false;
+                        stopBtn.hidden = true;
+                        currentController = null;
+                    }
+                }
+
+                async function runChat(server, body, signal) {
+                    setStatus("waiting…");
+                    const r = await fetch(server + "/chat", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                        signal,
+                    });
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    const data = await r.json();
+                    // Render tool results inline
+                    for (const t of data.tool_results || []) addToolResult(t);
+                    if (data.response) addMsg("assistant", data.response);
+                    if (data.session_id) {
+                        sessionEl.value = data.session_id;
+                        LS.set("aar.session", data.session_id);
+                    }
+                    setStatus(
+                        `done · state=${data.state} · steps=${data.step_count}`,
+                        data.state === "completed" ? "ok" : "err",
+                    );
+                }
+
+                async function runStream(server, body, signal) {
+                    setStatus("streaming…");
+                    const r = await fetch(server + "/chat/stream", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Accept: "text/event-stream",
+                        },
+                        body: JSON.stringify(body),
+                        signal,
+                    });
+                    if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
+
+                    const reader = r.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buf = "";
+                    const ctx = {
+                        assistant: null,
+                        reasoning: null,
+                    };
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        buf += decoder.decode(value, { stream: true });
+
+                        // Split on SSE frame boundary
+                        let idx;
+                        while ((idx = buf.indexOf("\n\n")) >= 0) {
+                            const frame = buf.slice(0, idx);
+                            buf = buf.slice(idx + 2);
+                            const ev = parseSSE(frame);
+                            if (!ev) continue;
+                            handleEvent(ev, ctx);
+                        }
+                    }
+                }
+
+                function parseSSE(frame) {
+                    let eventType = "message";
+                    const dataLines = [];
+                    for (const raw of frame.split("\n")) {
+                        const line = raw.replace(/\r$/, "");
+                        if (!line || line.startsWith(":")) continue;
+                        const colon = line.indexOf(":");
+                        const field =
+                            colon === -1 ? line : line.slice(0, colon);
+                        const value =
+                            colon === -1
+                                ? ""
+                                : line.slice(colon + 1).replace(/^ /, "");
+                        if (field === "event") eventType = value;
+                        else if (field === "data") dataLines.push(value);
+                    }
+                    if (!dataLines.length) return null;
+                    try {
+                        return {
+                            event: eventType,
+                            data: JSON.parse(dataLines.join("\n")),
+                        };
+                    } catch {
+                        return {
+                            event: eventType,
+                            data: { raw: dataLines.join("\n") },
+                        };
+                    }
+                }
+
+                function handleEvent({ event, data }, ctx) {
+                    // Mirror every event into the raw side panel.
+                    addRaw(event, data);
+
+                    switch (event) {
+                        case "stream_chunk": {
+                            // Token-by-token streaming. Append to a live bubble; reset on finish
+                            // so the next chunk starts a fresh one.
+                            if (data.text) {
+                                if (!ctx.assistant)
+                                    ctx.assistant = addMsg("assistant", "");
+                                appendTo(ctx.assistant, data.text);
+                            }
+                            if (data.reasoning_text) {
+                                if (!ctx.reasoning)
+                                    ctx.reasoning = addMsg("reasoning", "");
+                                appendTo(ctx.reasoning, data.reasoning_text);
+                            }
+                            if (data.finished) {
+                                ctx.assistant = null;
+                                ctx.reasoning = null;
+                            }
+                            break;
+                        }
+                        case "assistant_message": {
+                            // Final consolidated text for the turn. If stream_chunks already
+                            // built the bubble, skip — otherwise render fresh.
+                            if (data.content && !ctx.assistant)
+                                addMsg("assistant", data.content);
+                            ctx.assistant = null;
+                            break;
+                        }
+                        case "reasoning": {
+                            if (!ctx.reasoning)
+                                ctx.reasoning = addMsg("reasoning", "");
+                            appendTo(ctx.reasoning, data.content || "");
+                            break;
+                        }
+                        case "tool_call":
+                            addToolCall(data);
+                            // A tool call terminates the current assistant text turn.
+                            ctx.assistant = null;
+                            ctx.reasoning = null;
+                            break;
+                        case "tool_result":
+                            addToolResult(data);
+                            break;
+                        case "provider_meta": {
+                            const u = data.usage || {};
+                            const parts = [];
+                            if (u.input_tokens != null)
+                                parts.push("in=" + u.input_tokens);
+                            if (u.output_tokens != null)
+                                parts.push("out=" + u.output_tokens);
+                            if (data.duration_ms != null)
+                                parts.push(Math.round(data.duration_ms) + "ms");
+                            if (data.model) parts.push(data.model);
+                            setStatus("provider: " + parts.join(" \u00B7 "));
+                            break;
+                        }
+                        case "error":
+                            addMsg(
+                                "error",
+                                data.message || JSON.stringify(data),
+                            );
+                            setStatus("error", "err");
+                            break;
+                        case "session":
+                            if (data.action === "ended") {
+                                const d = data.data || {};
+                                setStatus(
+                                    `done \u00B7 state=${d.state} \u00B7 steps=${d.step_count ?? "?"}`,
+                                    d.state === "completed" ? "ok" : "err",
+                                );
+                            }
+                            break;
+                        // Other event types (context_window, provider_switch, user_message echo,
+                        // etc.) are intentionally not rendered in the chat — they appear in the
+                        // raw events side panel only.
+                    }
+                }
+
+                addSystem(
+                    "Ready. Start the server with:  aar serve --host 0.0.0.0 --port 8080",
+                );
+            })();
+        </script>
+    </body>
+</html>
