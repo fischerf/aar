@@ -526,6 +526,249 @@ class TestS1SchemaDrivenPathChecks:
         assert policy.check_tool(spec, {"path": "/tmp/x.txt"}) == PolicyDecision.ALLOW
 
 
+class TestS8SymlinkAwarePathChecks:
+    """S8: ``_check_path`` follows symlinks and re-checks the target.
+
+    Pre-S8, ``_normalize_path`` syntactically collapsed absolute paths
+    without following symlinks (relative paths went through ``Path.resolve``
+    and were therefore already protected). An attacker who could plant a
+    symlink inside ``allowed_paths`` — a cloned repo, a previously-approved
+    ``ln -s``, an MCP tool that creates links — could escape the sandbox by
+    giving an absolute path that lexically matched the allowlist but
+    resolved to e.g. ``/etc/shadow`` or ``~/.ssh/id_rsa``.
+
+    The S8 fix re-runs the policy against ``os.path.realpath(path)``
+    whenever a component in the chain is actually a symlink. Both forms
+    must allow for the call to proceed.
+
+    Symlink creation on Windows requires admin or Developer Mode; tests
+    that need it use the ``symlinks_supported`` fixture which skips when
+    the probe fails. The regression / helper tests run everywhere.
+    """
+
+    @pytest.fixture
+    def symlinks_supported(self, tmp_path):
+        probe = tmp_path / "__s8_probe"
+        probe.write_text("")
+        link = tmp_path / "__s8_probe_link"
+        try:
+            os.symlink(probe, link)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlink creation not supported on this system: {exc}")
+        finally:
+            if link.is_symlink():
+                link.unlink()
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+
+    def _read_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="read_file",
+            description="",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            side_effects=[SideEffect.READ],
+        )
+
+    def _write_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="write_file",
+            description="",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+            },
+            side_effects=[SideEffect.WRITE],
+        )
+
+    def _allowed_pattern(self, tmp_path) -> str:
+        # Match the policy's normalisation: forward slashes, lowercase drive.
+        s = str(tmp_path).replace("\\", "/")
+        if len(s) >= 2 and s[1] == ":":
+            s = s[0].lower() + s[1:]
+        return s + "/**"
+
+    def test_symlink_to_outside_allowed_paths_denied(self, tmp_path, symlinks_supported):
+        """Symlink inside the allowed sandbox pointing OUTSIDE it must be denied.
+
+        Without S8 this was the canonical bypass: the lexical path matched
+        ``allowed_paths``, but ``open()`` would follow the symlink off-sandbox.
+        """
+        outside = tmp_path.parent / "__s8_outside_target.txt"
+        outside.write_text("sensitive")
+        try:
+            link = tmp_path / "link.txt"
+            os.symlink(outside, link)
+
+            policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+            assert policy.check_tool(self._read_spec(), {"path": str(link)}) == PolicyDecision.DENY
+        finally:
+            try:
+                outside.unlink()
+            except OSError:
+                pass
+
+    def test_symlink_to_denied_paths_target_denied(self, tmp_path, symlinks_supported):
+        """Symlink lexically inside allowed but pointing at a ``denied_paths``
+        target is denied."""
+        target = tmp_path / "real_secret.env"
+        target.write_text("API_KEY=abc")
+        link = tmp_path / "innocent.txt"
+        os.symlink(target, link)
+
+        # Deny anything ending in ``.env`` — the lexical path is ``innocent.txt``
+        # so this only fires if S8 re-checks the realpath.
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=[self._allowed_pattern(tmp_path)],
+                denied_paths=["**/*.env"],
+            )
+        )
+        assert policy.check_tool(self._read_spec(), {"path": str(link)}) == PolicyDecision.DENY
+
+    def test_write_through_symlink_to_outside_denied(self, tmp_path, symlinks_supported):
+        """Writes through a symlink would clobber the target file; deny."""
+        outside = tmp_path.parent / "__s8_outside_write.txt"
+        outside.write_text("original")
+        try:
+            link = tmp_path / "writable.txt"
+            os.symlink(outside, link)
+
+            policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+            assert (
+                policy.check_tool(self._write_spec(), {"path": str(link), "content": "x"})
+                == PolicyDecision.DENY
+            )
+        finally:
+            try:
+                outside.unlink()
+            except OSError:
+                pass
+
+    def test_parent_directory_symlink_denied(self, tmp_path, symlinks_supported):
+        """A symlink at an *interior* component (not the leaf) is still caught."""
+        outside_dir = tmp_path.parent / "__s8_outside_dir"
+        outside_dir.mkdir(exist_ok=True)
+        (outside_dir / "file.txt").write_text("hi")
+        try:
+            link_dir = tmp_path / "sub"
+            os.symlink(outside_dir, link_dir, target_is_directory=True)
+
+            policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+            # /tmp_path/sub/file.txt — lexically inside allowed, but ``sub``
+            # is a symlink to outside.
+            target_path = str(link_dir / "file.txt")
+            assert (
+                policy.check_tool(self._read_spec(), {"path": target_path}) == PolicyDecision.DENY
+            )
+        finally:
+            for p in (outside_dir / "file.txt", outside_dir):
+                try:
+                    if p.is_dir():
+                        p.rmdir()
+                    else:
+                        p.unlink()
+                except OSError:
+                    pass
+
+    def test_symlink_chain_resolved_to_final_target(self, tmp_path, symlinks_supported):
+        """`realpath` collapses chains; we must check the final target."""
+        outside = tmp_path.parent / "__s8_chain_final.txt"
+        outside.write_text("end")
+        try:
+            hop1 = tmp_path / "hop1"
+            hop2 = tmp_path / "hop2"
+            os.symlink(outside, hop2)
+            os.symlink(hop2, hop1)
+
+            policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+            assert policy.check_tool(self._read_spec(), {"path": str(hop1)}) == PolicyDecision.DENY
+        finally:
+            try:
+                outside.unlink()
+            except OSError:
+                pass
+
+    def test_non_symlink_inside_allowed_still_allowed(self, tmp_path):
+        """Regression: a plain absolute path inside allowed_paths must keep working."""
+        real = tmp_path / "plain.txt"
+        real.write_text("hello")
+
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+        assert policy.check_tool(self._read_spec(), {"path": str(real)}) == PolicyDecision.ALLOW
+
+    def test_nonexistent_path_inside_allowed_still_allowed(self, tmp_path):
+        """Regression: writing a brand-new file inside allowed_paths is unaffected.
+
+        With no path component existing, there's no symlink to follow — the
+        write proceeds normally. (If a future caller later replaces the
+        leaf with a symlink, the *next* read/write goes back through
+        ``check_tool`` and will be caught then.)
+        """
+        new_path = tmp_path / "newfile.txt"
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+        assert (
+            policy.check_tool(self._write_spec(), {"path": str(new_path), "content": "x"})
+            == PolicyDecision.ALLOW
+        )
+
+    def test_symlink_to_another_allowed_location_still_allowed(self, tmp_path, symlinks_supported):
+        """A symlink whose target *also* falls inside allowed_paths is fine.
+
+        Otherwise S8 would over-deny on benign in-sandbox symlinks (e.g.
+        a project that symlinks ``dist/latest -> dist/v1.2/``).
+        """
+        real = tmp_path / "real.txt"
+        real.write_text("x")
+        link = tmp_path / "alias.txt"
+        os.symlink(real, link)
+
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+        assert policy.check_tool(self._read_spec(), {"path": str(link)}) == PolicyDecision.ALLOW
+
+    def test_relative_symlink_path_already_protected(
+        self, tmp_path, monkeypatch, symlinks_supported
+    ):
+        """Relative-path inputs were already symlink-resolved by
+        ``Path.resolve()`` in ``_normalize_path``; S8 must not break that.
+        """
+        outside = tmp_path.parent / "__s8_rel_outside.txt"
+        outside.write_text("y")
+        try:
+            link = tmp_path / "rel_link.txt"
+            os.symlink(outside, link)
+            monkeypatch.chdir(tmp_path)
+
+            policy = SafetyPolicy(PolicyConfig(allowed_paths=[self._allowed_pattern(tmp_path)]))
+            assert (
+                policy.check_tool(self._read_spec(), {"path": "rel_link.txt"})
+                == PolicyDecision.DENY
+            )
+        finally:
+            try:
+                outside.unlink()
+            except OSError:
+                pass
+
+    def test_symlink_helper_returns_none_for_non_symlinks(self, tmp_path):
+        """Sanity check on the helper: non-symlink absolute paths return None
+        so we don't trigger spurious realpath rechecks."""
+        from agent.safety.policy import _resolve_symlink_target
+
+        real = tmp_path / "plain.txt"
+        real.write_text("")
+        assert _resolve_symlink_target(str(real)) is None
+        assert _resolve_symlink_target(str(tmp_path / "does_not_exist.txt")) is None
+        # Relative paths are skipped (already handled by Path.resolve).
+        assert _resolve_symlink_target("some/relative/path.txt") is None
+
+
 class TestBashAllowedPathsRestriction:
     """Bash is forced to ASK when allowed_paths is active and sandbox has no OS-level isolation."""
 
