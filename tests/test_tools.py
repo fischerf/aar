@@ -569,7 +569,12 @@ class TestSandboxWiring:
 
     @pytest.mark.asyncio
     async def test_no_sandbox_uses_direct_subprocess(self):
-        """With sandbox=None the bash tool executes directly (fallback path)."""
+        """With sandbox=None the bash tool executes directly (fallback path).
+
+        The timeout is intentionally generous: on Windows this path spawns
+        a fresh WSL session, whose cold-start can exceed 10s when the rest
+        of the suite is contending for CPU.
+        """
         from agent.tools.builtin.shell import register_shell_tools
 
         reg = ToolRegistry()
@@ -577,8 +582,8 @@ class TestSandboxWiring:
 
         spec = reg.get("bash")
         assert spec is not None
-        output = await spec.handler(command="echo direct_ok", timeout=10)
-        assert "direct_ok" in output
+        output = await spec.handler(command="echo direct_ok", timeout=60)
+        assert "direct_ok" in output, f"unexpected output: {output!r}"
 
 
 # ---------------------------------------------------------------------------
