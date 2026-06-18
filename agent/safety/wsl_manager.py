@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import subprocess
 import urllib.request
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -128,10 +132,18 @@ def download_rootfs(
     url: str,
     dest: Path,
     progress_cb: Callable[[int, int], None] | None = None,
+    expected_sha256: str | None = None,
 ) -> None:
     """Download *url* to *dest*, calling *progress_cb(downloaded_bytes, total_bytes)* if given.
 
     Raises ``urllib.error.URLError`` on network failure.
+
+    S6 — If *expected_sha256* is provided, the downloaded file's SHA-256 is
+    computed and compared (case-insensitive). On mismatch the partially
+    downloaded file is unlinked and ``ValueError`` is raised so the caller
+    aborts before importing a tampered rootfs. When *expected_sha256* is
+    None, a loud warning is emitted but the download is kept (legacy
+    configs without a checksum should still work).
     """
 
     def _reporthook(block_num: int, block_size: int, total_size: int) -> None:
@@ -140,6 +152,35 @@ def download_rootfs(
             progress_cb(downloaded, total_size)
 
     urllib.request.urlretrieve(url, str(dest), reporthook=_reporthook)  # noqa: S310
+
+    if not expected_sha256:
+        logger.warning(
+            "rootfs downloaded from %s without sha256 verification — supply "
+            "`rootfs_sha256` in your WSL profile for integrity protection.",
+            url,
+        )
+        return
+
+    actual = _sha256_of_file(dest)
+    if actual.lower() != expected_sha256.lower():
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise ValueError(
+            f"rootfs SHA-256 mismatch for {url}: expected {expected_sha256.lower()}, "
+            f"got {actual}. The downloaded file has been deleted; refusing to "
+            f"import a potentially tampered rootfs."
+        )
+
+
+def _sha256_of_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Compute the SHA-256 of *path* by streaming chunks (avoid loading large rootfs into RAM)."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------

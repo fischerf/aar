@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shlex
 import sys
 import tempfile
+import threading
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
+
+# S4 — POSIX-style environment variable name. Used by ``WslDistroSandbox`` to
+# reject keys that would otherwise break out of the ``KEY=value`` shell
+# prefix and inject arbitrary shell.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _collapse_posix(p) -> str:
@@ -446,7 +453,7 @@ class WindowsSubprocessSandbox(Sandbox):
        ``icacls``).
     """
 
-    _helper_path: str | None = None  # shared across instances, written once
+    _helper_path: str | None = None  # legacy/back-compat sentinel — unused after S5
 
     def __init__(
         self,
@@ -473,21 +480,31 @@ class WindowsSubprocessSandbox(Sandbox):
         ]
         self.use_low_integrity = use_low_integrity
         self._workspace_stamped = False
+        # S5 — Helper path is per-instance, not class-level. Previously
+        # ``_helper_path`` was a class attribute and ``close()`` unlinked the
+        # file for every concurrent sandbox; the lazy-recreate self-heal still
+        # races with active subprocesses launched between unlink and recreate.
+        # An instance attribute + an instance lock makes lifetime ownership
+        # obvious and free of cross-instance interference.
+        self._helper_path_instance: str | None = None
+        self._helper_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Helper script management
     # ------------------------------------------------------------------
 
-    @classmethod
-    def _get_helper_path(cls) -> str:
-        """Return path to the integrity-lowering helper script (written once)."""
-        if cls._helper_path is None or not os.path.exists(cls._helper_path):
-            fd, path = tempfile.mkstemp(suffix=".py", prefix="aar_sandbox_")
-            with os.fdopen(fd, "w") as f:
-                f.write(_WINDOWS_INTEGRITY_HELPER)
-            cls._helper_path = path
-            logger.debug("WindowsSubprocessSandbox: helper written to %s", path)
-        return cls._helper_path
+    def _get_helper_path(self) -> str:
+        """Return path to the integrity-lowering helper script (written once per instance)."""
+        # S5 — Lock around the lazy write so two coroutines on the same instance
+        # don't race to create two tempfiles and leak one.
+        with self._helper_lock:
+            if self._helper_path_instance is None or not os.path.exists(self._helper_path_instance):
+                fd, path = tempfile.mkstemp(suffix=".py", prefix="aar_sandbox_")
+                with os.fdopen(fd, "w") as f:
+                    f.write(_WINDOWS_INTEGRITY_HELPER)
+                self._helper_path_instance = path
+                logger.debug("WindowsSubprocessSandbox: helper written to %s", path)
+            return self._helper_path_instance
 
     # ------------------------------------------------------------------
     # icacls workspace stamping (one-time setup)
@@ -729,12 +746,26 @@ class WindowsSubprocessSandbox(Sandbox):
 
     async def close(self) -> None:
         """Clean up the helper script if present."""
-        path = WindowsSubprocessSandbox._helper_path
-        if path and os.path.exists(path):
+        # S5 — Unlink only *this* instance's helper. Other live sandboxes keep
+        # using their own helpers; before S5 ``close()`` on one instance would
+        # unlink the shared class-level file and force every other instance to
+        # lazily re-create it on the next launch.
+        with self._helper_lock:
+            path = self._helper_path_instance
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            self._helper_path_instance = None
+
+    def __del__(self) -> None:
+        # Best-effort cleanup if the caller forgot to ``await close()``.
+        path = getattr(self, "_helper_path_instance", None)
+        if path:
             try:
                 os.unlink(path)
-                WindowsSubprocessSandbox._helper_path = None
-            except OSError:
+            except Exception:
                 pass
 
 
@@ -859,6 +890,22 @@ class WslDistroSandbox(Sandbox):
         # Build optional env-var prefix: "KEY=value KEY2=value2 "
         env_prefix = ""
         if env:
+            # S4 — Reject keys that aren't valid POSIX identifiers. ``shlex.quote``
+            # only quotes values; a hostile key like ``"FOO; rm -rf /"`` would
+            # otherwise be spliced into the shell command verbatim.
+            for k in env:
+                if not _ENV_KEY_RE.match(k):
+                    logger.warning(
+                        "WslDistroSandbox: refusing invalid environment variable name %r",
+                        k,
+                    )
+                    return SandboxResult(
+                        stderr=(
+                            f"Refused: invalid environment variable name {k!r}; "
+                            "must match [A-Za-z_][A-Za-z0-9_]*."
+                        ),
+                        exit_code=1,
+                    )
             env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " "
 
         # Build command: env prefix + raw command (no cd prefix when using --cd)

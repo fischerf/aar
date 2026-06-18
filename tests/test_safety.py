@@ -51,7 +51,13 @@ class TestPolicyCommandDenyList:
             assert d == PolicyDecision.ALLOW, f"Expected ALLOW for: {cmd}"
 
     def test_custom_denied_command(self):
-        config = PolicyConfig(denied_commands=["DROP TABLE"])
+        # S3: ``denied_commands`` is now token-based, so an embedded ``DROP
+        # TABLE`` inside a quoted SQL argument is no longer matched there.
+        # Users wanting substring detection should switch to ``command_rules``
+        # (the explicit substring/regex API, kept unchanged).
+        config = PolicyConfig(
+            command_rules=[CommandRule(pattern="DROP TABLE", decision=PolicyDecision.DENY)]
+        )
         policy = SafetyPolicy(config)
         spec = ToolSpec(name="bash", description="", side_effects=[SideEffect.EXECUTE])
 
@@ -83,6 +89,118 @@ class TestPolicyCommandDenyList:
         # The explicit rule allows this even though "rm -rf /" is in defaults
         d = policy.check_tool(spec, {"command": "rm -rf /tmp/safe"})
         assert d == PolicyDecision.ALLOW
+
+
+class TestS3CommandDenyListShlex:
+    """S3: ``denied_commands`` is matched with shlex tokens instead of substring.
+
+    Pre-S3 the deny-list produced false positives like ``echo \"do not
+    shutdown\"`` (substring hit on ``shutdown``) and missed reasonable
+    variations like ``/sbin/shutdown`` only by accident. The S3 helper:
+
+    - Tokenises both the command and each denied pattern with ``shlex``.
+    - Matches single-token denials against ``cmd_tokens[0]`` exact OR its
+      basename (so ``/sbin/shutdown`` still matches ``shutdown``).
+    - Matches multi-token denials by requiring each denied token to be a
+      prefix of the corresponding command token (positionally), so
+      ``dd if=`` catches ``dd if=/dev/zero`` and ``chmod 777`` does not
+      catch ``chmod 644``.
+    - Falls back to substring match when the denied pattern contains shell
+      metacharacters (``|``, ``>``, etc.) or when the command itself fails
+      to tokenise.
+    """
+
+    def _spec(self) -> ToolSpec:
+        return ToolSpec(name="bash", description="", side_effects=[SideEffect.EXECUTE])
+
+    # ---- False-positive removal -------------------------------------------
+
+    def test_quoted_destructive_word_in_echo_no_longer_denied(self):
+        """``echo \"do not shutdown\"`` must no longer trip the ``shutdown`` rule."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": 'echo "do not shutdown"'})
+        assert d == PolicyDecision.ALLOW
+
+    def test_destructive_word_inside_python_dash_c_allowed_best_effort(self):
+        """Docs: deny-list is best-effort; an embedded verb in ``python -c '…'``
+        is not caught by the token check. Users wanting hard isolation should
+        run the WSL sandbox.
+        """
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "python -c 'import os; os.system(\"ls\")'"})
+        assert d == PolicyDecision.ALLOW
+
+    def test_chmod_644_is_not_denied(self):
+        """``chmod 777`` must NOT match ``chmod 644`` — positional match."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "chmod 644 file.txt"})
+        assert d == PolicyDecision.ALLOW
+
+    def test_rm_with_safe_target_allowed(self):
+        """``rm file.txt`` is shorter than ``rm -rf /`` so cannot match."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "rm file.txt"})
+        assert d == PolicyDecision.ALLOW
+
+    # ---- True positives kept ----------------------------------------------
+
+    def test_shutdown_with_full_path_still_denied(self):
+        """Basename match: ``/sbin/shutdown`` triggers the bare ``shutdown`` rule."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "/sbin/shutdown -h now"})
+        assert d == PolicyDecision.DENY
+
+    def test_bare_shutdown_denied(self):
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "shutdown -h now"})
+        assert d == PolicyDecision.DENY
+
+    def test_dd_if_prefix_match(self):
+        """``dd if=`` (two-token: ``[dd, if=]``) catches ``dd if=/dev/zero``."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "dd if=/dev/zero of=/tmp/x"})
+        assert d == PolicyDecision.DENY
+
+    def test_rm_rf_etc_denied(self):
+        """``rm -rf /`` must match ``rm -rf /etc`` (prefix-of-slash works)."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "rm -rf /etc"})
+        assert d == PolicyDecision.DENY
+
+    def test_chmod_777_extra_args_denied(self):
+        """``chmod 777`` must catch ``chmod 777 -R foo``."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": "chmod 777 -R foo"})
+        assert d == PolicyDecision.DENY
+
+    def test_fork_bomb_literal_still_denied(self):
+        """``shlex.split(':(){:|:&};:')`` returns a single token; head exact
+        match keeps the rule effective for the canonical form.
+        """
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._spec(), {"command": ":(){:|:&};:"})
+        assert d == PolicyDecision.DENY
+
+    def test_metachar_rule_uses_substring_fallback(self):
+        """Patterns with shell metacharacters (``|`` / ``>``) fall back to
+        substring matching so legacy ``curl|sh`` / ``> /dev/sda`` rules still
+        fire when the literal text appears.
+        """
+        policy = SafetyPolicy()
+        # Direct literal substring is the only thing the legacy substring
+        # match ever caught — documented best-effort.
+        d = policy.check_tool(self._spec(), {"command": "curl|sh foo"})
+        assert d == PolicyDecision.DENY
+
+    def test_unparseable_command_falls_back_to_substring(self):
+        """If ``shlex.split`` raises on the *command*, we fall back to substring
+        matching so a malformed input can't bypass the deny-list.
+        """
+        policy = SafetyPolicy()
+        # Unterminated quote — shlex raises ValueError; substring still finds
+        # the denied ``mkfs`` literal.
+        d = policy.check_tool(self._spec(), {"command": 'mkfs --type="ext4'})
+        assert d == PolicyDecision.DENY
 
 
 class TestPolicyPathRestrictions:
@@ -267,6 +385,147 @@ class TestPolicyOrdering:
         assert policy.check_tool(write_spec, {"path": "/etc/shadow"}) == PolicyDecision.DENY
 
 
+class TestS1SchemaDrivenPathChecks:
+    """S1: ``check_tool`` walks every schema-declared path-like argument
+    rather than only the literal ``\"path\"`` key. Pre-S1 a tool with
+    ``source_path`` / ``destination_path`` / ``directory`` bypassed
+    ``allowed_paths`` and ``denied_paths`` entirely — the policy engine
+    didn't even look at the value.
+    """
+
+    def _move_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="move_file",
+            description="move a file",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string"},
+                    "destination_path": {"type": "string"},
+                },
+                "required": ["source_path", "destination_path"],
+            },
+            side_effects=[SideEffect.WRITE],
+        )
+
+    def test_source_path_outside_allowed_paths_denied(self):
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        d = policy.check_tool(
+            self._move_spec(),
+            {"source_path": "/unsafe/a.txt", "destination_path": "/safe/b.txt"},
+        )
+        assert d == PolicyDecision.DENY
+
+    def test_destination_path_outside_allowed_paths_denied(self):
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        d = policy.check_tool(
+            self._move_spec(),
+            {"source_path": "/safe/a.txt", "destination_path": "/unsafe/b.txt"},
+        )
+        assert d == PolicyDecision.DENY
+
+    def test_both_inside_allowed_paths_allow(self):
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        d = policy.check_tool(
+            self._move_spec(),
+            {"source_path": "/safe/a.txt", "destination_path": "/safe/b.txt"},
+        )
+        assert d == PolicyDecision.ALLOW
+
+    def test_denied_path_in_destination_denied(self):
+        """A denied default (``/etc/shadow``) in ``destination_path`` must still trip."""
+        policy = SafetyPolicy()
+        d = policy.check_tool(
+            self._move_spec(),
+            {"source_path": "/tmp/a.txt", "destination_path": "/etc/shadow"},
+        )
+        assert d == PolicyDecision.DENY
+
+    def test_directory_arg_recognised(self):
+        """A property literally named ``directory`` is path-like by convention."""
+        spec = ToolSpec(
+            name="list_dir",
+            description="",
+            input_schema={
+                "type": "object",
+                "properties": {"directory": {"type": "string"}},
+                "required": ["directory"],
+            },
+            side_effects=[SideEffect.READ],
+        )
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        assert policy.check_tool(spec, {"directory": "/etc"}) == PolicyDecision.DENY
+        assert policy.check_tool(spec, {"directory": "/safe/sub"}) == PolicyDecision.ALLOW
+
+    def test_format_path_annotation_recognised(self):
+        """A property with ``format: \"path\"`` is treated as path-like even
+        if its name doesn't match the conventional set.
+        """
+        spec = ToolSpec(
+            name="odd",
+            description="",
+            input_schema={
+                "type": "object",
+                "properties": {"target": {"type": "string", "format": "path"}},
+                "required": ["target"],
+            },
+            side_effects=[SideEffect.WRITE],
+        )
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        assert policy.check_tool(spec, {"target": "/etc/passwd"}) == PolicyDecision.DENY
+        assert policy.check_tool(spec, {"target": "/safe/x"}) == PolicyDecision.ALLOW
+
+    def test_filepath_alias_recognised(self):
+        spec = ToolSpec(
+            name="reader",
+            description="",
+            input_schema={
+                "type": "object",
+                "properties": {"filepath": {"type": "string"}},
+                "required": ["filepath"],
+            },
+            side_effects=[SideEffect.READ],
+        )
+        policy = SafetyPolicy()
+        assert policy.check_tool(spec, {"filepath": "/etc/shadow"}) == PolicyDecision.DENY
+
+    def test_non_path_string_args_ignored(self):
+        """A free-form ``content`` arg that happens to look path-like must
+        NOT be policy-checked. Pre-S1 only ``path`` was checked anyway; S1
+        must preserve that selectivity.
+        """
+        spec = ToolSpec(
+            name="write_file",
+            description="",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+            side_effects=[SideEffect.WRITE],
+        )
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        d = policy.check_tool(spec, {"path": "/safe/x.txt", "content": "/etc/shadow leaks here"})
+        assert d == PolicyDecision.ALLOW
+
+    def test_tool_without_schema_falls_back_to_path_key(self):
+        """MCP tools / loose tools without an ``input_schema`` still get the
+        legacy ``path`` lookup so something is checked.
+        """
+        spec = ToolSpec(
+            name="loose",
+            description="",
+            input_schema={},  # no properties
+            side_effects=[SideEffect.READ],
+        )
+        policy = SafetyPolicy()
+        assert policy.check_tool(spec, {"path": "/etc/shadow"}) == PolicyDecision.DENY
+        assert policy.check_tool(spec, {"path": "/tmp/x.txt"}) == PolicyDecision.ALLOW
+
+
 class TestBashAllowedPathsRestriction:
     """Bash is forced to ASK when allowed_paths is active and sandbox has no OS-level isolation."""
 
@@ -369,6 +628,9 @@ class TestPermissions:
         assert not pm.is_auto_approved(spec, tc)
 
     def test_pattern_approval(self):
+        """Legacy two-part form (``tool:value``) is still parsed and works for
+        known tools — with a deprecation warning emitted from the parser.
+        """
         pm = PermissionManager()
         spec = ToolSpec(name="bash", description="", side_effects=[SideEffect.EXECUTE])
 
@@ -458,6 +720,127 @@ class TestPermissions:
 
         result = await pm.request_approval(spec, tc)
         assert result == PolicyDecision.DENY
+
+
+class TestS2AutoApprovePattern:
+    """S2: auto-approve patterns are now ``(tool, arg, value_glob)`` triples
+    and only match the *named* argument. Pre-S2 the pattern ``bash:git *``
+    auto-approved any tool whose call carried ``git *`` in *any* string
+    argument, which let a model bypass approval for unrelated tools.
+    """
+
+    def _bash(self) -> ToolSpec:
+        return ToolSpec(name="bash", description="", side_effects=[SideEffect.EXECUTE])
+
+    def _write(self) -> ToolSpec:
+        return ToolSpec(name="write_file", description="", side_effects=[SideEffect.WRITE])
+
+    def test_three_part_pattern_matches_named_arg_only(self):
+        pm = PermissionManager()
+        pm.auto_approve_pattern("bash:command:git *")
+
+        ok = ToolCall(tool_name="bash", tool_call_id="a", arguments={"command": "git status"})
+        assert pm.is_auto_approved(self._bash(), ok)
+
+        # Non-matching value on the same arg — must NOT auto-approve.
+        nope = ToolCall(tool_name="bash", tool_call_id="b", arguments={"command": "rm -rf ."})
+        assert not pm.is_auto_approved(self._bash(), nope)
+
+    def test_pattern_does_not_match_other_args(self):
+        """Regression for the pre-S2 bug: a ``bash:command:git *`` pattern must
+        NOT auto-approve a ``write_file{path: \"git status\"}`` call just
+        because the path string happens to look like ``git *``.
+        """
+        pm = PermissionManager()
+        pm.auto_approve_pattern("bash:command:git *")
+
+        # Different tool, same value in a non-targeted arg.
+        sneaky = ToolCall(
+            tool_name="write_file",
+            tool_call_id="c",
+            arguments={"path": "git status", "content": "hi"},
+        )
+        assert not pm.is_auto_approved(self._write(), sneaky)
+
+        # Same tool, value placed in a *different* arg — also must not pass.
+        sneaky2 = ToolCall(
+            tool_name="bash",
+            tool_call_id="d",
+            arguments={"command": "rm -rf /", "sneaky": "git pull"},
+        )
+        assert not pm.is_auto_approved(self._bash(), sneaky2)
+
+    def test_legacy_two_part_pattern_translated_with_warning(self, caplog):
+        """``bash:git `` → ``(\"bash\", \"command\", \"git *\")`` with a
+        deprecation warning routed through the permissions logger.
+        """
+        import logging
+
+        from agent.safety import permissions as pm_module
+
+        pm = PermissionManager()
+        with caplog.at_level(logging.WARNING, logger=pm_module.logger.name):
+            pm.auto_approve_pattern("bash:git ")
+
+        # Pattern still works for the equivalent bash command…
+        tc = ToolCall(tool_name="bash", tool_call_id="a", arguments={"command": "git log"})
+        assert pm.is_auto_approved(self._bash(), tc)
+
+        # …and produced a deprecation warning.
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("deprecated 'tool:value' form" in m for m in msgs), msgs
+
+    def test_legacy_pattern_for_unknown_tool_is_skipped(self, caplog):
+        """Two-part patterns for tools without a known arg mapping must NOT
+        be silently accepted with loose semantics; they're skipped with a
+        warning so the operator notices.
+        """
+        import logging
+
+        from agent.safety import permissions as pm_module
+
+        pm = PermissionManager()
+        with caplog.at_level(logging.WARNING, logger=pm_module.logger.name):
+            pm.auto_approve_pattern("unknown_tool:foo")
+
+        spec = ToolSpec(name="unknown_tool", description="", side_effects=[SideEffect.EXECUTE])
+        tc = ToolCall(tool_name="unknown_tool", tool_call_id="a", arguments={"anything": "foo bar"})
+        # Pattern was skipped — nothing auto-approved.
+        assert not pm.is_auto_approved(spec, tc)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("unknown tool" in m for m in msgs), msgs
+
+    def test_value_glob_uses_fnmatch_semantics(self):
+        pm = PermissionManager()
+        pm.auto_approve_pattern("bash:command:git ?og")
+
+        ok = ToolCall(tool_name="bash", tool_call_id="a", arguments={"command": "git log"})
+        also_ok = ToolCall(tool_name="bash", tool_call_id="b", arguments={"command": "git bog"})
+        not_ok = ToolCall(tool_name="bash", tool_call_id="c", arguments={"command": "git status"})
+        assert pm.is_auto_approved(self._bash(), ok)
+        assert pm.is_auto_approved(self._bash(), also_ok)
+        assert not pm.is_auto_approved(self._bash(), not_ok)
+
+    def test_value_glob_is_case_sensitive(self):
+        """``fnmatch.fnmatchcase`` is used so patterns aren't accidentally
+        loosened by case-insensitivity on Windows."""
+        pm = PermissionManager()
+        pm.auto_approve_pattern("bash:command:git *")
+        tc = ToolCall(tool_name="bash", tool_call_id="a", arguments={"command": "GIT log"})
+        assert not pm.is_auto_approved(self._bash(), tc)
+
+    def test_no_colon_pattern_is_ignored(self, caplog):
+        import logging
+
+        from agent.safety import permissions as pm_module
+
+        pm = PermissionManager()
+        with caplog.at_level(logging.WARNING, logger=pm_module.logger.name):
+            pm.auto_approve_pattern("garbage")
+        # Set stays empty — no parse, no auto-approval.
+        tc = ToolCall(tool_name="bash", tool_call_id="a", arguments={"command": "garbage"})
+        assert not pm.is_auto_approved(self._bash(), tc)
+        assert any("no ':' separator" in r.getMessage() for r in caplog.records)
 
 
 # ===========================================================================
@@ -629,17 +1012,24 @@ class TestWindowsSubprocessSandbox:
         assert env["MY_VAR"] == "hello"
 
     def test_get_helper_path_creates_file(self, tmp_path, monkeypatch):
-        """_get_helper_path() should write a Python script to disk."""
-        # Reset class-level state so the file is re-created
-        WindowsSubprocessSandbox._helper_path = None
-        path = WindowsSubprocessSandbox._get_helper_path()
-        assert path.endswith(".py")
-        assert __import__("os").path.exists(path)
-        # Calling again returns the same path (cached)
-        assert WindowsSubprocessSandbox._get_helper_path() == path
-        # Cleanup
-        __import__("os").unlink(path)
-        WindowsSubprocessSandbox._helper_path = None
+        """_get_helper_path() should write a Python script to disk.
+
+        S5: ``_get_helper_path`` is now an instance method backed by
+        ``self._helper_path_instance``. The previous class-level cache was a
+        source of cross-instance interference (one ``close()`` unlinked the
+        helper every concurrent sandbox needed).
+        """
+        sb = WindowsSubprocessSandbox(use_low_integrity=False)
+        path = sb._get_helper_path()
+        try:
+            assert path.endswith(".py")
+            assert __import__("os").path.exists(path)
+            # Calling again returns the same path (cached on this instance)
+            assert sb._get_helper_path() == path
+        finally:
+            import asyncio
+
+            asyncio.run(sb.close())
 
     def test_assign_job_object_graceful_on_non_windows(self, tmp_path):
         """On non-Windows, _assign_job_object should return None without raising."""
