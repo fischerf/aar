@@ -275,27 +275,46 @@ async def run_loop(
 
             if response.tool_calls:
                 # --- Extension: tool_call filtering ---
+                # #2 — Don't mutate ``response.tool_calls`` and don't emit the
+                # blocked ToolCall/ToolResult events before the AssistantMessage.
+                # ``events_to_messages`` flushes any pending ``ToolResult``s as a
+                # ``user(tool_result)`` block when it next sees an
+                # ``AssistantMessage``; if we emitted blocked results first, the
+                # provider would see ``user(tool_result) → assistant(tool_use)``
+                # with the tool_result orphaned from its tool_use, which
+                # Anthropic and OpenAI reject with a 400 on the next call.
+                #
+                # The correct order is:
+                #   ToolCall* (all originals, blocked + unblocked)
+                #   → AssistantMessage (pairs the tool_use blocks)
+                #   → ToolResult* (blocked synthesized first, then executed)
+                effective_tool_calls = response.tool_calls
+                blocked_results: list[ToolResult] = []
                 if extension_manager is not None:
-                    unblocked = []
+                    effective_tool_calls = []
                     for tc in response.tool_calls:
                         rv = await extension_manager.fire_event("tool_call", tc)
                         if isinstance(rv, BlockResult):
-                            emit(session, on_event, tc)
-                            emit(
-                                session,
-                                on_event,
+                            blocked_results.append(
                                 ToolResult(
                                     tool_call_id=tc.tool_call_id,
                                     tool_name=tc.tool_name,
                                     output=f"Blocked by extension: {rv.reason}",
                                     is_error=True,
-                                ),
+                                )
                             )
                         else:
-                            unblocked.append(tc)
-                    response.tool_calls = unblocked
-                    if not response.tool_calls:
-                        # All tool calls were blocked — emit assistant message and continue
+                            effective_tool_calls.append(tc)
+                    if not effective_tool_calls:
+                        # All tool calls were blocked. Still emit every original
+                        # tool_call + the AssistantMessage that pairs with them,
+                        # then the synthesized blocked results, so the next
+                        # provider request is well-formed.
+                        for tc in response.tool_calls:
+                            spec = tool_executor.registry.get(tc.tool_name)
+                            if spec:
+                                tc.data["side_effects"] = [e.value for e in spec.side_effects]
+                            emit(session, on_event, tc)
                         emit(
                             session,
                             on_event,
@@ -303,9 +322,11 @@ async def run_loop(
                                 content=response.content, stop_reason=StopReason.TOOL_USE
                             ),
                         )
+                        for tr in blocked_results:
+                            emit(session, on_event, tr)
                         continue
 
-                guardrails.observe_tool_calls(session, response.tool_calls)
+                guardrails.observe_tool_calls(session, effective_tool_calls)
                 if guardrails.is_stuck(session):
                     log.warning(
                         "Repetition guard triggered at step %d",
@@ -333,6 +354,9 @@ async def run_loop(
                 # session.to_messages() sees the correct order:
                 #   ToolCall… → AssistantMessage → ToolResult…
                 # and can bundle the tool_calls onto the assistant message.
+                # Iterate the original ``response.tool_calls`` so blocked
+                # tool_uses still appear on the assistant message (paired with
+                # the synthesized blocked ToolResult below).
                 for tc in response.tool_calls:
                     spec = tool_executor.registry.get(tc.tool_name)
                     if spec:
@@ -344,8 +368,14 @@ async def run_loop(
                     AssistantMessage(content=response.content, stop_reason=StopReason.TOOL_USE),
                 )
 
+                # Emit blocked tool_results synthesized by the extension before
+                # invoking the executor on the unblocked ones, keeping the
+                # original tool_use ↔ tool_result pairing order intact.
+                for tr in blocked_results:
+                    emit(session, on_event, tr)
+
                 session.state = AgentState.WAITING_FOR_TOOL
-                results = await tool_executor.execute(response.tool_calls)
+                results = await tool_executor.execute(effective_tool_calls)
 
                 # --- Extension: tool_result post-processing ---
                 if extension_manager is not None:
