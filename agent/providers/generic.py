@@ -63,6 +63,7 @@ import httpx
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
 from agent.providers.base import Provider, ProviderResponse, StreamDelta
+from agent.providers.errors import translate_provider_errors
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,7 @@ class GenericProvider(Provider):
         model = self.config.model.lower()
         return "vision" in model or "4o" in model
 
+    @translate_provider_errors
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -249,6 +251,7 @@ class GenericProvider(Provider):
 
         return resp
 
+    @translate_provider_errors
     async def stream(
         self,
         messages: list[dict[str, Any]],

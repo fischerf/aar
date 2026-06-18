@@ -10,6 +10,7 @@ import httpx
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+from agent.providers.errors import translate_provider_errors
 
 
 class OpenAIProvider(Provider):
@@ -72,6 +73,7 @@ class OpenAIProvider(Provider):
             or model.startswith("o3")
         )
 
+    @translate_provider_errors
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -165,6 +167,7 @@ class OpenAIProvider(Provider):
             meta=meta,
         )
 
+    @translate_provider_errors
     async def stream(
         self,
         messages: list[dict[str, Any]],

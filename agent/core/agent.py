@@ -47,6 +47,21 @@ def _create_provider(config: ProviderConfig) -> Provider:
     return cls(config)
 
 
+async def _safe_async_callback(cb: Callable[[Event], Any], event: Event) -> None:
+    """#7 — Run an async event callback and log any exception it raises.
+
+    Without this wrapper, ``asyncio.ensure_future(cb(event))`` produces a Task
+    whose exception is only surfaced when the task is awaited or its result
+    accessed. We never await event-callback tasks (fire-and-forget by design),
+    so exceptions previously vanished except for an asyncio "Task exception
+    was never retrieved" warning at GC time.
+    """
+    try:
+        await cb(event)
+    except Exception:
+        logger.exception("Async event callback %r failed on %s", cb, event.type)
+
+
 class Agent:
     """High-level agent that owns config, provider, tools, and sessions."""
 
@@ -67,6 +82,14 @@ class Agent:
             approval_callback,
         )
         self._on_event: list[Callable[[Event], Any]] = []
+        # #7 — Track pending async event callbacks. ``asyncio.ensure_future``
+        # on a coroutine returns a Task that the event loop does NOT keep a
+        # strong reference to (per Python 3.11+ asyncio docs), so without a
+        # local strong ref the task can be GC'd mid-execution and silently
+        # dropped. The plan called for a ``WeakSet`` here, but that has the
+        # same problem — we keep a regular ``set`` and ``add_done_callback``
+        # the discard so completed tasks self-clean.
+        self._on_event_tasks: set[asyncio.Task[Any]] = set()
         self._extension_manager: ExtensionManager | None = None
 
         # Register built-in tools based on config
@@ -100,8 +123,7 @@ class Agent:
         # Only prune builtins we just added that weren't explicitly enabled
         newly_added = set(self.registry.names()) - pre_existing
         for name in newly_added - enabled:
-            if name in self.registry._tools:
-                del self.registry._tools[name]
+            self.registry.unregister(name)
 
     def _rebuild_system_prompt(self) -> None:
         """Rebuild the system prompt with current tool snippets, guidelines, and skills."""
@@ -281,7 +303,13 @@ class Agent:
             for cb in self._on_event:
                 try:
                     if inspect.iscoroutinefunction(cb):
-                        asyncio.ensure_future(cb(event))
+                        # #7 — Wrap the coroutine so exceptions are logged
+                        # instead of vanishing into the Task's done-state.
+                        # Strong-ref the Task so the GC doesn't reap it
+                        # mid-flight; the done-callback removes it on completion.
+                        task = asyncio.ensure_future(_safe_async_callback(cb, event))
+                        self._on_event_tasks.add(task)
+                        task.add_done_callback(self._on_event_tasks.discard)
                     else:
                         cb(event)
                 except Exception:

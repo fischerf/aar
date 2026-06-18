@@ -45,6 +45,7 @@ _USER_MCP_CONFIG = _USER_DIR / "mcp_servers.json"
 _PROVIDER_ENV_KEY: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
     "ollama": "",  # Ollama needs no key
     "generic": "",
 }
@@ -79,8 +80,7 @@ def _harvest_tool_prompt_metadata(
     # Prune tools not explicitly enabled
     for name in list(reg.names()):
         if name not in enabled:
-            if name in reg._tools:
-                del reg._tools[name]
+            reg.unregister(name)
 
     return reg.get_prompt_snippets(), reg.get_prompt_guidelines()
 
@@ -128,8 +128,12 @@ def _build_config(
     if max_steps is not None:
         cfg.max_steps = max_steps
 
-    # api_key: CLI flag > env var matching the provider > loaded config
-    env_var = _PROVIDER_ENV_KEY.get(cfg.provider.name, "ANTHROPIC_API_KEY")
+    # api_key: CLI flag > env var matching the provider > loaded config.
+    # #6 — Unknown providers fall back to ``""`` (no env var) so we don't
+    # silently leak ``ANTHROPIC_API_KEY`` into e.g. a custom OpenAI-compatible
+    # endpoint. Previously the default was ``"ANTHROPIC_API_KEY"``, which also
+    # broke Gemini (no entry in the dict at all).
+    env_var = _PROVIDER_ENV_KEY.get(cfg.provider.name, "")
     cfg.provider.api_key = (
         api_key or (os.environ.get(env_var, "") if env_var else "") or cfg.provider.api_key
     )
@@ -1072,6 +1076,16 @@ def acp(
             agent_description=agent_description,
         )
         console.print(f"[bold green]ACP HTTP server on {host}:{port}[/]", err=True)
+        # #3b — Make the feature gap obvious to operators on the command
+        # line, in addition to the structured logger.warning emitted by
+        # AcpTransport.__init__.
+        console.print(
+            "[yellow]Note: --http transport is feature-incomplete vs stdio "
+            "(no MCP, slash commands, extensions, ACP permissions, "
+            "session_update replay, set_session_model, fork/resume/list). "
+            "For full editor integration, use stdio instead.[/]",
+            err=True,
+        )
         uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
     else:
         from agent.transports.acp import run_acp_stdio
@@ -1091,8 +1105,17 @@ def install(
     ),
 ) -> None:
     """Install an Aar extension from PyPI or a local path."""
+    # #9 — Snapshot the *current* aar_extensions entry points so we can tell
+    # whether the install actually contributed any. The previous check did
+    # ``for ep in entry_points(group=...): found = True; break`` which fired
+    # if *anything* in the env declared an entry point — always true after
+    # any earlier install. Snapshot-diff plus a direct ``distribution()``
+    # lookup-by-name covers both the fresh-install and upgrade cases.
+    import importlib.metadata as _ilm
     import subprocess
     import sys
+
+    before: set[tuple[str, str | None]] = _snapshot_aar_entry_points()
 
     console.print(f"[dim]Installing {package}...[/]")
     result = subprocess.run(
@@ -1105,26 +1128,112 @@ def install(
         raise typer.Exit(1)
     console.print(result.stdout.strip())
 
-    # Validate it declares aar_extensions entry points
-    import importlib.metadata
+    # Reload package metadata so the just-installed dist is visible.
+    _ilm.MetadataPathFinder.invalidate_caches()
 
-    try:
-        eps = importlib.metadata.entry_points(group="aar_extensions")
-        # Check if any entry point comes from a dist matching pkg_name
-        found = False
-        for ep in eps:
-            # ep.dist is available in newer Python
-            found = True
-            break
-        if found:
-            console.print("[green]✓[/] Extension installed with aar_extensions entry point(s)")
-        else:
+    after: set[tuple[str, str | None]] = _snapshot_aar_entry_points()
+    new_eps = after - before
+
+    if new_eps:
+        names = sorted({ep_name for ep_name, _dist in new_eps})
+        console.print(
+            f"[green]✓[/] Extension installed; new aar_extensions entry points: {', '.join(names)}"
+        )
+        return
+
+    # Fresh install added nothing new — maybe this was an upgrade. Look the
+    # package up by canonical name and report whichever entry points it
+    # contributes (could be zero, in which case warn loudly).
+    pkg_name = _canonical_pkg_name(package)
+    if pkg_name:
+        try:
+            dist = _ilm.distribution(pkg_name)
+        except _ilm.PackageNotFoundError:
+            dist = None
+        if dist is not None:
+            pkg_eps = [ep for ep in dist.entry_points if ep.group == "aar_extensions"]
+            if pkg_eps:
+                names = sorted({ep.name for ep in pkg_eps})
+                console.print(
+                    f"[green]✓[/] {pkg_name} re-installed; aar_extensions entry points: "
+                    f"{', '.join(names)}"
+                )
+                return
             console.print(
-                "[yellow]Warning:[/] Package installed but no 'aar_extensions' entry points found. "
-                "It may not be an Aar extension, or you may need to add entry points to its pyproject.toml."
+                f"[yellow]Warning:[/] {pkg_name} installed but contributes no "
+                f"'aar_extensions' entry points. It may not be an Aar extension, or its "
+                f"pyproject.toml may be missing the entry-point declaration."
             )
+            return
+
+    console.print(
+        "[yellow]Warning:[/] Package installed but no new 'aar_extensions' entry points "
+        "were detected. It may not be an Aar extension, or you may need to add entry "
+        "points to its pyproject.toml."
+    )
+
+
+def _snapshot_aar_entry_points() -> set[tuple[str, str | None]]:
+    """#9 — Return ``{(ep.name, dist_name)}`` for every ``aar_extensions``
+    entry point currently visible to ``importlib.metadata``.
+
+    Pairing entry-point name with the contributing distribution lets the
+    snapshot diff distinguish (a) a brand-new install (new ``(name, dist)``
+    appears), (b) an upgrade of an existing extension (no diff but the dist
+    is still there — handled by the fallback lookup), and (c) a no-op
+    install (snapshot unchanged AND the package's own dist contributes
+    nothing in the group).
+    """
+    import importlib.metadata as _ilm
+
+    out: set[tuple[str, str | None]] = set()
+    try:
+        eps = _ilm.entry_points(group="aar_extensions")
     except Exception:
-        console.print("[yellow]Warning:[/] Could not verify entry points.")
+        return out
+    for ep in eps:
+        dist_name: str | None = None
+        # ``ep.dist`` is available in Python 3.10+; aar requires 3.12+ so this
+        # should always work, but we stay defensive.
+        try:
+            dist = getattr(ep, "dist", None)
+            if dist is not None:
+                dist_name = dist.metadata.get("Name") or dist.metadata.get("name")
+        except Exception:
+            pass
+        out.add((ep.name, dist_name))
+    return out
+
+
+def _canonical_pkg_name(package: str) -> str:
+    """#9 — Derive a PyPI distribution name from a ``pip install`` argument.
+
+    Strips version specifiers and ``[extras]``. Returns ``""`` for local
+    paths / VCS URLs / wheels where the dist name can't be recovered
+    syntactically (the snapshot diff is authoritative in those cases anyway).
+    """
+    import re as _re
+
+    arg = package.strip()
+    if not arg:
+        return ""
+    # Paths and URLs — dist name comes from the package's metadata, not the arg.
+    if any(
+        arg.startswith(p)
+        for p in ("./", "../", "/", "file:", "http:", "https:", "git+", "hg+", "svn+", "bzr+")
+    ):
+        return ""
+    if (
+        os.sep in arg
+        or (os.altsep and os.altsep in arg)
+        or arg.endswith(".whl")
+        or arg.endswith(".tar.gz")
+        or arg.endswith(".zip")
+    ):
+        return ""
+    # Drop extras (``pkg[foo,bar]``) and version specifiers (``pkg==1.0``).
+    name = _re.split(r"[\[<>=!~;\s]", arg, maxsplit=1)[0].strip()
+    return name
 
 
 extensions_app = typer.Typer(name="extensions", help="Manage Aar extensions", no_args_is_help=True)

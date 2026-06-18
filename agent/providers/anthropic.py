@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+from agent.providers.errors import translate_provider_errors
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,15 @@ def _apply_prompt_caching(
     Enable via ``config.json``::
 
         "extra": { "prompt_caching": true }
+
+    #8 — Never mutates caller-owned lists/dicts. ``tools`` is the same list
+    object the caller passed to ``complete()`` / ``stream()`` (re-shared
+    across turns via the registry); the previous in-place ``tools[-1] = ...``
+    leaked a ``cache_control`` marker onto the registry's schema, which then
+    showed up in subsequent providers (e.g. after ``/model openai``) where
+    the field is invalid. Same story for the system block list. We now build
+    fresh top-level lists; the inner dicts are still shallow-copied via
+    spread before the marker is attached.
     """
     if not enabled:
         return
@@ -45,13 +55,19 @@ def _apply_prompt_caching(
     if isinstance(system, str) and system:
         kwargs["system"] = [{"type": "text", "text": system, "cache_control": cache_marker}]
     elif isinstance(system, list) and system:
-        # Already a list of blocks — mark the last one
-        system[-1] = {**system[-1], "cache_control": cache_marker}
+        # Already a list of blocks — build a fresh list with the last block
+        # carrying the marker. Don't mutate the caller's list.
+        new_system = list(system)
+        new_system[-1] = {**new_system[-1], "cache_control": cache_marker}
+        kwargs["system"] = new_system
 
-    # Tools: mark the last tool so the entire tools array is cached
+    # Tools: mark the last tool so the entire tools array is cached.
+    # Build a fresh list — the caller's list is shared with the registry.
     tools = kwargs.get("tools")
     if tools:
-        tools[-1] = {**tools[-1], "cache_control": cache_marker}
+        new_tools = list(tools)
+        new_tools[-1] = {**new_tools[-1], "cache_control": cache_marker}
+        kwargs["tools"] = new_tools
 
 
 class AnthropicProvider(Provider):
@@ -85,6 +101,7 @@ class AnthropicProvider(Provider):
         # All modern Claude models (claude-3+) support image input.
         return True
 
+    @translate_provider_errors
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -159,6 +176,7 @@ class AnthropicProvider(Provider):
             meta=meta,
         )
 
+    @translate_provider_errors
     async def stream(
         self,
         messages: list[dict[str, Any]],

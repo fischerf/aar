@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any, AsyncIterator
 
 import httpx
@@ -11,6 +12,7 @@ import httpx
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+from agent.providers.errors import translate_provider_errors
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ class OllamaProvider(Provider):
         # False unconditionally; the config flag is kept for forward compat.
         return False
 
+    @translate_provider_errors
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -108,15 +111,18 @@ class OllamaProvider(Provider):
         message = data.get("message", {})
         content = message.get("content", "")
 
-        # Parse tool calls from Ollama response
+        # Parse tool calls from Ollama response.
+        # #5 — Per-call UUID prefix so tool_call_ids stay unique across turns;
+        # raw ``i`` index would repeat every call.
         tool_calls: list[ToolCall] = []
         raw_tool_calls = message.get("tool_calls", [])
+        call_uid = uuid.uuid4().hex[:8]
         for i, tc in enumerate(raw_tool_calls):
             fn = tc.get("function", {})
             tool_calls.append(
                 ToolCall(
                     tool_name=fn.get("name", ""),
-                    tool_call_id=f"ollama_tc_{i}",
+                    tool_call_id=f"ollama_tc_{call_uid}_{i}",
                     arguments=fn.get("arguments", {}),
                 )
             )
@@ -160,6 +166,7 @@ class OllamaProvider(Provider):
             meta=meta,
         )
 
+    @translate_provider_errors
     async def stream(
         self,
         messages: list[dict[str, Any]],
@@ -211,6 +218,8 @@ class OllamaProvider(Provider):
         tool_acc: list[dict[str, Any]] = []
         emitted_done = False
         last_data: dict[str, Any] = {}
+        # #5 — Per-call UUID prefix prevents tool_call_id collisions across turns.
+        call_uid = uuid.uuid4().hex[:8]
 
         from agent.providers._thinking import StreamThinkingRouter
 
@@ -225,7 +234,7 @@ class OllamaProvider(Provider):
                 out.append(
                     StreamDelta(
                         tool_call_delta={
-                            "tool_call_id": f"ollama_tc_{i}",
+                            "tool_call_id": f"ollama_tc_{call_uid}_{i}",
                             "tool_name": fn.get("name", ""),
                             "arguments": fn.get("arguments", {}),
                         }

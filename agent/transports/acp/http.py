@@ -5,6 +5,38 @@ stdio is not available (remote orchestrators, test harnesses, browsers).
 
 For Zed and other editors that launch the agent as a child process, use
 ``run_acp_stdio()`` from ``agent.transports.acp.stdio`` instead.
+
+.. warning::
+
+   **The HTTP transport implements only the run-execution subset of
+   the ACP protocol.** It is feature-incomplete compared to the stdio
+   transport (``agent.transports.acp.stdio``) and is intended for
+   simple programmatic / curl-based use only.
+
+   Missing — relative to stdio — at the time of writing (Wave 4 audit,
+   2026-06):
+
+   * **MCP bridge** — editor-provided MCP servers are not wired in,
+     so tools exposed via ``initialize.mcp_servers`` are unavailable.
+   * **Slash commands** — ``/model``, ``/help``, ``/clear`` etc. are
+     not parsed; user input is forwarded verbatim to the model.
+   * **Extensions** — the auto-discovered extension manager is not
+     activated; ``register(api)`` hooks, custom tools, and prompt
+     contributions registered by extensions do not apply.
+   * **ACP permission bridging** — approval requests fall back to
+     the auto-approve callback; there is no ``session/request_permission``
+     round-trip to the client.
+   * **``session_update`` replay** — assistant message chunks are
+     buffered and only delivered via the HTTP run object; ACP
+     ``session/update`` notifications used by IDEs are not emitted.
+   * **``set_session_model``** — clients cannot switch provider/model
+     mid-session over HTTP.
+   * **Session fork / resume / list** — only ``GET /sessions/{id}``
+     metadata is exposed; no ACP ``session/load`` semantics, fork, or
+     listing endpoints are implemented.
+
+   If you need any of the above, run the stdio transport behind your
+   own process supervisor instead.
 """
 
 from __future__ import annotations
@@ -228,6 +260,16 @@ class AcpTransport:
         self.agent_description = agent_description
         self.store = SessionStore(self.config.session_dir)
         self._runs: dict[str, _RunRecord] = {}
+        # #3b — Surface the feature gap vs the stdio transport on every
+        # construction so operators see it in their logs. See module
+        # docstring above for the full list.
+        logger.warning(
+            "ACP HTTP transport is feature-incomplete vs stdio: no MCP "
+            "bridge, slash commands, extensions, ACP permission requests, "
+            "session_update replay, set_session_model, or session "
+            "fork/resume/list. See agent.transports.acp.http module "
+            "docstring for the full list."
+        )
 
     def get_manifest(self) -> AgentManifest:
         return AgentManifest(
