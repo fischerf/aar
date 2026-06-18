@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 from abc import ABC, abstractmethod
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,7 @@ async def _create_subprocess(
     command: str,
     cwd: str,
     env: dict[str, str] | None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> asyncio.subprocess.Process:
     """Create a subprocess using bash on Windows or the system shell on Unix."""
     if os.name == "nt":
