@@ -208,7 +208,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             prompt_guidelines=[
                 "After grep returns file:line matches, use read_file with start_line/end_line "
                 "to read only the relevant section — do NOT read the entire file.",
-                "For files >500 lines, read_file returns a preview with the first 50 lines. "
+                "For files >500 lines, read_file returns a preview with the first 30 lines. "
                 "Use the line numbers from grep results or the preview to request specific ranges.",
             ],
             input_schema={

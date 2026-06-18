@@ -68,6 +68,9 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 | `aar serve` | Remote / web | HTTP/SSE web API — use from a browser, curl, or remote agents |
 | `aar acp` | IDE integration | [ACP](https://agentclientprotocol.com/) stdio agent for Zed and other ACP-compatible editors |
 | `aar acp --http` | Remote ACP | ACP over HTTP/SSE for programmatic or remote ACP clients |
+| `aar prompt` | Inspect prompt | Print the fully-assembled system prompt (base + skills + rules) and exit |
+| `aar sessions` | List sessions | Show saved session IDs from `session_dir` for use with `--session` |
+| `aar tools` | Inspect tools | List registered tools (built-ins + any MCP servers loaded via `--mcp-config`) |
 
 ## Installation
 
@@ -229,14 +232,16 @@ See [`docs/extensions.md`](docs/extensions.md) for the full developer guide on c
 
 ```
 agent/
-├── core/           # Loop, agent, events, session, config
-├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic)
+├── core/           # Loop, agent, events, session, config, guardrails, tokens, skills
+│   └── compaction/ # LLM-based context compaction (opt-in via CompactionConfig)
+├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic) + typed errors
 ├── tools/          # Tool registry, schema, execution engine, built-in tools — each tool carries prompt metadata
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # Extension API, loader, manager, MCP bridge, observability
 │   └── contrib/    # Built-in example extensions (companion)
 └── transports/     # CLI, TUI, web, event stream
+    ├── acp/        # Agent Client Protocol — stdio (full) + HTTP/SSE (subset)
     ├── themes/     # Theme models, built-in themes, registry
     ├── tui_utils/  # Shared formatting helpers for TUI transports
     └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)
@@ -301,7 +306,6 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
 | [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
-| [PyPI release](docs/pypi-release.md) | _Deferred._ Procedure for eventually publishing `aar-agent` to PyPI — account setup, token rotation, TestPyPI smoke-test, upload, launcher revert |
 
 ---
 

@@ -596,7 +596,10 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 | `profile` | `str \| None` | `None` | Path to a distro profile JSON (`~`-expanded). Profile values are base defaults; inline fields override. |
 | `distro` | `str` | `"aar-sandbox"` | WSL2 distro name |
 | `shell` | `str` | `"sh"` | Shell binary inside the distro (`sh` works on minimal Alpine) |
+| `wsl_user` | `str \| None` | `None` (distro default, often root) | Linux user to run commands as via `wsl --user`. Set to a non-root account (e.g. `"user"` — created by `aar sandbox setup` on the bundled Alpine profile) to reduce blast radius. |
+| `restrict_to_workspace` | `bool` | `True` | When `True`, pin the initial cwd inside the distro via `wsl --cd <translated workspace>`. Prevents `cd /; rm -rf .` style escape from commands the model generates. Disable only if you intentionally need commands to start outside the workspace. |
 | `workspace` | `str \| None` | `None` (→ cwd) | Windows path — auto-translated to `/mnt/…` |
+| `rootfs_sha256` | `str \| None` | `None` (warned) | Optional SHA-256 of the rootfs tarball. When set, `aar sandbox setup` verifies the download before importing and aborts on mismatch. The bundled distro profiles in `config/distros/*.json` ship a checksum; legacy configs without one log a warning and proceed. |
 | `install_path` | `str \| None` | `None` | Where to store distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
 | `rootfs_url` | `str` | Alpine latest-stable | Rootfs tarball URL used by `aar sandbox setup` |
 | `pre_install_commands` | `list[str]` | `[]` | Shell commands run inside the distro before package installation (e.g. enabling extra repos) |

@@ -1,7 +1,9 @@
 # Built-in Tools Reference
 
-Aar ships with seven built-in tools. All are opt-in via `tools.enabled_builtins`
-in `config.json`. Tools are grouped by their primary purpose.
+Aar ships with seven core built-in tools, plus `acp_terminal` which is
+registered only by the ACP transport (`agent.transports.acp.stdio`).
+All are opt-in via `tools.enabled_builtins` in `config.json`. Tools are
+grouped by their primary purpose.
 
 ## Filesystem tools
 
@@ -20,7 +22,7 @@ Read a file and return its contents with line numbers.
 **Side effects:** READ
 
 **Large file behaviour:** When no line range is specified and the file exceeds
-500 lines, `read_file` returns a summary with the total line count and a 50-line
+500 lines, `read_file` returns a summary with the total line count and a 30-line
 preview instead of dumping the entire file. This prevents accidental context
 flooding. Use `start_line` / `end_line` to read the specific section you need.
 

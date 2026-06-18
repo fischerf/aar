@@ -97,6 +97,7 @@ Ollama caveat).
 |-----------|-----------------------------------------------------|-----------------------------------------------------------------------------------------------|
 | Anthropic | `usage` block in the response body                  | Collected at the `message_stop` SSE event; attached to the final `StreamDelta(done=True)`    |
 | OpenAI    | `usage` block in the response body                  | Requested via `stream_options: {include_usage: true}`; trailing usage chunk on final delta   |
+| Gemini    | `usageMetadata` (HTTP) / `usage_metadata` (SDK) block in the response | Same fields on each streamed chunk; last non-empty value wins, attached to the final `StreamDelta(done=True)` |
 | Ollama    | `prompt_eval_count` / `eval_count` in response body | Same fields on the final `done: true` chunk; attached to the final `StreamDelta(done=True)`  |
 | Generic   | `usage` block in response body if present           | `usage` from SSE chunks if present; attached to the final `StreamDelta(done=True)`           |
 
@@ -113,6 +114,17 @@ fields to compute accurate costs when caching is active.
 **OpenAI** — Aar explicitly opts in to usage reporting on streamed responses by
 sending `stream_options: {include_usage: true}`. Without this, OpenAI omits usage
 from streaming responses entirely.
+
+**Gemini** — Both the SDK and HTTP paths report `prompt_token_count` /
+`candidates_token_count` / `total_token_count` (camelCase on the HTTP
+wire: `promptTokenCount` / `candidatesTokenCount` / `totalTokenCount`).
+Aar maps these to `input_tokens` / `output_tokens` / `total_tokens` in
+`ProviderMeta.usage`. On streaming responses each chunk may carry a
+fresh `usageMetadata` block; the adapter keeps the last non-empty
+value so the final `StreamDelta(done=True)` carries the
+end-of-response totals. Reasoning tokens (when present on
+thinking-enabled models) are not separately broken out at this time.
+
 
 **Ollama** — Reports `prompt_eval_count` (input) and `eval_count` (output). These
 fields are only present when the model runtime performs actual evaluation. If the

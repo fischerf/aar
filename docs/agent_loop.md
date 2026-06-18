@@ -28,6 +28,10 @@ User message
 │  │  context_window > 0 & strategy="compact"                  │  │
 │  │    → compact_to_token_budget(messages, context_window)    │  │
 │  │      keeps first msg + last N msgs; inserts marker        │  │
+│  │  context_window > 0 & strategy="summarize"                │  │
+│  │    → LLM-based compaction (CompactionConfig.enabled)      │  │
+│  │      summarises older messages into a checkpoint          │  │
+│  │  strategy="none" → no automatic context management        │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                           │                                     │
 │                           ▼                                     │
@@ -132,16 +136,108 @@ the same tool on different files is not counted as repetition.
 hitting hard limits. Hard budget enforcement (`token_budget`, `cost_limit`) is
 handled directly in the loop — the agent exits with `BUDGET_EXCEEDED` state.
 
+### 4. Premature end-turn recovery
+
+| Config key | Default | Effect |
+|---|---|---|
+| `max_premature_end_recoveries` | `2` | How many times the loop re-prompts after an empty `end_turn` while recent tool outputs show failures |
+
+**Behaviour:**
+
+```
+Model stops with stop_reason = "end_turn" AND response content is empty
+  └─ recent tool results contain error markers?
+       ("FAIL:", "Error", "Traceback", "AssertionError", "Exit code:", …)
+       YES → recovery_count < max_premature_end_recoveries?
+              YES → inject internal user message + loop again
+                    "You stopped without completing the task. The most
+                     recent tool outputs show errors or test failures
+                     that still need to be resolved. … try a different
+                     approach. Do NOT repeat the same fix — try
+                     something materially different."
+              NO  → treat as normal END_TURN, exit loop
+       NO  → normal END_TURN, exit loop
+```
+
+Detection is conservative: the model must produce an *empty* assistant
+message and the last ten events must contain at least one failing
+`ToolResult`. This catches the "silent give-up" failure mode without
+triggering on a legitimate "task complete" finish.
+
+### 5. Bash → `acp_terminal` pivot hint
+
+| Config key | Default | Effect |
+|---|---|---|
+| `bash_failure_threshold` | `2` | Consecutive `bash` failures (`command not found`, `ImportError`, `ModuleNotFoundError`, `No such file or directory`, `SyntaxError`) before a one-shot hint is injected |
+
+**Behaviour:**
+
+```
+Each tool result batch:
+  acp_terminal registered AND not already hinted?
+    bash call failed with one of the known patterns?
+      YES → consecutive_bash_failures += 1
+      NO  → reset (on any successful bash call)
+
+    consecutive_bash_failures ≥ bash_failure_threshold?
+      YES → inject one-shot internal user message:
+            "[System hint: The bash tool runs inside WSL which has a
+             different environment from the Windows host. The
+             acp_terminal tool is available and runs commands in the
+             native Windows host environment …]"
+            mark bash_pivot_hinted = True
+```
+
+Fires at most **once per session** so the model is not nagged. Only
+activates when the ACP transport has registered the `acp_terminal`
+tool — invisible in non-ACP runs.
+
+### 6. Read-only loop nudge
+
+| Config key | Default | Effect |
+|---|---|---|
+| `read_only_loop_threshold` | `8` | Consecutive read-only tool calls before nudging the model to act |
+
+**Behaviour:**
+
+```
+Each step with tool calls:
+  all tool_calls in {read_file, grep, find_files, list_directory,
+                     find_projects, read_issue, list_my_issues,
+                     whoami}?
+    YES → consecutive_read_only_steps += 1
+    NO  → reset to 0
+
+  consecutive_read_only_steps ≥ read_only_loop_threshold
+    AND not already nudged?
+      YES → inject one-shot internal user message:
+            "[System] You have spent many steps reading without
+             taking action. Summarize what you've learned so far,
+             formulate a concrete plan, and begin implementation. Do
+             not read more files unless absolutely necessary for the
+             next step."
+            mark read_only_nudge_given = True
+```
+
+Fires at most **once per session**. The threshold default of `8` is
+tuned for codebase exploration — most legitimate research turns are
+shorter; turns that exceed `8` usually indicate the model is stuck in
+a read-loop and needs to commit to a plan.
+
 ---
+
 
 ## Config section
 
 ```json
 "guardrails": {
-  "max_tokens_recoveries":   2,    // auto-retry truncated responses (0 = off)
-  "max_repeated_tool_steps": 3,    // consecutive identical tool calls before abort
-  "reserve_tokens":          512,  // near_budget() token headroom
-  "reserve_cost_fraction":   0.1   // near_budget() cost headroom (fraction of cost_limit)
+  "max_tokens_recoveries":        2,    // auto-retry truncated responses (0 = off)
+  "max_repeated_tool_steps":      3,    // consecutive identical tool calls before abort
+  "max_premature_end_recoveries": 2,    // re-prompt on empty end_turn with failing tool output
+  "reserve_tokens":               512,  // near_budget() token headroom
+  "reserve_cost_fraction":        0.1,  // near_budget() cost headroom (fraction of cost_limit)
+  "bash_failure_threshold":       2,    // consecutive bash failures before acp_terminal hint (ACP only)
+  "read_only_loop_threshold":     8     // consecutive read-only steps before read-loop nudge
 }
 ```
 

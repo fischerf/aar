@@ -85,7 +85,7 @@ from agent import AgentConfig, ProviderConfig
 
 config = AgentConfig(provider=ProviderConfig(
     name="anthropic",
-    model="claude-sonnet-4-20250514",
+    model="claude-sonnet-4-6",
     api_key="sk-ant-...",         # or ANTHROPIC_API_KEY env var
 ))
 ```
