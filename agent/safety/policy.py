@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import posixpath
 import re
 import shlex
@@ -318,6 +319,51 @@ def _collapse_windows_path(drive: str, p: Any) -> str:
     return drive + "/" + "/".join(segments) if segments else drive + "/"
 
 
+# S8 — Defend ``allowed_paths`` / ``denied_paths`` against symlink escapes.
+# ``_normalize_path`` follows symlinks for *relative* paths (via
+# ``Path.resolve()``) but intentionally leaves absolute paths in their
+# syntactic form to avoid Windows path-mangling. That asymmetry lets an
+# attacker who can place a symlink inside ``allowed_paths`` (cloned repo,
+# previously-approved ``ln -s``, an MCP tool) escape the sandbox: an
+# absolute path like ``C:\\proj\\link`` lexically matches ``c:/proj/**``
+# but ``open()`` follows the symlink to e.g. ``C:\\Users\\me\\.ssh\\id_rsa``.
+#
+# This helper returns the symlink target *only when* an actual symlink is
+# present in the chain, so OS-level normalisation (case, separators) on
+# Windows doesn't trigger spurious re-checks.
+def _resolve_symlink_target(path: str) -> str | None:
+    """Return ``os.path.realpath(path)`` iff a component of *path* is a symlink.
+
+    Returns ``None`` for relative paths (already symlink-resolved by
+    ``_normalize_path`` via ``Path.resolve()``), for paths with no symlink
+    component, and on any OS error during the walk (fail-open at this
+    layer — the lexical check has already run).
+    """
+    try:
+        if not os.path.isabs(path):
+            return None
+        p = Path(path)
+        # Walk from the anchor toward the leaf, checking each prefix. We
+        # don't short-circuit on the first non-existent component because
+        # the *anchor* always exists; symlinks can sit at any level.
+        prefix = Path(p.anchor) if p.anchor else Path(p.parts[0])
+        for part in p.parts[1:]:
+            prefix = prefix / part
+            try:
+                if prefix.is_symlink():
+                    return os.path.realpath(path)
+            except OSError:
+                # Permission denied on a component — keep walking; a deeper
+                # symlink may still be visible.
+                continue
+            if not prefix.exists():
+                # Remaining components don't exist on disk; no symlink to find.
+                return None
+        return None
+    except (OSError, ValueError):
+        return None
+
+
 class SafetyPolicy:
     """Evaluates tool calls against the configured policy."""
 
@@ -456,18 +502,51 @@ class SafetyPolicy:
             return path.replace("\\", "/")
 
     def _check_path(self, path: str, is_write: bool) -> PolicyDecision:
-        """Check a file path against path rules."""
-        norm_path = self._normalize_path(path)
+        """Check a file path against path rules.
 
+        S8 — Symlink-aware. The lexical form of *path* is checked first;
+        if it isn't already denied we also resolve any symlink in the chain
+        and re-check the target. Both checks must allow for the call to
+        proceed. Without this, an absolute path lexically inside
+        ``allowed_paths`` could silently follow a symlink to a file outside
+        the sandbox (e.g. ``/etc/shadow``, ``~/.ssh/id_rsa``).
+        """
+        lex_decision = self._check_path_rules(self._normalize_path(path), path, is_write)
+        if lex_decision == PolicyDecision.DENY:
+            return lex_decision
+
+        target = _resolve_symlink_target(path)
+        if target is not None and target != path:
+            target_decision = self._check_path_rules(self._normalize_path(target), target, is_write)
+            if target_decision != PolicyDecision.ALLOW:
+                logger.info(
+                    "Policy DENY (symlink escape): %s -> %s (target=%s)",
+                    path,
+                    target,
+                    target_decision.value,
+                )
+                return target_decision
+
+        return lex_decision
+
+    def _check_path_rules(
+        self, norm_path: str, original_path: str, is_write: bool
+    ) -> PolicyDecision:
+        """Apply path_rules / denied_paths / read_only_paths / allowed_paths.
+
+        Pure rule evaluation against the already-normalised *norm_path*.
+        *original_path* is used only for log messages. Split out from
+        ``_check_path`` so S8 can call it twice (lexical + symlink target).
+        """
         # Check explicit path rules first
         for rule in self.config.path_rules:
             norm_pattern = rule.pattern.replace("\\", "/")
             if fnmatch.fnmatch(norm_path, norm_pattern):
                 if is_write and not rule.allow_write:
-                    logger.info("Policy DENY (path rule, no write): %s", path)
+                    logger.info("Policy DENY (path rule, no write): %s", original_path)
                     return PolicyDecision.DENY
                 if not is_write and not rule.allow_read:
-                    logger.info("Policy DENY (path rule, no read): %s", path)
+                    logger.info("Policy DENY (path rule, no read): %s", original_path)
                     return PolicyDecision.DENY
                 return PolicyDecision.ALLOW
 
@@ -475,7 +554,7 @@ class SafetyPolicy:
         for pattern in self.config.denied_paths:
             norm_pattern = pattern.replace("\\", "/")
             if fnmatch.fnmatch(norm_path, norm_pattern):
-                logger.info("Policy DENY (denied path): %s matches %s", path, pattern)
+                logger.info("Policy DENY (denied path): %s matches %s", original_path, pattern)
                 return PolicyDecision.DENY
 
         # Read-only allowlist (e.g. discovered skills). Grants reads only —
@@ -503,7 +582,7 @@ class SafetyPolicy:
                     # case between Path.cwd() and Path.resolve().
                     if norm_path.lower() == base.lower():
                         return PolicyDecision.ALLOW
-            logger.info("Policy DENY (not in allowed paths): %s", path)
+            logger.info("Policy DENY (not in allowed paths): %s", original_path)
             return PolicyDecision.DENY
 
         return PolicyDecision.ALLOW
