@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
+import weakref
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,6 +23,21 @@ SCHEMA_VERSION = 1
 # an attacker-controlled id (e.g. via ACP load_session) cannot traverse out of
 # the session directory.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# Per-session-id locks so concurrent save/load on the SAME id serialize cleanly
+# while different sessions stay parallel. WeakValueDictionary keeps the table
+# from growing unboundedly across long-lived processes. (#5)
+_SESSION_LOCKS: "weakref.WeakValueDictionary[str, threading.Lock]" = weakref.WeakValueDictionary()
+_LOCKS_GUARD = threading.Lock()
+
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _SESSION_LOCKS[session_id] = lock
+        return lock
 
 
 def validate_session_id(session_id: str) -> str:
@@ -44,8 +62,15 @@ class SessionStore:
         return self.base_dir / f"{session_id}.jsonl"
 
     def save(self, session: Session) -> Path:
-        """Save a session to a JSONL file. Each line is one event."""
+        """Save a session to a JSONL file. Each line is one event.
+
+        Writes to a sibling ``.jsonl.tmp`` file and atomically ``os.replace``
+        it into place so a crash mid-write can never leave the canonical
+        session file truncated. Guarded by a per-session-id lock so concurrent
+        callers serialize on the same id. (#5)
+        """
         path = self._session_path(session.session_id)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
 
         header = {
             "_meta": True,
@@ -61,33 +86,75 @@ class SessionStore:
             "total_cost": session.total_cost,
         }
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(header) + "\n")
-            for event in session.events:
-                f.write(event.model_dump_json() + "\n")
+        with _get_session_lock(session.session_id):
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(header) + "\n")
+                for event in session.events:
+                    f.write(event.model_dump_json() + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except (OSError, AttributeError):
+                    # fsync may be unavailable on some filesystems / on Windows
+                    # for certain handle types. Atomic replace is the main
+                    # guarantee; fsync is best-effort durability.
+                    pass
+            os.replace(tmp_path, path)
 
         logger.info("Saved session %s to %s", session.session_id, path)
         return path
 
     def load(self, session_id: str) -> Session:
-        """Load a session from its JSONL file."""
+        """Load a session from its JSONL file.
+
+        Tolerates partial corruption: malformed lines (e.g. a half-written
+        final event after a crash) are skipped with a warning instead of
+        aborting the entire load. (#5)
+        """
         path = self._session_path(session_id)
         if not path.exists():
             raise FileNotFoundError(f"Session not found: {session_id}")
 
         events: list[Event] = []
         header: dict[str, Any] = {}
+        skipped = 0
 
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                if data.get("_meta"):
-                    header = data
-                else:
-                    events.append(deserialize_event(data))
+        with _get_session_lock(session_id):
+            with open(path, encoding="utf-8") as f:
+                for line_no, raw in enumerate(f, start=1):
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        skipped += 1
+                        logger.warning(
+                            "Session %s: skipping malformed JSON on line %d",
+                            session_id,
+                            line_no,
+                        )
+                        continue
+                    if data.get("_meta"):
+                        header = data
+                        continue
+                    try:
+                        events.append(deserialize_event(data))
+                    except Exception:
+                        skipped += 1
+                        logger.warning(
+                            "Session %s: skipping unparseable event on line %d",
+                            session_id,
+                            line_no,
+                            exc_info=True,
+                        )
+
+        if skipped:
+            logger.warning(
+                "Session %s loaded with %d corrupt event(s) skipped",
+                session_id,
+                skipped,
+            )
 
         # Schema version check
         file_version = header.get("schema_version", 0)

@@ -209,12 +209,29 @@ class OllamaProvider(Provider):
 
         # Accumulators for tool calls (streamed models may return them in the final chunk)
         tool_acc: list[dict[str, Any]] = []
+        emitted_done = False
+        last_data: dict[str, Any] = {}
 
         from agent.providers._thinking import StreamThinkingRouter
 
         # Always route thinking tokens — models like Gemma4 emit channel tokens
         # unconditionally even when thinking is disabled.
         router = StreamThinkingRouter()
+
+        def _emit_tool_calls() -> list[StreamDelta]:
+            out: list[StreamDelta] = []
+            for i, tc in enumerate(tool_acc):
+                fn = tc.get("function", {})
+                out.append(
+                    StreamDelta(
+                        tool_call_delta={
+                            "tool_call_id": f"ollama_tc_{i}",
+                            "tool_name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", {}),
+                        }
+                    )
+                )
+            return out
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
             if resp.status_code != 200:
@@ -232,6 +249,7 @@ class OllamaProvider(Provider):
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                last_data = data
 
                 message = data.get("message", {})
 
@@ -264,17 +282,9 @@ class OllamaProvider(Provider):
                     if clean or leftover_reasoning:
                         yield StreamDelta(text=clean, reasoning_delta=leftover_reasoning)
 
-                if is_done:
                     # Emit accumulated tool calls
-                    for i, tc in enumerate(tool_acc):
-                        fn = tc.get("function", {})
-                        yield StreamDelta(
-                            tool_call_delta={
-                                "tool_call_id": f"ollama_tc_{i}",
-                                "tool_name": fn.get("name", ""),
-                                "arguments": fn.get("arguments", {}),
-                            }
-                        )
+                    for delta_out in _emit_tool_calls():
+                        yield delta_out
                     # Build usage metadata from the final chunk
                     usage: dict[str, int] = {}
                     if "prompt_eval_count" in data:
@@ -287,10 +297,33 @@ class OllamaProvider(Provider):
                         usage=usage,
                     )
                     yield StreamDelta(done=True, meta=stream_meta)
+                    emitted_done = True
                     return
 
-        # Safety fallback
-        yield StreamDelta(done=True)
+        # Stream exited normally without a done frame (older Ollama versions /
+        # early close). Flush the router buffer + any accumulated tool calls
+        # so they aren't lost. Exceptions propagate to the caller untouched. (#6)
+        if not emitted_done:
+            clean, leftover_reasoning = router.flush()
+            if clean or leftover_reasoning:
+                yield StreamDelta(text=clean, reasoning_delta=leftover_reasoning)
+            for delta_out in _emit_tool_calls():
+                yield delta_out
+            usage_fb: dict[str, int] = {}
+            if "prompt_eval_count" in last_data:
+                usage_fb["input_tokens"] = last_data["prompt_eval_count"]
+            if "eval_count" in last_data:
+                usage_fb["output_tokens"] = last_data["eval_count"]
+            meta_fb = (
+                ProviderMeta(
+                    provider="ollama",
+                    model=last_data.get("model", self.config.model),
+                    usage=usage_fb,
+                )
+                if usage_fb
+                else None
+            )
+            yield StreamDelta(done=True, meta=meta_fb)
 
     async def close(self) -> None:
         await self._client.aclose()

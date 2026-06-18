@@ -34,12 +34,19 @@ def configure_logging(
         sh.setFormatter(fmt)
         root.addHandler(sh)
 
-    # file handler — opt-in, append mode, with timestamps
+    # file handler — opt-in, append mode, with timestamps.
+    # De-dup by resolved baseFilename so repeated calls (e.g. ACP transport
+    # re-init) don't multiply log lines or leak file descriptors. (#10)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        root.addHandler(fh)
+        target = str(log_file.resolve())
+        has_file = any(
+            isinstance(h, logging.FileHandler) and h.baseFilename == target for h in root.handlers
+        )
+        if not has_file:
+            fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+            root.addHandler(fh)
 
     # silence noisy HTTP internals, or un-silence them at DEBUG
     for name in ("httpx", "httpcore", "asyncio"):

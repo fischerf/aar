@@ -72,21 +72,30 @@ class GuardrailsConfig(BaseModel):
     read_only_loop_threshold: int = 8
 
 
+_STATE_DEFAULTS: dict[str, Any] = {
+    "max_tokens_recovery_count": 0,
+    "premature_end_recovery_count": 0,
+    "last_tool_signature": None,
+    "repeated_tool_steps": 0,
+    "near_budget_warned": False,
+    "consecutive_bash_failures": 0,
+    "bash_pivot_hinted": False,
+    "consecutive_read_only_steps": 0,
+    "read_only_nudge_given": False,
+}
+
+
 def _get_state(session: Session) -> dict[str, Any]:
-    """Return (and lazily initialise) the guardrails sub-dict in session metadata."""
-    if _STATE_KEY not in session.metadata:
-        session.metadata[_STATE_KEY] = {
-            "max_tokens_recovery_count": 0,
-            "premature_end_recovery_count": 0,
-            "last_tool_signature": None,
-            "repeated_tool_steps": 0,
-            "near_budget_warned": False,
-            "consecutive_bash_failures": 0,
-            "bash_pivot_hinted": False,
-            "consecutive_read_only_steps": 0,
-            "read_only_nudge_given": False,
-        }
-    return session.metadata[_STATE_KEY]
+    """Return (and lazily initialise) the guardrails sub-dict in session metadata.
+
+    Sessions persisted before a guardrail field was introduced load with the
+    old shape, so every key is filled in via ``setdefault`` on each call to
+    keep legacy sessions from raising ``KeyError`` mid-loop. (#3)
+    """
+    state = session.metadata.setdefault(_STATE_KEY, {})
+    for key, default in _STATE_DEFAULTS.items():
+        state.setdefault(key, default)
+    return state
 
 
 class LoopGuardrails:

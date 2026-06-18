@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+
+logger = logging.getLogger(__name__)
 
 # Extra keys that enable prompt caching when set in provider config
 _CACHE_EXTRA_KEY = "prompt_caching"
@@ -186,8 +189,32 @@ class AnthropicProvider(Provider):
 
         # Track active content blocks by index
         active_blocks: dict[int, dict[str, Any]] = {}
+        emitted_done = False
 
-        async with self._client.messages.stream(**kwargs) as stream:
+        def _flush_tool_calls() -> list[StreamDelta]:
+            """Build StreamDelta(s) for every accumulated tool_use block."""
+            out: list[StreamDelta] = []
+            for block_info in active_blocks.values():
+                if block_info.get("type") != "tool_use":
+                    continue
+                raw_args = block_info.get("arguments", "{}")
+                try:
+                    parsed_args = json.loads(raw_args) if raw_args else {}
+                except (json.JSONDecodeError, TypeError):
+                    parsed_args = {"raw": raw_args}
+                out.append(
+                    StreamDelta(
+                        tool_call_delta={
+                            "tool_call_id": block_info.get("id", ""),
+                            "tool_name": block_info.get("name", ""),
+                            "arguments": parsed_args,
+                        }
+                    )
+                )
+            return out
+
+        stream_cm = self._client.messages.stream(**kwargs)
+        async with stream_cm as stream:
             async for event in stream:
                 event_type = event.type
 
@@ -213,21 +240,8 @@ class AnthropicProvider(Provider):
                             active_blocks[idx]["arguments"] += delta.partial_json
 
                 elif event_type == "message_stop":
-                    # Emit accumulated tool calls
-                    for block_info in active_blocks.values():
-                        if block_info.get("type") == "tool_use":
-                            raw_args = block_info.get("arguments", "{}")
-                            try:
-                                parsed_args = json.loads(raw_args) if raw_args else {}
-                            except (json.JSONDecodeError, TypeError):
-                                parsed_args = {"raw": raw_args}
-                            yield StreamDelta(
-                                tool_call_delta={
-                                    "tool_call_id": block_info.get("id", ""),
-                                    "tool_name": block_info.get("name", ""),
-                                    "arguments": parsed_args,
-                                }
-                            )
+                    for delta in _flush_tool_calls():
+                        yield delta
                     # Build usage metadata from the final message
                     stream_meta: ProviderMeta | None = None
                     try:
@@ -251,12 +265,19 @@ class AnthropicProvider(Provider):
                             request_id=final_msg.id,
                         )
                     except Exception:
-                        pass
+                        # Don't silently swallow — surfaces SDK breakage in logs. (#6)
+                        logger.debug("Failed to build Anthropic stream meta", exc_info=True)
                     yield StreamDelta(done=True, meta=stream_meta)
+                    emitted_done = True
                     return
 
-        # Fallback sentinel
-        yield StreamDelta(done=True)
+        # Stream exited normally without a message_stop (older SDKs / early
+        # close): flush any accumulated tool calls + terminal sentinel so the
+        # consumer doesn't lose them. Errors propagate as exceptions instead. (#6)
+        if not emitted_done:
+            for delta in _flush_tool_calls():
+                yield delta
+            yield StreamDelta(done=True)
 
 
 def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

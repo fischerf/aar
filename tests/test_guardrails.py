@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.core.events import ToolResult
+from agent.core.events import ToolCall, ToolResult
 from agent.core.guardrails import (
     _ACP_TERMINAL_HINT,
     _PREMATURE_END_FOLLOWUP,
@@ -124,6 +124,55 @@ class TestBashPivotHint:
         assert guardrails.observe_tool_results(session, results, registry_names) is None
         # Still no hint — pattern didn't match
         assert guardrails.observe_tool_results(session, results, registry_names) is None
+
+
+# ---------------------------------------------------------------------------
+# Legacy session metadata backfill (#3)
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyMetadataState:
+    """#3 — _get_state must tolerate sessions persisted before new keys existed."""
+
+    def test_empty_legacy_state_does_not_raise(self) -> None:
+        guardrails = LoopGuardrails()
+        session = Session()
+        # Simulate a session saved before new guardrail fields were added.
+        session.metadata["guardrails"] = {}
+
+        tc = ToolCall(tool_call_id="tc1", tool_name="read_file", arguments={"path": "a"})
+        # Without #3 this would raise KeyError on the missing
+        # 'consecutive_read_only_steps' / 'last_tool_signature' keys.
+        guardrails.observe_tool_calls(session, [tc])
+
+        state = session.metadata["guardrails"]
+        assert state["consecutive_read_only_steps"] == 1
+        assert "read_only_nudge_given" in state
+        assert "bash_pivot_hinted" in state
+        assert "max_tokens_recovery_count" in state
+
+    def test_partial_legacy_state_keeps_existing_values(self) -> None:
+        """Existing counters survive backfill — only missing keys get defaults."""
+        guardrails = LoopGuardrails()
+        session = Session()
+        session.metadata["guardrails"] = {
+            # Pre-existing field with non-default value
+            "max_tokens_recovery_count": 2,
+        }
+
+        # should_continue_after_max_tokens reads max_tokens_recovery_count.
+        # If backfill clobbered it, this would return True (counter back to 0).
+        result = guardrails.should_continue_after_max_tokens(session)
+        assert result is False  # already at the default limit (2)
+
+    def test_pivot_hint_works_on_legacy_state(self) -> None:
+        """bash_pivot_hinted / consecutive_bash_failures backfill cleanly."""
+        guardrails = LoopGuardrails(GuardrailsConfig(bash_failure_threshold=1))
+        session = Session()
+        session.metadata["guardrails"] = {}
+
+        hint = guardrails.observe_tool_results(session, [_bash_error()], {"bash", "acp_terminal"})
+        assert hint == _ACP_TERMINAL_HINT
 
 
 # ---------------------------------------------------------------------------

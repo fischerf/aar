@@ -188,6 +188,10 @@ class Agent:
             cfg = key_or_spec
 
         self.provider = _create_provider(cfg)
+        # Keep self.config.provider in sync so resolve_provider() / effective_*
+        # helpers (cost calc, token budget, context_window, max_tokens cap)
+        # read the NEW provider, not the stale one. (#1)
+        self.config.provider = cfg
 
         if session is not None:
             from agent.core.events import ProviderSwitchEvent
