@@ -10,6 +10,7 @@ from agent.core.skills import (
     load_skill_from_file,
     load_skills,
     parse_frontmatter,
+    skill_read_paths,
     strip_frontmatter,
 )
 
@@ -274,6 +275,101 @@ class TestFormatSkillsForPrompt:
         assert "&gt;" in text
         assert "&amp;" in text
         assert "&quot;" in text
+
+
+# ── Policy integration ───────────────────────────────────────────────────
+
+
+class TestSkillReadPaths:
+    def test_empty(self):
+        assert skill_read_paths([]) == []
+
+    def test_recursive_glob_per_base_dir(self, tmp_path):
+        base = tmp_path / "skills"
+        base.mkdir()
+        skill = Skill(
+            name="roll-dice",
+            description="Roll dice",
+            file_path=base / "roll-dice.md",
+            base_dir=base,
+        )
+        patterns = skill_read_paths([skill])
+        expected = str(base.resolve()).replace("\\", "/") + "/**"
+        assert patterns == [expected]
+
+    def test_duplicates_collapsed(self, tmp_path):
+        base = tmp_path / "skills"
+        base.mkdir()
+        # Two loose skills sharing the same base_dir → one pattern.
+        skills = [
+            Skill(name="a", description="A", file_path=base / "a.md", base_dir=base),
+            Skill(name="b", description="B", file_path=base / "b.md", base_dir=base),
+        ]
+        assert len(skill_read_paths(skills)) == 1
+
+    def test_agent_wires_skill_read_paths_into_policy(self, tmp_path):
+        """Agent construction feeds discovered skill dirs into the policy allowlist."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.core.config import AgentConfig
+
+        skills_dir = tmp_path / "extra-skills"
+        skills_dir.mkdir()
+        # Unique name so a real ~/.aar/skills on the dev machine can't collide.
+        (skills_dir / "aar-test-skill.md").write_text(
+            "---\nname: aar-test-skill\ndescription: Test skill\n---\n# Body", encoding="utf-8"
+        )
+
+        with patch("agent.core.agent._create_provider", return_value=MagicMock()):
+            from agent.core.agent import Agent
+
+            agent = Agent(config=AgentConfig(skills_dirs=[str(skills_dir)]))
+
+        expected = str(skills_dir.resolve()).replace("\\", "/") + "/**"
+        assert expected in agent.executor.policy.config.read_only_paths
+
+    def test_agent_no_skill_read_paths_when_disabled(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+
+        from agent.core.config import AgentConfig
+
+        skills_dir = tmp_path / "extra-skills"
+        skills_dir.mkdir()
+        (skills_dir / "roll-dice.md").write_text(
+            "---\nname: roll-dice\ndescription: Roll dice\n---\n# Roll", encoding="utf-8"
+        )
+
+        with patch("agent.core.agent._create_provider", return_value=MagicMock()):
+            from agent.core.agent import Agent
+
+            agent = Agent(config=AgentConfig(skills_enabled=False, skills_dirs=[str(skills_dir)]))
+
+        assert agent.executor.policy.config.read_only_paths == []
+
+    def test_grants_read_only_under_allowed_paths(self, tmp_path):
+        """The patterns let the policy read skills outside allowed_paths, but not write."""
+        from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
+        from agent.tools.schema import SideEffect, ToolSpec
+
+        base = tmp_path / "home" / ".aar" / "skills"
+        base.mkdir(parents=True)
+        skill_file = base / "roll-dice.md"
+        skill_file.write_text("---\nname: roll-dice\ndescription: Roll\n---\n", encoding="utf-8")
+        skill = Skill(name="roll-dice", description="Roll", file_path=skill_file, base_dir=base)
+
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=[str(tmp_path / "workspace").replace("\\", "/") + "/**"],
+                read_only_paths=skill_read_paths([skill]),
+            )
+        )
+        read_spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
+        write_spec = ToolSpec(name="write_file", description="", side_effects=[SideEffect.WRITE])
+
+        # Read of the skill file is allowed even though it's outside allowed_paths.
+        assert policy.check_tool(read_spec, {"path": str(skill_file)}) == PolicyDecision.ALLOW
+        # Writing to the same path is NOT granted by read_only_paths → denied.
+        assert policy.check_tool(write_spec, {"path": str(skill_file)}) == PolicyDecision.DENY
 
 
 # ── Config integration ───────────────────────────────────────────────────

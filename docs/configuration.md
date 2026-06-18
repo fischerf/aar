@@ -37,6 +37,8 @@ config = AgentConfig(
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         allowed_paths=["<cwd>/**"],                # hard path boundary; <cwd> expands to Path.cwd() at startup
                                                    # empty list = allow all non-denied paths
+                                                   # discovered skill dirs are auto-added as read-only
+                                                   # (see docs/safety.md#read_only_paths-and-skills)
         sandbox=SandboxConfig(                     # see docs/safety.md for all modes and per-mode options
             mode="local",                          # "local" | "linux" | "windows" | "wsl" | "auto"
         ),

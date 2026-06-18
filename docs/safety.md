@@ -17,14 +17,15 @@ The policy evaluates rules in this order — **hard gates first, soft approval l
 1. **Read-only mode** — if enabled, all writes and executes are denied immediately (hard)
 2. **Path rules** — explicit `PathRule` entries (first match wins) (hard)
 3. **Denied paths** — glob patterns that block file access (hard)
-4. **Allowed paths** — if set, only matching paths are permitted; anything outside is denied (hard)
-5. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins) (hard)
-6. **Denied commands** — substring patterns that block dangerous shell commands (hard)
-7. **Bash forced approval** — if `allowed_paths` is set and the sandbox provides no OS-level write isolation (`local`, `wsl`), bash is forced to ASK so the user can verify the command (soft)
-8. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK (soft)
-9. If nothing matches, the tool call is **ALLOWED**
+4. **Read-only allowlist** — `read_only_paths` glob patterns that grant **reads only** (never writes); checked after denied paths, so credential patterns still win (hard allow)
+5. **Allowed paths** — if set, only matching paths are permitted; anything outside is denied (hard)
+6. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins) (hard)
+7. **Denied commands** — substring patterns that block dangerous shell commands (hard)
+8. **Bash forced approval** — if `allowed_paths` is set and the sandbox provides no OS-level write isolation (`local`, `wsl`), bash is forced to ASK so the user can verify the command (soft)
+9. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK (soft)
+10. If nothing matches, the tool call is **ALLOWED**
 
-Steps 1–6 are hard **DENY** — they cannot be bypassed by approval. This means `allowed_paths` acts as a true sandbox boundary: a write or read that falls outside it is denied outright, not merely queued for human review.
+Steps 1–3 and 5–7 are hard **DENY** — they cannot be bypassed by approval. This means `allowed_paths` acts as a true sandbox boundary: a write or read that falls outside it is denied outright, not merely queued for human review. Step 4 is the one **hard allow**: it permits reads of specific paths (used for discovered skills) even when `allowed_paths` would otherwise exclude them — but it never grants writes and is checked *after* `denied_paths`, so it can never expose a credential file.
 
 ## Built-in defaults
 
@@ -95,6 +96,16 @@ deep audit trails and have reviewed what the agent is likely to run.
 For `linux` and `windows` modes, `require_approval_for_execute` still applies as normal. The forced-ASK only kicks in when the sandbox cannot actually enforce the boundary.
 
 The `<cwd>/**` sentinel in `allowed_paths` is expanded to the working directory path at startup — so `aar init` writes `["<cwd>/**"]` to the config and it resolves correctly regardless of where `aar` is launched.
+
+## `read_only_paths` and skills
+
+`read_only_paths` is a read-only counterpart to `allowed_paths`: paths matching one of its glob patterns may be **read** but never **written**. It is checked *after* `denied_paths` (so a `.pem`/`.env`/credential file under a matching directory is still blocked) and *before* the `allowed_paths` whitelist's hard deny (so a matching read is permitted even when `allowed_paths` would otherwise exclude it).
+
+Its main job is making **[skills](prompting.md#skills-lazy-load-instructions) work out of the box**. Skills usually live in `~/.aar/skills/` (global) or `<project_rules_dir>/skills/` (project) — both *outside* the default `allowed_paths` of `["<cwd>/**"]`. Without help, the model would be told about a skill in the system prompt but then denied when it tried to `read_file` the skill's instructions.
+
+To close that gap, the agent automatically adds a `<base_dir>/**` read-only pattern for every discovered skill (the skill's directory, so bundled resources are reachable too). This happens at startup and whenever the system prompt is rebuilt; the list is **reassigned, not appended**, so it never accumulates duplicates. The result: skills are readable regardless of where they live, writes to skill files are still denied, and `denied_paths` still wins over everything. No configuration is required — set `skills_enabled: false` to opt out entirely.
+
+> Unlike `path_rules` (evaluated first, and able to override `denied_paths`), `read_only_paths` can never expose a denied file. That's why skills use it rather than a read-only `PathRule`.
 
 ## Per-transport defaults
 

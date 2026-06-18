@@ -125,6 +125,12 @@ To use a skill, read its file with read_file to get the full instructions.
 
 Run `aar prompt --layers` to see whether the skills layer is active.
 
+#### Safety: skills are auto-readable
+
+Skills normally live *outside* the workspace (`~/.aar/skills/`), but the default safety policy restricts file tools to `allowed_paths: ["<cwd>/**"]`. So the model can't `read_file` a skill out of the box would normally be denied.
+
+Aar closes this gap automatically: every discovered skill's directory is added to the policy's `read_only_paths` allowlist (`<base_dir>/**`), granting **read-only** access to the skill file and any bundled resources. Writes to skill files stay denied, and `denied_paths` still wins (a stray `.env`/`.pem` under a skills dir is never readable). No configuration is needed — this just works whenever `skills_enabled` is true. See [Safety » `read_only_paths` and skills](safety.md#read_only_paths-and-skills) for the full evaluation order.
+
 ---
 
 ## Writing effective user prompts

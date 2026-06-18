@@ -130,6 +130,34 @@ class TestPolicyPathRestrictions:
         assert policy.check_tool(read_spec, {"path": "/etc/safe_config"}) == PolicyDecision.ALLOW
         assert policy.check_tool(write_spec, {"path": "/etc/safe_config"}) == PolicyDecision.DENY
 
+    def test_read_only_paths_grant_reads_outside_allowed(self):
+        """read_only_paths permits reads outside allowed_paths but never writes."""
+        config = PolicyConfig(
+            allowed_paths=["/workspace/**"],
+            read_only_paths=["/home/user/.aar/skills/**"],
+        )
+        policy = SafetyPolicy(config)
+        read_spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
+        write_spec = ToolSpec(name="write_file", description="", side_effects=[SideEffect.WRITE])
+
+        skill = "/home/user/.aar/skills/roll-dice.md"
+        # Read allowed even though the path is outside allowed_paths.
+        assert policy.check_tool(read_spec, {"path": skill}) == PolicyDecision.ALLOW
+        # Write is not granted by read_only_paths and falls outside allowed_paths.
+        assert policy.check_tool(write_spec, {"path": skill}) == PolicyDecision.DENY
+
+    def test_read_only_paths_do_not_override_denied(self):
+        """denied_paths is checked first, so read_only_paths can't expose secrets."""
+        config = PolicyConfig(
+            read_only_paths=["/home/user/.aar/skills/**"],
+        )
+        policy = SafetyPolicy(config)
+        read_spec = ToolSpec(name="read_file", description="", side_effects=[SideEffect.READ])
+
+        # A credential file under a skills dir still matches denied_paths first.
+        secret = "/home/user/.aar/skills/leaked.pem"
+        assert policy.check_tool(read_spec, {"path": secret}) == PolicyDecision.DENY
+
 
 class TestPolicyNormalizePath:
     """H6: normalization collapses traversal, UNC, drive-letter case."""

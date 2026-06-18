@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Skills are auto-readable** — discovered skills (under `~/.aar/skills/`,
+  `.agent/skills/`, or `skills_dirs`) now work even when `allowed_paths`
+  restricts file tools to the workspace. The agent adds each skill's directory
+  to a new read-only policy allowlist (`PolicyConfig.read_only_paths`), so the
+  model can `read_file` a skill's instructions without a manual config change.
+  Writes to skill files stay denied, and `denied_paths` still takes precedence
+  (a credential file under a skills dir is never exposed). New helper
+  `agent.core.skills.skill_read_paths`.
 
 ### Changed
 

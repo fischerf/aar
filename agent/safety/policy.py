@@ -64,6 +64,19 @@ class PolicyConfig(BaseModel):
     )
     allowed_paths: list[str] = Field(default_factory=list)  # empty = allow all not denied
 
+    # Read-only allowlist — paths the agent may *read* but never *write*.
+    # Evaluated after denied_paths (so credential patterns still win) but
+    # before the allowed_paths whitelist's hard deny, so a matching read is
+    # permitted even when allowed_paths would otherwise exclude it. Writes
+    # are never granted here and fall through to the allowed_paths check.
+    #
+    # Used to grant access to skill files discovered outside the workspace
+    # (e.g. ~/.aar/skills) so the model can load skill instructions even when
+    # allowed_paths restricts it to the project directory. Unlike path_rules
+    # (which are evaluated first and would shadow denied_paths), this cannot be
+    # used to read a credential file that happens to live under a skills dir.
+    read_only_paths: list[str] = Field(default_factory=list)
+
     # Command rules (evaluated in order, first match wins)
     command_rules: list[CommandRule] = Field(default_factory=list)
 
@@ -351,6 +364,16 @@ class SafetyPolicy:
             if fnmatch.fnmatch(norm_path, norm_pattern):
                 logger.info("Policy DENY (denied path): %s matches %s", path, pattern)
                 return PolicyDecision.DENY
+
+        # Read-only allowlist (e.g. discovered skills). Grants reads only —
+        # never writes — and is checked after denied_paths so credential
+        # patterns still win. A matching read is allowed even when allowed_paths
+        # would otherwise exclude it; writes fall through to the checks below.
+        if not is_write:
+            for pattern in self.config.read_only_paths:
+                norm_pattern = pattern.replace("\\", "/")
+                if fnmatch.fnmatch(norm_path, norm_pattern):
+                    return PolicyDecision.ALLOW
 
         # Check allowed paths (if specified, only matching paths are permitted)
         if self.config.allowed_paths:
