@@ -20,7 +20,7 @@ aar chat --mcp-config mcp.json
 aar run "List the Python files in /tmp" --mcp-config mcp.json
 
 # Resume a session and keep the same MCP tools available
-aar resume <session-id> --mcp-config mcp.json
+aar chat --session <session-id> --mcp-config mcp.json
 
 # See all registered tools (built-ins + MCP)
 aar tools --mcp-config mcp.json
@@ -29,7 +29,7 @@ aar tools --mcp-config mcp.json
 aar tui --mcp-config mcp.json
 ```
 
-`--mcp-config` is supported by `chat`, `run`, `resume`, `tools`, and `tui`. The bridge is opened before the first prompt and closed after the last response.
+`--mcp-config` is supported by `chat`, `run`, `tools`, and `tui`. `serve` accepts the flag but currently emits a warning and ignores it — see [MCP tools and the web server](#mcp-tools-and-the-web-server) for the programmatic workaround. The bridge is opened before the first prompt and closed after the last response.
 
 ## JSON config file format
 
