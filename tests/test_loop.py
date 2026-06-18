@@ -1297,3 +1297,211 @@ async def test_loop_aborts_after_truncated_recoveries_exhausted(mock_provider, t
     assert not any(isinstance(e, ToolResult) for e in result.events)
     # Recovery counter saturated at the configured limit.
     assert result.metadata["guardrails"]["max_tokens_recovery_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #2 — Extension-blocked tool calls must not corrupt provider message order
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedToolCallMessageOrder:
+    """Regression tests for #2 (review-2026-06-plan).
+
+    When an extension ``BlockResult``s one of several tool calls, the
+    blocked ``ToolCall`` + synthesized ``ToolResult`` must end up *after*
+    the ``AssistantMessage`` in the event log. Otherwise
+    ``events_to_messages`` flushes the blocked tool_result as a
+    ``user(tool_result)`` block *before* the assistant's ``tool_use``,
+    which Anthropic + OpenAI both reject with a 400 on the next call.
+    """
+
+    def _build_blocking_manager(self, blocked_tool_name: str):
+        from agent.extensions.api import BlockResult, ExtensionAPI
+        from agent.extensions.loader import ExtensionInfo
+        from agent.extensions.manager import ExtensionManager
+
+        def blocker(event, ctx):
+            if getattr(event, "tool_name", None) == blocked_tool_name:
+                return BlockResult(reason="nope")
+            return None
+
+        mgr = ExtensionManager()
+        api = ExtensionAPI(name="blocker")
+        api._event_handlers["tool_call"] = [blocker]
+        info = ExtensionInfo(name="blocker", source="user", path=None, api=api)
+        mgr._extensions = [info]
+        # ExtensionContext is built lazily in ``initialize``; ``fire_event``
+        # only passes ``self._context`` through. For these tests it's fine to
+        # leave it as None — our blocker never touches it.
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_partial_block_pairs_each_tool_result_with_tool_use(
+        self, mock_provider, tool_registry, default_config
+    ):
+        """Mixed blocked + allowed: every tool_result must follow its tool_use."""
+        from agent.core.session import events_to_messages
+
+        # Two tool calls in one assistant turn: one blocked, one allowed.
+        mock_provider.enqueue(
+            ProviderResponse(
+                content="calling tools",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="echo",
+                        tool_call_id="tc_blocked",
+                        arguments={"message": "blocked"},
+                    ),
+                    ToolCall(
+                        tool_name="echo",
+                        tool_call_id="tc_ok",
+                        arguments={"message": "allowed"},
+                    ),
+                ],
+                stop_reason="tool_use",
+                meta=ProviderMeta(
+                    provider="mock", model="mock-1", usage={"input_tokens": 5, "output_tokens": 5}
+                ),
+            )
+        )
+        # We synthetically inject the BlockResult via the manager below, but
+        # the blocker matches by name — mark the first call as a separate
+        # tool name so it can be blocked while the second runs. Easier: use a
+        # second tool. Use ``failing`` as the blocked name.
+        mock_provider.enqueue_text("done")
+
+        session = Session()
+        session.add_user_message("do work")
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+
+        # Tweak the blocker to block tc_blocked by tool_call_id, since both
+        # share the same tool name in this test. Build a custom blocker.
+        from agent.extensions.api import BlockResult, ExtensionAPI
+        from agent.extensions.loader import ExtensionInfo
+        from agent.extensions.manager import ExtensionManager
+
+        def blocker(event, ctx):
+            if getattr(event, "tool_call_id", "") == "tc_blocked":
+                return BlockResult(reason="nope")
+            return None
+
+        mgr = ExtensionManager()
+        api = ExtensionAPI(name="blocker")
+        api._event_handlers["tool_call"] = [blocker]
+        mgr._extensions = [ExtensionInfo(name="blocker", source="user", path=None, api=api)]
+
+        result = await run_loop(
+            session,
+            mock_provider,
+            executor,
+            default_config,
+            extension_manager=mgr,
+        )
+
+        # Sanity: the assistant message exists exactly once for the tool-call turn.
+        assistant_msgs = [e for e in result.events if isinstance(e, AssistantMessage)]
+        assert assistant_msgs, "expected at least one AssistantMessage"
+
+        # Inspect the event ordering: both ToolCalls must precede the
+        # AssistantMessage, and both ToolResults (one blocked + one real)
+        # must follow it.
+        first_assistant_idx = next(
+            i for i, e in enumerate(result.events) if isinstance(e, AssistantMessage)
+        )
+        tc_indices = [i for i, e in enumerate(result.events) if isinstance(e, ToolCall)]
+        tr_indices = [i for i, e in enumerate(result.events) if isinstance(e, ToolResult)]
+        assert all(i < first_assistant_idx for i in tc_indices[:2]), (
+            "both ToolCalls (blocked + allowed) must appear BEFORE the AssistantMessage"
+        )
+        assert all(i > first_assistant_idx for i in tr_indices[:2]), (
+            "both ToolResults (blocked + executed) must appear AFTER the AssistantMessage"
+        )
+
+        # Now build the provider message list and verify every tool_result
+        # block is paired with a preceding tool_use of the same id.
+        messages = events_to_messages(result.events)
+        seen_tool_use_ids: set[str] = set()
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    btype = block.get("type") if isinstance(block, dict) else None
+                    if btype == "tool_use":
+                        seen_tool_use_ids.add(block["id"])
+                    elif btype == "tool_result":
+                        assert block["tool_use_id"] in seen_tool_use_ids, (
+                            f"tool_result {block['tool_use_id']!r} appeared before its tool_use; "
+                            f"seen so far: {seen_tool_use_ids}"
+                        )
+
+        # Both tool_call_ids must show up as tool_use AND tool_result.
+        assert "tc_blocked" in seen_tool_use_ids
+        assert "tc_ok" in seen_tool_use_ids
+
+        # The blocked tool was never actually executed — only the allowed one
+        # should produce an "echo: allowed" output in the event log.
+        results = [e for e in result.events if isinstance(e, ToolResult)]
+        blocked = [r for r in results if r.tool_call_id == "tc_blocked"]
+        executed = [r for r in results if r.tool_call_id == "tc_ok"]
+        assert len(blocked) == 1
+        assert blocked[0].is_error is True
+        assert "Blocked by extension" in blocked[0].output
+        assert len(executed) == 1
+        assert executed[0].output == "echo: allowed"
+
+    @pytest.mark.asyncio
+    async def test_full_block_still_emits_tool_use_then_tool_result(
+        self, mock_provider, tool_registry, default_config
+    ):
+        """When all tool calls are blocked, the assistant turn still must
+        contain the tool_use block followed by its tool_result."""
+        from agent.core.session import events_to_messages
+
+        mock_provider.enqueue(
+            ProviderResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="echo",
+                        tool_call_id="tc_a",
+                        arguments={"message": "x"},
+                    ),
+                ],
+                stop_reason="tool_use",
+                meta=ProviderMeta(
+                    provider="mock", model="mock-1", usage={"input_tokens": 5, "output_tokens": 5}
+                ),
+            )
+        )
+        mock_provider.enqueue_text("giving up")
+
+        session = Session()
+        session.add_user_message("go")
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+        mgr = self._build_blocking_manager("echo")
+
+        result = await run_loop(
+            session, mock_provider, executor, default_config, extension_manager=mgr
+        )
+
+        # The assistant message for the blocked turn must exist with the
+        # tool_use block paired to a following tool_result.
+        messages = events_to_messages(result.events)
+        # Find the tool_use → tool_result pair for tc_a.
+        seen_use = False
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    btype = block.get("type") if isinstance(block, dict) else None
+                    if btype == "tool_use" and block.get("id") == "tc_a":
+                        seen_use = True
+                    elif btype == "tool_result" and block.get("tool_use_id") == "tc_a":
+                        assert seen_use, "tool_result for tc_a appeared before tool_use"
+
+        # And the executor never actually ran the blocked tool: only one
+        # ToolResult event, marked as error.
+        results = [e for e in result.events if isinstance(e, ToolResult)]
+        assert len(results) == 1
+        assert results[0].is_error is True
+        assert "Blocked by extension" in results[0].output

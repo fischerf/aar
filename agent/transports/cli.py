@@ -1310,6 +1310,10 @@ def register(api: ExtensionAPI) -> None:
     # ── Custom tool ───────────────────────────────────────────────────────
     # Uncomment and adapt to expose a new tool to the model.
     #
+    # NOTE: tool handlers receive only the validated JSON-schema arguments —
+    # ``ExtensionContext`` is not passed in; capture it via the enclosing
+    # ``register(api)`` closure if you need session/config/logger access.
+    #
     # @api.tool(
     #     name="greet",
     #     description="Return a friendly greeting for the given name.",
@@ -1319,7 +1323,7 @@ def register(api: ExtensionAPI) -> None:
     #         "required": ["name"],
     #     },
     # )
-    # def greet(name: str, ctx: ExtensionContext) -> str:
+    # def greet(name: str) -> str:
     #     return f"Hello, {name}! 👋"
 
     # ── Slash-command ─────────────────────────────────────────────────────

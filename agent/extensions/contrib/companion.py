@@ -96,7 +96,11 @@ def register(api: ExtensionAPI) -> None:
         ),
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
     )
-    def _companion_status(ctx: ExtensionContext) -> str:
+    def _companion_status() -> str:
+        # #9 — tool handlers are invoked via ``spec.handler(**tc.arguments)``
+        # by ``ToolExecutor`` (no implicit ``ctx`` kwarg). Capture ``engine``
+        # via closure instead of expecting an ``ExtensionContext`` argument
+        # that the executor never passes.
         if engine is None:
             return "companion not initialised (no active session)"
 

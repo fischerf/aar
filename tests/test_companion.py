@@ -653,3 +653,93 @@ class TestBootstrapFromSession:
         engine.bootstrap_from_session(session)
         assert engine.steps == 0
         assert engine.level == 1
+
+
+# ---------------------------------------------------------------------------
+# #9 — companion_status tool must be invokable with no kwargs
+# ---------------------------------------------------------------------------
+
+
+class TestCompanionStatusTool:
+    """Regression test for #9 (review-2026-06-plan).
+
+    ``ToolExecutor`` calls ``spec.handler(**tc.arguments)`` with no implicit
+    ``ctx`` kwarg. The previous signature ``_companion_status(ctx)`` raised
+    ``TypeError: missing 1 required positional argument: 'ctx'`` the first
+    time the model called the tool. The fixed handler takes no args and
+    captures ``engine`` via the enclosing ``register`` closure.
+    """
+
+    def _register_companion(self):
+        """Run companion.register(api) and return (api, tool_spec)."""
+        from agent.extensions.api import ExtensionAPI
+        from agent.extensions.contrib import companion
+
+        api = ExtensionAPI(name="companion")
+        companion.register(api)
+        spec = next(s for s in api._tools if s.name == "companion_status")
+        return api, spec
+
+    @pytest.mark.asyncio
+    async def test_status_callable_with_no_arguments(self) -> None:
+        """Calling the handler the way ToolExecutor does must not raise."""
+        api, spec = self._register_companion()
+        # The model passes ``{}`` for a no-arg tool; this expands to no kwargs.
+        result = spec.handler(**{})
+        assert isinstance(result, str)
+
+    @pytest.mark.asyncio
+    async def test_status_before_session_start(self) -> None:
+        """Before ``session_start`` fires, engine is None — returns hint string."""
+        api, spec = self._register_companion()
+        result = spec.handler()
+        assert "not initialised" in result
+
+    @pytest.mark.asyncio
+    async def test_status_after_session_start_reports_state(self) -> None:
+        """After ``session_start`` initialises the engine, status reports mood/level/xp."""
+        from agent.core.session import Session
+        from agent.extensions.api import ExtensionContext
+
+        api, spec = self._register_companion()
+
+        ctx = ExtensionContext(
+            session=Session(),
+            config=MagicMock(),
+            signal=asyncio.Event(),
+            logger=MagicMock(),
+        )
+        # Drive the session_start handler so the closure-captured ``engine``
+        # is populated, then invoke the tool the way ToolExecutor would.
+        for handler in api._event_handlers["session_start"]:
+            handler(None, ctx)
+
+        result = spec.handler()
+        assert "mood:" in result
+        assert "level:" in result
+        assert "xp:" in result
+        assert "steps:" in result
+        assert "errors:" in result
+
+    @pytest.mark.asyncio
+    async def test_status_invoked_via_tool_executor(self, tool_registry) -> None:
+        """End-to-end: register the spec into a registry and run it through ToolExecutor.
+
+        This is the exact code path that previously raised ``TypeError``.
+        """
+        from agent.core.config import SafetyConfig, ToolConfig
+        from agent.core.events import ToolCall
+        from agent.tools.execution import ToolExecutor
+
+        _api, spec = self._register_companion()
+        tool_registry.add(spec)
+
+        executor = ToolExecutor(tool_registry, ToolConfig(), SafetyConfig())
+        tc = ToolCall(
+            tool_name="companion_status",
+            tool_call_id="tc_companion_1",
+            arguments={},
+        )
+        results = await executor.execute([tc])
+        assert len(results) == 1
+        assert results[0].is_error is False, results[0].output

@@ -1433,6 +1433,9 @@ class AarFixedApp(App):
         Sleeps *first* so the initial probe is deferred — this keeps app
         startup fast and ensures Textual test teardown is never blocked by
         subprocess creation before the app has fully mounted.
+
+        #8 — single ``sleep`` per iteration; the previous code slept twice,
+        halving the configured probe cadence.
         """
         import asyncio as _asyncio
 
@@ -1444,7 +1447,6 @@ class AarFixedApp(App):
                 companion.apply_git_health(health)
             except Exception:
                 pass
-            await _asyncio.sleep(self._theme.fixed_layout.companion.git_poll_interval)
 
     def on_unmount(self) -> None:
         """Clean up the prompt queue drain task on app teardown."""

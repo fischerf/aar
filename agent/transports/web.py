@@ -18,7 +18,7 @@ from agent.core.agent import Agent
 from agent.core.config import AgentConfig, load_config
 from agent.core.events import Event, ToolCall
 from agent.core.session import Session
-from agent.memory.session_store import SessionStore
+from agent.memory.session_store import SessionStore, validate_session_id
 from agent.safety.permissions import ApprovalCallback, ApprovalResult
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import ToolSpec
@@ -103,6 +103,14 @@ class WebTransport:
         for this request only.
         If provider_override is provided, use that named provider key for this request.
         """
+        # #7 — Always allocate a concrete session id up front so the
+        # ``_active_streams`` lookup is keyed deterministically. Previously
+        # both ``handle_chat`` and ``handle_stream`` keyed on
+        # ``session_id or ""``, which caused concurrent no-session requests
+        # to bleed events into each other (or, after the UUID was added on the
+        # stream side, to never match at all).
+        eff_session_id = session_id or uuid.uuid4().hex[:16]
+
         agent = self._make_agent(safety_override, provider_override)
 
         # Set up event stream for this request
@@ -111,7 +119,7 @@ class WebTransport:
         def collect(event: Event) -> None:
             collected_events.append(event.model_dump())
             # Also push to SSE stream if active
-            req_stream = self._active_streams.get(session_id or "")
+            req_stream = self._active_streams.get(eff_session_id)
             if req_stream:
                 req_stream.emit(event)
 
@@ -341,10 +349,26 @@ def create_asgi_app(
 
         elif method == "POST" and path == "/chat":
             body = await _read_body(receive)
-            data = json.loads(body)
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict) or "prompt" not in data:
+                    raise ValueError("request body must be a JSON object with a 'prompt' field")
+            except (ValueError, json.JSONDecodeError) as exc:
+                # #7 — Malformed JSON used to bubble up as an uncaught
+                # ``json.JSONDecodeError`` and surface as a 500. Treat it (and
+                # missing required fields) as a 400 with a brief diagnostic.
+                await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                return
+            sid = data.get("session_id")
+            if sid is not None:
+                try:
+                    validate_session_id(sid)
+                except ValueError as exc:
+                    await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                    return
             result = await transport.handle_chat(
                 prompt=data["prompt"],
-                session_id=data.get("session_id"),
+                session_id=sid,
                 safety_override=data.get("safety"),
                 provider_override=data.get("provider"),
             )
@@ -352,14 +376,27 @@ def create_asgi_app(
 
         elif method == "POST" and path == "/chat/stream":
             body = await _read_body(receive)
-            data = json.loads(body)
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict) or "prompt" not in data:
+                    raise ValueError("request body must be a JSON object with a 'prompt' field")
+            except (ValueError, json.JSONDecodeError) as exc:
+                await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                return
+            sid = data.get("session_id")
+            if sid is not None:
+                try:
+                    validate_session_id(sid)
+                except ValueError as exc:
+                    await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                    return
             iterator = await transport.handle_stream(
                 prompt=data["prompt"],
-                session_id=data.get("session_id"),
+                session_id=sid,
                 safety_override=data.get("safety"),
                 provider_override=data.get("provider"),
             )
-            await _sse_response(send, iterator)
+            await _sse_response(send, receive, iterator)
 
         else:
             await _json_response(send, {"error": "not found"}, status=404)
@@ -411,7 +448,11 @@ async def _json_response(send: Any, data: dict, status: int = 200) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-async def _sse_response(send: Any, iterator: AsyncEventIterator) -> None:
+async def _sse_response(send: Any, receive: Any, iterator: AsyncEventIterator) -> None:
+    # #7 — Monitor for ASGI ``http.disconnect`` in parallel with the SSE
+    # write loop. If the client closes the connection we must cancel the
+    # background run task; otherwise the agent keeps burning tokens until
+    # natural completion even though no one is listening.
     await send(
         {
             "type": "http.response.start",
@@ -424,14 +465,67 @@ async def _sse_response(send: Any, iterator: AsyncEventIterator) -> None:
             ],
         }
     )
+
+    disconnect_event = asyncio.Event()
+
+    async def _watch_disconnect() -> None:
+        try:
+            while not disconnect_event.is_set():
+                msg = await receive()
+                if msg.get("type") == "http.disconnect":
+                    disconnect_event.set()
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Defensive: any ASGI receive error is treated as a disconnect
+            # so the agent doesn't keep running forever on a wedged client.
+            disconnect_event.set()
+
+    watcher = asyncio.create_task(_watch_disconnect())
     try:
-        async for chunk in iterator:
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": chunk.encode(),
-                    "more_body": True,
-                }
+        iter_obj = iterator.__aiter__()
+        while True:
+            next_task = asyncio.ensure_future(iter_obj.__anext__())
+            disconnect_task = asyncio.ensure_future(disconnect_event.wait())
+            done, _pending = await asyncio.wait(
+                {next_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if disconnect_task in done and next_task not in done:
+                next_task.cancel()
+                try:
+                    await next_task
+                except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                    pass
+                logger.info("SSE client disconnected; cancelling agent run")
+                await iterator.cancel()
+                break
+            # next_task completed first — send the chunk (or stop on end).
+            disconnect_task.cancel()
+            try:
+                chunk = next_task.result()
+            except StopAsyncIteration:
+                break
+            try:
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": chunk.encode(),
+                        "more_body": True,
+                    }
+                )
+            except Exception:
+                # Send failure usually means the peer is gone — cancel and exit.
+                await iterator.cancel()
+                break
     finally:
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+        watcher.cancel()
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except Exception:
+            pass
