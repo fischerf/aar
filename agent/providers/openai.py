@@ -10,6 +10,7 @@ import httpx
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+from agent.providers.errors import translate_provider_errors
 
 
 class OpenAIProvider(Provider):
@@ -72,6 +73,7 @@ class OpenAIProvider(Provider):
             or model.startswith("o3")
         )
 
+    @translate_provider_errors
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -165,6 +167,7 @@ class OpenAIProvider(Provider):
             meta=meta,
         )
 
+    @translate_provider_errors
     async def stream(
         self,
         messages: list[dict[str, Any]],
@@ -203,6 +206,7 @@ class OpenAIProvider(Provider):
         # Accumulators for tool call fragments
         tool_acc: dict[int, dict[str, str]] = {}
         stream_usage: dict[str, int] = {}
+        emitted_tools = False
 
         from agent.providers._thinking import StreamThinkingRouter
 
@@ -246,8 +250,11 @@ class OpenAIProvider(Provider):
                     if tc_delta.function and tc_delta.function.arguments:
                         tool_acc[idx]["arguments"] += tc_delta.function.arguments
 
-            # Finish
-            if choice.finish_reason:
+            # Finish — emit accumulated tool calls EXACTLY ONCE. Some OpenAI-
+            # compatible backends (e.g. Azure) send an extra usage-only chunk
+            # after finish_reason that would otherwise re-trigger emission. (#6)
+            if choice.finish_reason and not emitted_tools:
+                emitted_tools = True
                 if router:
                     clean, leftover = router.flush()
                     if clean or leftover:
@@ -264,6 +271,27 @@ class OpenAIProvider(Provider):
                             "arguments": parsed_args,
                         }
                     )
+
+        # If the stream ended without a finish_reason (connection drop, server
+        # cut), flush whatever we accumulated so the consumer doesn't lose
+        # tool calls or buffered router text. (#6)
+        if not emitted_tools:
+            if router:
+                clean, leftover = router.flush()
+                if clean or leftover:
+                    yield StreamDelta(text=clean, reasoning_delta=leftover)
+            for acc in tool_acc.values():
+                try:
+                    parsed_args = json.loads(acc["arguments"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    parsed_args = {"raw": acc["arguments"]}
+                yield StreamDelta(
+                    tool_call_delta={
+                        "tool_call_id": acc["id"],
+                        "tool_name": acc["name"],
+                        "arguments": parsed_args,
+                    }
+                )
 
         # Build meta from captured usage (arrives after finish_reason)
         stream_meta: ProviderMeta | None = None

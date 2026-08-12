@@ -24,6 +24,20 @@ from agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+# S7 — Resolve jsonschema once at import time and surface a loud one-shot
+# warning if it isn't installed. Previously ``_validate_arguments`` swallowed
+# the ImportError with ``except Exception: pass`` so every tool call ran
+# unvalidated and the operator never knew.
+try:
+    import jsonschema as _jsonschema  # type: ignore[import-untyped]
+
+    _JSONSCHEMA_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised via mock in tests
+    _jsonschema = None  # type: ignore[assignment]
+    _JSONSCHEMA_AVAILABLE = False
+
+_JSONSCHEMA_WARNED = False
+
 
 class ToolExecutor:
     """Executes tool calls with policy enforcement, permission gates, and sandboxing."""
@@ -182,15 +196,43 @@ def _error_result(
 
 
 def _validate_arguments(arguments: dict, schema: dict) -> str | None:
-    """Validate tool arguments against the JSON schema. Return error message or None."""
-    try:
-        import jsonschema
+    """Validate tool arguments against the JSON schema. Return error message or None.
 
-        jsonschema.validate(instance=arguments, schema=schema)
-    except jsonschema.ValidationError as e:
+    S7 — If ``jsonschema`` isn't installed we log once and skip validation;
+    we no longer swallow the ImportError silently. When the schema declares
+    ``type: object`` without an explicit ``additionalProperties``, we inject
+    ``additionalProperties: false`` on a shallow copy so extra kwargs from a
+    misbehaving provider don't reach the handler. The original schema dict
+    is never mutated — it's shared with the provider's tool listing and the
+    registry keeps references to it.
+    """
+    global _JSONSCHEMA_WARNED
+    if not _JSONSCHEMA_AVAILABLE:
+        if not _JSONSCHEMA_WARNED:
+            _JSONSCHEMA_WARNED = True
+            logger.warning(
+                "jsonschema not installed; tool argument validation is DISABLED. "
+                "Install with: pip install jsonschema"
+            )
+        return None
+
+    # S7 — Tighten the schema on a copy to forbid undeclared properties when
+    # the tool author didn't pick a stance. Mutating ``schema`` directly would
+    # surface to the provider's tool listing and to any other caller holding
+    # a reference to the same dict.
+    effective_schema = schema
+    if schema.get("type") == "object" and "additionalProperties" not in schema:
+        effective_schema = dict(schema)
+        effective_schema["additionalProperties"] = False
+
+    try:
+        _jsonschema.validate(instance=arguments, schema=effective_schema)  # type: ignore[union-attr]
+    except _jsonschema.ValidationError as e:  # type: ignore[union-attr]
         return e.message
-    except Exception:
-        pass  # schema validation is best-effort; don't block execution
+    except _jsonschema.SchemaError as e:  # type: ignore[union-attr]
+        # Author error in the tool schema itself — log and let the call through
+        # so a broken schema doesn't completely block the tool.
+        logger.warning("Invalid tool schema (skipping validation): %s", e)
     return None
 
 

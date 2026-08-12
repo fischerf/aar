@@ -12,7 +12,6 @@ from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry, _infer_schema
 from agent.tools.schema import SideEffect, ToolSpec
 
-
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -570,7 +569,12 @@ class TestSandboxWiring:
 
     @pytest.mark.asyncio
     async def test_no_sandbox_uses_direct_subprocess(self):
-        """With sandbox=None the bash tool executes directly (fallback path)."""
+        """With sandbox=None the bash tool executes directly (fallback path).
+
+        The timeout is intentionally generous: on Windows this path spawns
+        a fresh WSL session, whose cold-start can exceed 10s when the rest
+        of the suite is contending for CPU.
+        """
         from agent.tools.builtin.shell import register_shell_tools
 
         reg = ToolRegistry()
@@ -578,5 +582,202 @@ class TestSandboxWiring:
 
         spec = reg.get("bash")
         assert spec is not None
-        output = await spec.handler(command="echo direct_ok", timeout=10)
-        assert "direct_ok" in output
+        output = await spec.handler(command="echo direct_ok", timeout=60)
+        assert "direct_ok" in output, f"unexpected output: {output!r}"
+
+
+# ---------------------------------------------------------------------------
+# S7 — schema validation hardening
+# ---------------------------------------------------------------------------
+
+
+class TestS7SchemaValidation:
+    """S7: jsonschema-backed validation is no longer silently disabled, and
+    object schemas without an explicit ``additionalProperties`` setting get
+    locked down to reject undeclared kwargs.
+    """
+
+    def _make_executor(self, spec: ToolSpec) -> ToolExecutor:
+        reg = ToolRegistry()
+        reg.add(spec)
+        return ToolExecutor(reg, ToolConfig(), SafetyConfig())
+
+    @pytest.mark.asyncio
+    async def test_undeclared_extra_kwarg_is_rejected(self):
+        """Pre-S7 the executor accepted any extra kwarg and passed it through;
+        Python then raised ``TypeError`` from the handler. Now we reject it
+        at validation time as ``invalid_arguments``.
+        """
+        captured: dict = {}
+
+        async def handler(name: str) -> str:
+            captured["called"] = True
+            return name
+
+        spec = ToolSpec(
+            name="strict",
+            description="declares only `name`",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                # NOTE: no additionalProperties — S7 must inject false.
+            },
+            handler=handler,
+        )
+        executor = self._make_executor(spec)
+
+        tc = ToolCall(
+            tool_name="strict",
+            tool_call_id="tc_1",
+            arguments={"name": "ok", "bonus": "sneaky"},
+        )
+        results = await executor.execute([tc])
+        assert results[0].is_error
+        assert "invalid_arguments" in results[0].output
+        assert "called" not in captured, "handler must NOT run on validation failure"
+
+    @pytest.mark.asyncio
+    async def test_explicit_additional_properties_true_still_accepts_extras(self):
+        """If the tool author *intentionally* allows extras, S7 respects it."""
+
+        async def handler(name: str, **kwargs) -> str:
+            return f"{name}+{sorted(kwargs)}"
+
+        spec = ToolSpec(
+            name="lenient",
+            description="opts in to extras",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": True,
+            },
+            handler=handler,
+        )
+        executor = self._make_executor(spec)
+
+        tc = ToolCall(
+            tool_name="lenient",
+            tool_call_id="tc_1",
+            arguments={"name": "ok", "bonus": "allowed"},
+        )
+        results = await executor.execute([tc])
+        assert not results[0].is_error, results[0].output
+        assert "ok" in results[0].output
+        assert "bonus" in results[0].output
+
+    @pytest.mark.asyncio
+    async def test_explicit_additional_properties_false_already_works(self):
+        """The pre-existing ``additionalProperties: false`` path (e.g. the
+        ``companion_status`` tool) keeps rejecting extras. S7 must not flip it.
+        """
+
+        async def handler() -> str:
+            return "ok"
+
+        spec = ToolSpec(
+            name="nullary",
+            description="no args",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=handler,
+        )
+        executor = self._make_executor(spec)
+
+        tc = ToolCall(
+            tool_name="nullary",
+            tool_call_id="tc_1",
+            arguments={"surprise": 42},
+        )
+        results = await executor.execute([tc])
+        assert results[0].is_error
+        assert "invalid_arguments" in results[0].output
+
+    @pytest.mark.asyncio
+    async def test_schema_dict_is_not_mutated(self):
+        """The ``additionalProperties: false`` injection MUST happen on a copy.
+        The spec dict is shared with the provider tool listing; mutating it
+        would silently change what the LLM sees.
+        """
+
+        async def handler(name: str) -> str:
+            return name
+
+        original_schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }
+        spec = ToolSpec(
+            name="strict",
+            description="x",
+            input_schema=original_schema,
+            handler=handler,
+        )
+        executor = self._make_executor(spec)
+
+        tc = ToolCall(tool_name="strict", tool_call_id="tc_1", arguments={"name": "ok"})
+        await executor.execute([tc])
+
+        # The original schema dict must remain untouched after validation.
+        assert "additionalProperties" not in original_schema, (
+            "S7 must clone the schema before tightening; mutating the shared "
+            "dict would leak into the provider's tool listing."
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_jsonschema_logs_once_and_skips(self, caplog):
+        """When jsonschema is unavailable we must emit a single loud warning
+        and skip validation — we no longer swallow the ImportError silently.
+        """
+        import logging
+
+        from agent.tools import execution as ex
+
+        async def handler(name: str, **kwargs) -> str:
+            return f"{name}+{sorted(kwargs)}"
+
+        spec = ToolSpec(
+            name="strict",
+            description="x",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            handler=handler,
+        )
+        executor = self._make_executor(spec)
+
+        orig_available = ex._JSONSCHEMA_AVAILABLE
+        orig_warned = ex._JSONSCHEMA_WARNED
+        ex._JSONSCHEMA_AVAILABLE = False
+        ex._JSONSCHEMA_WARNED = False
+        try:
+            with caplog.at_level(logging.WARNING, logger=ex.logger.name):
+                tc1 = ToolCall(
+                    tool_name="strict",
+                    tool_call_id="tc_1",
+                    arguments={"name": "ok", "extra": "slipped through"},
+                )
+                tc2 = ToolCall(
+                    tool_name="strict",
+                    tool_call_id="tc_2",
+                    arguments={"name": "again", "another": "also slipped"},
+                )
+                results = await executor.execute([tc1])
+                results += await executor.execute([tc2])
+
+            assert not results[0].is_error, "validation must be skipped when jsonschema missing"
+            assert not results[1].is_error
+            warnings = [
+                rec for rec in caplog.records if "jsonschema not installed" in rec.getMessage()
+            ]
+            assert len(warnings) == 1, f"expected one warning, got {len(warnings)}"
+        finally:
+            ex._JSONSCHEMA_AVAILABLE = orig_available
+            ex._JSONSCHEMA_WARNED = orig_warned

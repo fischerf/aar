@@ -1,5 +1,7 @@
 # 🏁 Agent Benchmark Comparison — testplan_v4 Pipeline
 
+(The Agent Benchmark Comparison is evaluated by Opus 4.7)
+
 ## The Task
 
 All 4 agents executed the same `plan_v4.md` (testplan_v4.zip) using Sonnet 4.6 with adaptive thinking: fix a buggy `parser.py` (mutable default arg + loose regex), write tests, implement `main.py`, `verify.py`, and `run.sh`, then run the pipeline to get `V4_ULTIMATE_PIPELINE_SUCCESS`.
@@ -8,24 +10,25 @@ All 4 agents executed the same `plan_v4.md` (testplan_v4.zip) using Sonnet 4.6 w
 
 ## Side-by-Side Comparison
 
-| Dimension | 1. ZEDAgent | 2. VSCodeAgent | 3. ClaudeCode (Copilot) | 4. AAR (6th run) |
+| Dimension | 1. ZEDAgent | 2. VSCodeAgent | 3. ClaudeCode | 4. AAR |
 |---|---|---|---|---|
-| **Context used** | 15k / 200k | 19.1k / 200k | 38.2k / 200k | 23.9k total (19.4k in + 4.4k out) |
+| **Context / tokens used** | 15k / 200k | 19.1k / 200k | 38.2k / 200k | **37.4k total** (35.5k in + 1.9k out, ~$0.135) |
 | **Iterations to pass** | **1** (first try) | **2** (regex fix needed) | **1** (first try) | **1** (first try) |
-| **Tool calls** | ~10 (5 reads, 5 writes, 2 terminal) | ~10+ (reads, writes, 2 terminal runs) | ~10 (reads, writes, 2 terminal runs) | **11** (5 reads, 5 writes, 1 bash) |
-| **Test count** | **9** | 7 | **4** | 7 |
+| **LLM steps** | not reported | not reported | not reported | **5** |
+| **Tool calls** | ~10 (5 reads, 5 writes, 2 terminal) | ~10+ (reads, writes, 2 terminal runs) | ~10 (reads, writes, 2 terminal runs) | **9** (2 reads, 1 list_directory, 5 writes, 1 bash) |
+| **Test count** | **9** | 7 | 4 | **8** |
 | **Outcome** | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS |
 
 ---
 
 ## Detailed Analysis
 
-### 1. 🥇 ZEDAgent (Zed Built-in) — **Rank #1**
+### 1. 🥇 ZEDAgent (Zed Built-in) — **Rank #1 (tied)**
 
 **Strengths:**
 - **Leanest context usage** (15k tokens) — extremely efficient
 - **First-try success** — no retry loop needed
-- **Best test coverage** (9 tests) with granular edge cases: lowercase, too many letters, too few digits, too many digits, empty, accumulation mode
+- **Highest test count** (9 tests) with granular edge cases: lowercase, too many letters, too few digits, too many digits, empty, accumulation mode
 - Well-structured code: `def main()` with `if __name__` guard, `EXPECTED` constant, docstrings on every test
 - Clean ruff-style formatting (double quotes, consistent spacing)
 
@@ -34,19 +37,23 @@ All 4 agents executed the same `plan_v4.md` (testplan_v4.zip) using Sonnet 4.6 w
 
 ---
 
-### 2. 🥈 AAR 6th Run — **Rank #2**
+### 2. 🥇 AAR — **Rank #1 (tied)**
 
 **Strengths:**
-- **First-try success**, clean execution
-- **Best observability** — the only agent with a full session report (token counts, cost breakdown, tool call inventory, step count)
-- Good test coverage (7 tests) with descriptive failure messages
-- Proper code structure (`def main()`, `EXPECTED` constant, preserved docstring)
-- **Most efficient tool usage** — exactly 11 tool calls, only **1 terminal invocation** (the others needed 2)
-- Detailed `<thinking>` blocks show the agent reasoned deeply about regex word boundaries before writing code
+- **First-try success** in only **5 LLM steps**
+- **Fewest tool calls** of all four agents (9) thanks to aggressive batching — step 1 batches `read_file` + `list_directory`, step 3 writes all 5 source files in one turn, step 4 runs the pipeline. Only **1 terminal invocation** (the others needed 2).
+- **Cleanest regex of the four:** `TKN-[A-Z]{3}-\d{4}(?!\d)`. The negative lookahead handles `TKN-LONG-99999` and `TKN-ABC-12345` without depending on word boundaries — the exact case that tripped VSCodeAgent.
+- 8 tests, all using `assertEqual` with descriptive failure messages. Covers every category ZEDAgent does **except** explicit accumulation mode:
+  - `test_mutable_default_argument_bug` — explicit two-call test
+  - Individual edge-case tests for lowercase, too-many-letters, too-few-digits, too-many-digits
+  - mixed valid/invalid round-trip, empty, valid-only
+- Proper code structure: `def main()` + `__name__` guard, `EXPECTED` constant, docstring preserved on `parser.py`
+- **Best observability** — only run with a full session report (token counts, cost, per-tool breakdown, step count, reasoning blocks). Two adaptive-thinking blocks recorded.
 
 **Weaknesses:**
-- Slightly fewer tests than ZEDAgent (7 vs 9 — missing individual too-many-letters / too-few-digits tests, though covered by the combined `test_invalid_tokens_excluded`)
-- Higher token usage than ZEDAgent (23.9k vs 15k), partly because of the richer thinking/reasoning
+- Slightly fewer tests than ZEDAgent (8 vs 9 — missing the explicit "accumulation mode" test where a pre-existing list is passed in)
+- Total billed tokens (~37.4k) is on par with ClaudeCode, ~2.5× ZEDAgent. The richer thinking and full system prompt are the main contributors.
+- `run.sh` uses `#!/bin/bash` instead of the more portable `#!/usr/bin/env bash`
 
 ---
 
@@ -66,7 +73,7 @@ All 4 agents executed the same `plan_v4.md` (testplan_v4.zip) using Sonnet 4.6 w
 
 ---
 
-### 4. 🏅 ClaudeCode via Copilot VS Code — **Rank #4**
+### 4. 🏅 ClaudeCode via VS Code — **Rank #4**
 
 **Strengths:**
 - First-try success
@@ -88,14 +95,17 @@ All 4 agents executed the same `plan_v4.md` (testplan_v4.zip) using Sonnet 4.6 w
 
 | Rank | Agent | Score | Rationale |
 |---|---|---|---|
-| **🥇 1st** | **ZEDAgent** | ⭐⭐⭐⭐⭐ | Leanest context, first-try, most tests (9), cleanest code quality |
-| **🥈 2nd** | **AAR (6th run)** | ⭐⭐⭐⭐½ | First-try, best observability, fewest tool calls, strong reasoning — slightly more tokens and fewer tests than ZEDAgent |
-| **🥉 3rd** | **VSCodeAgent** | ⭐⭐⭐½ | Decent tests but needed a retry; less structured code |
-| **4th** | **ClaudeCode (Copilot)** | ⭐⭐⭐ | Completed the task but used 2.5× the tokens for the weakest output (4 tests, no docstrings, no code structure) |
+| **🥇 1 (tied)** | **ZEDAgent** | ⭐⭐⭐⭐⭐ | Leanest context, first-try, most tests (9), cleanest code quality |
+| **🥇 1 (tied)** | **AAR** | ⭐⭐⭐⭐⭐ | First-try in 5 steps, fewest tool calls (9), cleanest regex, best observability, near-parity on test count (8). Loses to ZED only on raw token economy. |
+| **🥉 3** | **VSCodeAgent** | ⭐⭐⭐½ | Decent tests but needed a retry; less structured code |
+| **4** | **ClaudeCode** | ⭐⭐⭐ | Completed the task but used the most tokens for the weakest output (4 tests, no docstrings, no code structure) |
 
 ---
 
 ## Key Takeaway
 
-All four agents successfully completed the pipeline — the task itself isn't hard enough to cause failures. The differentiators are **efficiency** (context/tokens consumed), **code quality** (structure, documentation, test coverage), and **reliability** (first-try vs retry). ZEDAgent and AAR stand out for doing it right the first time with well-crafted outputs while using the least resources. The irony of ClaudeCode is that it used the most tokens to produce the least thorough result.
+All four agents successfully completed the pipeline — the task itself isn't hard enough to cause failures. The differentiators are **efficiency** (tool calls, steps, tokens), **code quality** (structure, documentation, test coverage), and **reliability** (first-try vs retry).
 
+ZEDAgent and AAR are essentially tied at the top: ZED edges ahead on raw token economy and one extra test, while AAR edges ahead on tool-call efficiency, regex correctness, and observability. Both produce well-structured artefacts on the first try.
+
+The irony of ClaudeCode is that it used the most tokens to produce the least thorough result.

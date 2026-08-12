@@ -248,6 +248,48 @@ class TestSwitchProvider:
         # Session is independent — not cleared by switch
         assert len(session.events) >= 1
 
+    @patch("agent.core.agent._create_provider", side_effect=_mock_provider)
+    def test_switch_updates_config_provider(self, mock_create):
+        """#1 — switch_provider must keep config.provider in sync.
+
+        Otherwise resolve_provider() / effective_token_budget() / cost calc /
+        max_tokens_cap all keep reading the old provider after a /model switch.
+        """
+        from agent.core.agent import Agent
+
+        cfg = AgentConfig(
+            provider=ProviderConfig(name="anthropic", model="claude-sonnet-4-6"),
+            providers={
+                "gpt4": ProviderConfig(name="openai", model="gpt-4o", token_budget=42),
+            },
+        )
+        agent = Agent(config=cfg)
+        assert agent.config.resolve_provider().name == "anthropic"
+
+        agent.switch_provider("gpt4")
+
+        resolved = agent.config.resolve_provider()
+        assert resolved.name == "openai"
+        assert resolved.model == "gpt-4o"
+        # effective_token_budget pulls from the resolved provider — must reflect
+        # the override on the new provider, not the old one.
+        assert agent.config.effective_token_budget() == 42
+
+    @patch("agent.core.agent._create_provider", side_effect=_mock_provider)
+    def test_switch_by_slash_format_updates_config(self, mock_create):
+        """#1 — ad-hoc provider/model switches also propagate into config."""
+        from agent.core.agent import Agent
+
+        agent = Agent(
+            config=AgentConfig(
+                provider=ProviderConfig(name="anthropic", model="claude-sonnet-4-6")
+            ),
+        )
+        agent.switch_provider("ollama/llama3")
+        resolved = agent.config.resolve_provider()
+        assert resolved.name == "ollama"
+        assert resolved.model == "llama3"
+
 
 # ---------------------------------------------------------------------------
 # Config loading (JSON round-trip)

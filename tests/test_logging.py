@@ -72,6 +72,31 @@ class TestConfigureLogging:
         )
         assert count_after == count_before
 
+    def test_file_handler_idempotent(self, tmp_path: Path):
+        """#10 — repeated configure_logging() with the same log_file must not
+        attach multiple FileHandlers (otherwise log lines duplicate / fd leaks)."""
+        log_file = tmp_path / "aar.log"
+        configure_logging("DEBUG", log_file=log_file)
+        configure_logging("DEBUG", log_file=log_file)
+        configure_logging("DEBUG", log_file=log_file)
+
+        root = logging.getLogger()
+        target = str(log_file.resolve())
+        matching = [
+            h
+            for h in root.handlers
+            if isinstance(h, logging.FileHandler) and h.baseFilename == target
+        ]
+        assert len(matching) == 1
+
+        # And a single log call should produce exactly one line in the file.
+        test_logger = logging.getLogger("test.file_handler_idempotent")
+        test_logger.info("unique-marker-xyz")
+        for h in matching:
+            h.flush()
+        text = log_file.read_text(encoding="utf-8")
+        assert text.count("unique-marker-xyz") == 1
+
     def test_silences_noisy_libs(self):
         configure_logging("WARNING")
         for name in ("httpx", "httpcore", "asyncio"):

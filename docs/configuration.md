@@ -11,7 +11,7 @@ from agent.core.config import SandboxConfig, TUIConfig
 config = AgentConfig(
     provider=ProviderConfig(
         name="anthropic",                          # "anthropic" | "openai" | "ollama" | "gemini" | "generic"
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         api_key="...",                             # or set via env var
         max_tokens=4096,
         temperature=0.0,
@@ -27,7 +27,8 @@ config = AgentConfig(
     },
     tools=ToolConfig(
         enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash", "grep", "find_files"],
-        command_timeout=30,                        # per-tool execution limit in seconds; 0 = no limit
+        bash_default_timeout=120,                  # default seconds when the model omits `timeout` on a bash call
+        command_timeout=300,                       # hard outer per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
     ),
     safety=SafetyConfig(
@@ -46,16 +47,30 @@ config = AgentConfig(
     ),
     guardrails=GuardrailsConfig(
         max_tokens_recoveries=2,                   # retry after output truncation (0 = disabled)
-        max_repeated_tool_steps=3,                  # stop after N identical tool-call patterns
-        reserve_tokens=512,                         # budget proximity threshold
-        reserve_cost_fraction=0.1,                  # cost proximity fraction
+        max_repeated_tool_steps=3,                 # stop after N identical tool-call patterns
+        max_premature_end_recoveries=2,            # re-prompt the model when it stops with empty content while recent tool results contain errors
+        reserve_tokens=512,                        # budget proximity threshold
+        reserve_cost_fraction=0.1,                 # cost proximity fraction
+        bash_failure_threshold=2,                  # consecutive bash failures before nudging the model toward `acp_terminal` (ACP only)
+        read_only_loop_threshold=8,                # consecutive read-only tool calls before nudging the model to act
     ),
+    compaction=CompactionConfig(                   # opt-in LLM-based context compaction
+        enabled=False,                             # True triggers an extra LLM summarisation call when context fills up
+        reserve_tokens=16_384,                     # tokens reserved for the next response
+        keep_recent_tokens=20_000,                 # tokens of recent context to preserve verbatim
+        truncate_old_results=True,                 # truncate large tool outputs in older messages before summarisation
+        truncate_keep_recent=6,                    # number of recent tool results never truncated
+        truncate_max_chars=500,                    # cap on truncated output length
+    ),
+    skills_dirs=[],                                # extra directories searched for skill bundles
+    skills_enabled=True,                           # set False to disable skill auto-discovery (see docs/development.md)
     max_steps=50,
-    max_retries=3,                                 # provider request retry attempts
+    max_retries=3,                                 # provider request retry attempts for transient errors
+    max_rate_limit_retries=5,                      # separate retry budget for rate-limit errors (longer delays)
     timeout=0.0,                                   # wall-clock limit in seconds for the whole run; 0.0 = no limit
     streaming=False,                               # use token-level streaming when supported
     context_window=0,                              # model context limit in tokens; 0 = no management
-    context_strategy="sliding_window",             # "sliding_window" | "compact" | "none"
+    context_strategy="sliding_window",             # "sliding_window" | "compact" | "summarize" | "none"
     system_prompt="You are a helpful assistant.",
     tui=TUIConfig(
         theme="default",                               # "default" | "contrast" | "decker" | "sleek" or custom name
@@ -106,7 +121,8 @@ Aar has several independent timeouts that operate at different layers. They inte
 |---------|-------|----------|---------|-----------------|
 | `provider.extra.read_timeout` | HTTP read | Ollama | `null` (unlimited) | Max seconds to wait for the next byte while streaming; `null` = no cap |
 | `provider.extra.timeout` | HTTP request | Anthropic, OpenAI, Generic | SDK default / `60` s | Whole-request timeout passed to the provider SDK or httpx client |
-| `tools.command_timeout` | Tool executor | all | `30` s | Max wall-clock seconds a single shell/bash tool call may run; `0` = unlimited |
+| `tools.bash_default_timeout` | Tool executor | bash | `120` s | Default seconds used when the model invokes `bash` without an explicit `timeout` argument. `command_timeout` is the hard outer cap regardless. |
+| `tools.command_timeout` | Tool executor | all | `300` s | Max wall-clock seconds a single shell/bash tool call may run; `0` = unlimited |
 | `safety.acp_approval_timeout` | ACP transport | all | `0.0` (unlimited) | Seconds the ACP client has to respond to a permission approval request |
 | `timeout` | Agent loop | all | `0.0` (unlimited) | Total wall-clock limit for a whole `Agent.run()` call |
 
@@ -408,10 +424,16 @@ config = AgentConfig(
 |-------|---------|---------|
 | `max_tokens_recoveries` | `2` | How many times the loop retries after output truncation (`max_tokens`). Set to `0` to disable. |
 | `max_repeated_tool_steps` | `3` | Stop the loop when the same tool-call pattern repeats this many times in a row. |
+| `max_premature_end_recoveries` | `2` | How many times the loop re-prompts when the model emits an empty `end_turn` while recent tool outputs contain errors. Set to `0` to disable. |
 | `reserve_tokens` | `512` | Token budget proximity threshold — the loop reports "near budget" below this margin. |
 | `reserve_cost_fraction` | `0.1` | Cost proximity — fraction of `cost_limit` that triggers "near budget". |
+| `bash_failure_threshold` | `2` | Consecutive `bash` failures (e.g. `command not found`, `ImportError`) before injecting a one-shot hint suggesting `acp_terminal`. Only fires when `acp_terminal` is registered (ACP transport). |
+| `read_only_loop_threshold` | `8` | Consecutive read-only tool calls (e.g. `read_file`, `grep`, `list_directory`) before nudging the model to plan and act. The nudge fires at most once per session. |
+
+See [`docs/agent_loop.md`](agent_loop.md) for the behavioural details of each guardrail.
 
 The guardrails are deliberately minimal. Agent behavior (planning, persistence, completion quality) is guided entirely by the system prompt — see the `rules.md` file loaded via the configurable system prompt layers.
+
 
 ## Configurable system prompt
 

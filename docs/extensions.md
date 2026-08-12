@@ -43,6 +43,8 @@ async def register(api: ExtensionAPI) -> None:
         return None
 
     # Register a custom tool
+    # NOTE: tool handlers receive only the schema-declared arguments;
+    # capture session/logger/etc. via the enclosing ``register`` closure.
     @api.tool(
         name="greet",
         description="Greet someone",
@@ -52,7 +54,7 @@ async def register(api: ExtensionAPI) -> None:
             "required": ["name"],
         },
     )
-    async def greet(name: str, ctx: ExtensionContext) -> str:
+    async def greet(name: str) -> str:
         return f"Hello, {name}!"
 
     # Register a slash-command

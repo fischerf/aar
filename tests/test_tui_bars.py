@@ -286,3 +286,85 @@ class TestTUIRendererContextState:
         r = TUIRenderer(console=Console(file=buf, width=120))
         r.render_event(ContextWindowEvent(ctx_tokens=3000, ctx_window=8192, msgs_dropped=0))
         assert buf.getvalue() == ""
+
+
+# ---------------------------------------------------------------------------
+# #8 — ``_companion_git_poll`` must sleep exactly once per probe iteration
+# ---------------------------------------------------------------------------
+
+
+class TestCompanionGitPollCadence:
+    """Regression test for #8 (review-2026-06-plan).
+
+    The probe loop previously contained two ``await asyncio.sleep(interval)``
+    calls per iteration, halving the configured cadence. The fixed loop
+    sleeps once at the top of each iteration, runs the probe, and loops.
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_sleep_per_iteration(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from agent.transports.tui_fixed import AarFixedApp
+
+        interval = 7.5
+        sleep_calls: list[float] = []
+        probe_calls: list[int] = []
+        iterations_target = 3
+
+        async def fake_sleep(delay: float, *args, **kwargs) -> None:
+            sleep_calls.append(delay)
+            # Yield once so the surrounding coroutine can interleave with
+            # any other awaits cleanly, but do not actually sleep.
+            await asyncio.sleep(0)
+
+        async def fake_get_git_health():
+            probe_calls.append(len(probe_calls) + 1)
+            if len(probe_calls) >= iterations_target:
+                # Break out of the otherwise infinite loop by raising
+                # CancelledError, which the ``while True`` does not catch.
+                raise asyncio.CancelledError()
+            return SimpleNamespace(dirty_files=0, untracked_files=0)
+
+        companion_mock = SimpleNamespace(apply_git_health=lambda h: None)
+
+        fake_self = SimpleNamespace(
+            _theme=SimpleNamespace(
+                fixed_layout=SimpleNamespace(companion=SimpleNamespace(git_poll_interval=interval))
+            ),
+            query_one=lambda _cls: companion_mock,
+        )
+
+        coro = AarFixedApp._companion_git_poll(fake_self)
+
+        # Patch ``asyncio.sleep`` only for the duration of this coroutine.
+        # The probe function imports asyncio as ``_asyncio`` inside the
+        # function body, so patching the global ``asyncio.sleep`` catches
+        # both the loop's sleep and the no-op ``asyncio.sleep(0)`` inside
+        # ``fake_sleep`` (which is fine — we filter on the recorded delay).
+        real_sleep = asyncio.sleep
+
+        async def selective_sleep(delay, *a, **kw):
+            if delay == 0:
+                # Preserve the cooperative yield used by ``fake_sleep``.
+                return await real_sleep(0)
+            return await fake_sleep(delay, *a, **kw)
+
+        with (
+            patch("asyncio.sleep", selective_sleep),
+            patch(
+                "agent.transports.tui_fixed.get_git_health",
+                AsyncMock(side_effect=fake_get_git_health),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await coro
+
+        # Exactly one sleep per probe iteration. With the old code (two
+        # ``sleep`` calls per loop body) this would be twice ``probe_calls``.
+        assert sleep_calls == [interval] * iterations_target, (
+            f"expected one sleep of {interval}s per iteration; "
+            f"got {sleep_calls!r} for {len(probe_calls)} probes"
+        )

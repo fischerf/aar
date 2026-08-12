@@ -24,7 +24,6 @@ from agent.core.config import ProviderConfig
 from agent.core.events import StopReason
 from agent.providers.base import ProviderCapabilities
 
-
 # ---------------------------------------------------------------------------
 # Base provider contract
 # ---------------------------------------------------------------------------
@@ -172,6 +171,7 @@ class TestOpenAINormalization:
     def test_read_timeout_null_sets_unlimited(self):
         """read_timeout=null should produce an httpx.Timeout with read=None (unlimited)."""
         import httpx
+
         from agent.providers.openai import OpenAIProvider
 
         config = ProviderConfig(
@@ -191,6 +191,7 @@ class TestOpenAINormalization:
     def test_read_timeout_value_sets_seconds(self):
         """read_timeout=120 should produce httpx.Timeout(read=120, connect=10)."""
         import httpx
+
         from agent.providers.openai import OpenAIProvider
 
         config = ProviderConfig(
@@ -577,6 +578,7 @@ class TestLiveAnthropic:
 
     def _provider(self):
         import os
+
         from agent.providers.anthropic import AnthropicProvider
 
         return AnthropicProvider(
@@ -635,6 +637,7 @@ class TestLiveOpenAI:
 
     def _provider(self):
         import os
+
         from agent.providers.openai import OpenAIProvider
 
         return OpenAIProvider(
@@ -677,6 +680,210 @@ class TestLiveOpenAI:
         assert result.meta is not None
         assert result.meta.provider == "openai"
         assert result.meta.model
+
+
+# ---------------------------------------------------------------------------
+# Provider streaming flush guarantees (#6)
+# ---------------------------------------------------------------------------
+
+
+class _AsyncLineIter:
+    """Async iterator over a fixed list of lines (mimics httpx aiter_lines)."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+        self._idx = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._idx >= len(self._lines):
+            raise StopAsyncIteration
+        line = self._lines[self._idx]
+        self._idx += 1
+        return line
+
+
+class _FakeStreamResp:
+    def __init__(self, lines, status_code: int = 200):
+        self.status_code = status_code
+        self._lines = lines
+        self.text = ""
+
+    async def aread(self):
+        return b""
+
+    def aiter_lines(self):
+        return _AsyncLineIter(self._lines)
+
+
+class _FakeStreamCM:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class TestOllamaStreamFlushOnTruncation:
+    """#6 — Ollama stream must flush tool calls even without a `done` frame.
+
+    Without the fix the loop fell out of the `async with` block without
+    emitting accumulated tool calls or a terminal `done=True` sentinel,
+    leaving the consumer stuck.
+    """
+
+    def _make_provider(self):
+        from agent.providers.ollama import OllamaProvider
+
+        return OllamaProvider(ProviderConfig(name="ollama", model="llama3"))
+
+    @pytest.mark.asyncio
+    async def test_flushes_tool_calls_when_no_done_frame(self):
+        import json as _json
+
+        provider = self._make_provider()
+
+        # Server emits text chunks + a tool_call chunk, then drops the
+        # connection without ever sending {"done": true}.
+        chunks = [
+            _json.dumps({"model": "llama3", "message": {"content": "thinking..."}}),
+            _json.dumps(
+                {
+                    "model": "llama3",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": {"path": "/tmp/x"},
+                                }
+                            }
+                        ],
+                    },
+                }
+            ),
+        ]
+        provider._client.stream = MagicMock(return_value=_FakeStreamCM(_FakeStreamResp(chunks)))
+
+        deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+
+        # Tool call must still surface despite no done frame
+        tool_deltas = [d.tool_call_delta for d in deltas if d.tool_call_delta]
+        assert len(tool_deltas) == 1
+        assert tool_deltas[0]["tool_name"] == "read_file"
+        # Exactly one terminal done sentinel
+        assert sum(1 for d in deltas if d.done) == 1
+        assert deltas[-1].done is True
+
+    @pytest.mark.asyncio
+    async def test_normal_done_frame_emits_once(self):
+        """Regression guard: a well-formed stream must still emit exactly one done."""
+        import json as _json
+
+        provider = self._make_provider()
+
+        chunks = [
+            _json.dumps({"model": "llama3", "message": {"content": "hello"}}),
+            _json.dumps(
+                {
+                    "model": "llama3",
+                    "message": {"content": ""},
+                    "done": True,
+                    "prompt_eval_count": 5,
+                    "eval_count": 2,
+                }
+            ),
+        ]
+        provider._client.stream = MagicMock(return_value=_FakeStreamCM(_FakeStreamResp(chunks)))
+
+        deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+        done_deltas = [d for d in deltas if d.done]
+        assert len(done_deltas) == 1
+        assert done_deltas[0].meta is not None
+        assert done_deltas[0].meta.usage["input_tokens"] == 5
+
+
+class TestOpenAIStreamEmitOnce:
+    """#6 — OpenAI stream must emit accumulated tool calls EXACTLY ONCE.
+
+    Some OpenAI-compatible backends (Azure, certain proxies) send an extra
+    usage-only chunk after `finish_reason` arrives. Without the emit-once
+    guard the loop would re-emit every tool call on that follow-up chunk.
+    """
+
+    def _make_provider(self):
+        from agent.providers.openai import OpenAIProvider
+
+        with patch("openai.AsyncOpenAI"):
+            return OpenAIProvider(ProviderConfig(name="openai", model="gpt-4o", api_key="k"))
+
+    @pytest.mark.asyncio
+    async def test_extra_usage_chunk_after_finish_does_not_reemit(self):
+        provider = self._make_provider()
+
+        # Build minimal SDK-shaped chunks. Using MagicMock with the dotted
+        # attribute access the provider expects.
+        def _chunk(text=None, tool_name=None, args=None, finish=None, usage=None):
+            choice = MagicMock()
+            choice.finish_reason = finish
+            delta = MagicMock()
+            delta.content = text
+            if tool_name is not None or args is not None:
+                tc = MagicMock()
+                tc.index = 0
+                tc.id = "tc_1"
+                tc.function.name = tool_name
+                tc.function.arguments = args
+                delta.tool_calls = [tc]
+            else:
+                delta.tool_calls = None
+            choice.delta = delta
+            chunk = MagicMock()
+            chunk.choices = [choice]
+            if usage is not None:
+                u = MagicMock()
+                u.prompt_tokens = usage[0]
+                u.completion_tokens = usage[1]
+                u.total_tokens = usage[0] + usage[1]
+                chunk.usage = u
+            else:
+                chunk.usage = None
+            return chunk
+
+        chunks = [
+            _chunk(tool_name="read_file", args='{"path":"/x"}'),
+            _chunk(finish="tool_calls"),
+            # Extra usage-only chunk AFTER finish_reason (Azure/proxy quirk).
+            # finish_reason set again here would re-trigger emission without
+            # the emitted_tools guard.
+            _chunk(finish="tool_calls", usage=(10, 3)),
+        ]
+
+        async def _aiter(self):
+            for c in chunks:
+                yield c
+
+        stream_resp = MagicMock()
+        stream_resp.__aiter__ = _aiter
+
+        provider._client.chat.completions.create = AsyncMock(return_value=stream_resp)
+
+        deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+
+        tool_deltas = [d.tool_call_delta for d in deltas if d.tool_call_delta]
+        assert len(tool_deltas) == 1, f"tool_call emitted {len(tool_deltas)} times, expected 1"
+        assert tool_deltas[0]["tool_name"] == "read_file"
+        # One terminal done with meta from the trailing usage chunk
+        done_deltas = [d for d in deltas if d.done]
+        assert len(done_deltas) == 1
+        assert done_deltas[0].meta is not None
+        assert done_deltas[0].meta.usage["input_tokens"] == 10
 
 
 # ---------------------------------------------------------------------------
@@ -1023,3 +1230,238 @@ class TestStreamThinkingRouter:
         router = StreamThinkingRouter()
         clean, reasoning = router.feed("")
         assert clean == "" and reasoning == ""
+
+
+class TestProviderErrorTaxonomy:
+    """#4 — ``agent.providers.errors`` taxonomy + ``translate_provider_errors``.
+
+    The runner now decides retry / messaging via ``isinstance`` against
+    typed errors raised by each adapter. The classifier in ``errors.py``
+    centralises the SDK-name table that used to be duplicated in
+    ``provider_runner.py``.
+    """
+
+    # ---- classifier -----------------------------------------------------
+
+    def test_classify_rate_limit_by_name(self):
+        from agent.providers.errors import RateLimited, classify_provider_exception
+
+        class FakeSdkRateLimitError(Exception):
+            pass
+
+        result = classify_provider_exception(FakeSdkRateLimitError("slow down"))
+        assert isinstance(result, RateLimited)
+        assert "slow down" in str(result)
+
+    def test_classify_auth_failure_by_name(self):
+        from agent.providers.errors import AuthFailure, classify_provider_exception
+
+        class FakePermissionDeniedError(Exception):
+            pass
+
+        result = classify_provider_exception(FakePermissionDeniedError("nope"))
+        assert isinstance(result, AuthFailure)
+
+    def test_classify_transient_by_name(self):
+        from agent.providers.errors import Transient, classify_provider_exception
+
+        class FakeReadTimeout(Exception):
+            pass
+
+        result = classify_provider_exception(FakeReadTimeout("too slow"))
+        assert isinstance(result, Transient)
+
+    def test_classify_invalid_request_by_name(self):
+        from agent.providers.errors import InvalidRequest, classify_provider_exception
+
+        class FakeBadRequestError(Exception):
+            pass
+
+        result = classify_provider_exception(FakeBadRequestError("bad"))
+        assert isinstance(result, InvalidRequest)
+
+    def test_classify_unknown_returns_none(self):
+        """Exceptions outside the known families must NOT be wrapped; the caller
+        re-raises the original so we don't hide novel error types."""
+        from agent.providers.errors import classify_provider_exception
+
+        class Mystery(Exception):
+            pass
+
+        assert classify_provider_exception(Mystery("???")) is None
+
+    def test_classify_passes_through_already_typed(self):
+        """An already-typed ProviderError must not be double-wrapped."""
+        from agent.providers.errors import RateLimited, classify_provider_exception
+
+        original = RateLimited("hit")
+        result = classify_provider_exception(original)
+        assert result is original
+
+    def test_retryable_attribute(self):
+        """The ``retryable`` flag is part of the taxonomy contract —
+        rate-limits and transient errors are retryable, auth and invalid
+        requests are not."""
+        from agent.providers.errors import (
+            AuthFailure,
+            InvalidRequest,
+            RateLimited,
+            Transient,
+        )
+
+        assert RateLimited.retryable is True
+        assert Transient.retryable is True
+        assert AuthFailure.retryable is False
+        assert InvalidRequest.retryable is False
+
+    # ---- translate_sdk_errors context manager ---------------------------
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_wraps_sdk_exception(self):
+        from agent.providers.errors import RateLimited, translate_sdk_errors
+
+        class FakeRateLimitError(Exception):
+            pass
+
+        with pytest.raises(RateLimited) as exc_info:
+            async with translate_sdk_errors():
+                raise FakeRateLimitError("throttled")
+        # __cause__ preserves the original for debugging.
+        assert isinstance(exc_info.value.__cause__, FakeRateLimitError)
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_lets_unknown_propagate(self):
+        from agent.providers.errors import translate_sdk_errors
+
+        class Mystery(Exception):
+            pass
+
+        with pytest.raises(Mystery):
+            async with translate_sdk_errors():
+                raise Mystery("raw")
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_passes_typed_through(self):
+        from agent.providers.errors import AuthFailure, translate_sdk_errors
+
+        original = AuthFailure("bad key")
+        with pytest.raises(AuthFailure) as exc_info:
+            async with translate_sdk_errors():
+                raise original
+        # Same instance — not re-wrapped, no spurious __cause__.
+        assert exc_info.value is original
+
+    @pytest.mark.asyncio
+    async def test_translate_sdk_errors_does_not_swallow_cancellation(self):
+        """``CancelledError`` is a ``BaseException`` — the context manager
+        must NOT classify it as a provider error or cooperative cancellation
+        in the loop will break."""
+        import asyncio
+
+        from agent.providers.errors import translate_sdk_errors
+
+        with pytest.raises(asyncio.CancelledError):
+            async with translate_sdk_errors():
+                raise asyncio.CancelledError()
+
+    # ---- @translate_provider_errors decorator ---------------------------
+
+    @pytest.mark.asyncio
+    async def test_decorator_wraps_coroutine_complete(self):
+        from agent.providers.errors import Transient, translate_provider_errors
+
+        class FakeConnectError(Exception):
+            pass
+
+        @translate_provider_errors
+        async def fake_complete(self):
+            raise FakeConnectError("down")
+
+        with pytest.raises(Transient):
+            await fake_complete(self=None)
+
+    @pytest.mark.asyncio
+    async def test_decorator_wraps_async_generator_stream(self):
+        """The decorator must auto-detect async generators (``yield`` inside)
+        and wrap them WITHOUT collapsing the generator into a single value."""
+        from agent.providers.errors import RateLimited, translate_provider_errors
+
+        class FakeRateLimitError(Exception):
+            pass
+
+        @translate_provider_errors
+        async def fake_stream(self):
+            yield "a"
+            yield "b"
+            raise FakeRateLimitError("slow down")
+
+        seen: list[str] = []
+        with pytest.raises(RateLimited):
+            async for x in fake_stream(self=None):
+                seen.append(x)
+        # Both pre-error yields surfaced; the error only fires on the third pull.
+        assert seen == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_decorator_passes_through_successful_stream(self):
+        """Regression: success path — every yielded value reaches the consumer
+        and the generator exits cleanly."""
+        from agent.providers.errors import translate_provider_errors
+
+        @translate_provider_errors
+        async def fake_stream(self):
+            for i in range(3):
+                yield i
+
+        result = []
+        async for v in fake_stream(self=None):
+            result.append(v)
+        assert result == [0, 1, 2]
+
+    # ---- runner uses isinstance ----------------------------------------
+
+    def test_runner_is_rate_limit_via_typed_error(self):
+        """`_is_rate_limit` returns True for our typed RateLimited without
+        falling back to substring matching."""
+        from agent.core.provider_runner import _is_rate_limit
+        from agent.providers.errors import RateLimited
+
+        assert _is_rate_limit(RateLimited("hit"))
+
+    def test_runner_is_rate_limit_via_legacy_name(self):
+        """Backwards-compat: an unwrapped SDK exception (e.g. raised by a
+        custom Provider subclass that didn't use the decorator) is still
+        classified correctly via the centralised name table."""
+        from agent.core.provider_runner import _is_rate_limit
+
+        class FakeRateLimitError(Exception):
+            pass
+
+        assert _is_rate_limit(FakeRateLimitError("slow"))
+
+    def test_runner_message_for_auth_failure(self):
+        from agent.core.provider_runner import _provider_error_message
+        from agent.providers.errors import AuthFailure
+
+        msg, recoverable = _provider_error_message(AuthFailure("bad key"))
+        assert "Authentication failed" in msg
+        assert recoverable is False
+
+    def test_runner_message_for_transient(self):
+        from agent.core.provider_runner import _provider_error_message
+        from agent.providers.errors import Transient
+
+        msg, recoverable = _provider_error_message(Transient("oops"))
+        assert recoverable is True
+
+    def test_runner_message_for_unknown(self):
+        """Mystery exceptions keep the legacy ``Provider error (Name): ...`` shape
+        so logs and TUIs that already parse it don't break."""
+        from agent.core.provider_runner import _provider_error_message
+
+        class Mystery(Exception):
+            pass
+
+        msg, recoverable = _provider_error_message(Mystery("???"))
+        assert "Mystery" in msg
+        assert recoverable is False

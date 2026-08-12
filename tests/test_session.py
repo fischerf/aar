@@ -382,6 +382,65 @@ class TestSessionPersistence:
         compacted = store.compact(s.session_id, max_events=100)
         assert len(compacted.events) == 1
 
+    # ---------------------------------------------------------------------
+    # #5 — atomic save + tolerant load
+    # ---------------------------------------------------------------------
+
+    def test_save_is_atomic_via_tmp_file(self, tmp_dir: Path):
+        """Save must go through a sibling .tmp file then os.replace, so a
+        crash mid-write can never truncate the canonical file."""
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("hello")
+        path = store.save(s)
+
+        # No leftover tmp file after a successful save
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        assert not tmp.exists()
+        # Canonical file is fully written
+        assert path.exists() and path.stat().st_size > 0
+
+    def test_load_tolerates_corrupt_line(self, tmp_dir: Path, caplog):
+        """A half-written / corrupt event line must not abort the entire load."""
+        import logging as _logging
+
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("first")
+        s.add_user_message("second")
+        s.add_user_message("third")
+        path = store.save(s)
+
+        # Inject a malformed JSON line between events 2 and 3.
+        lines = path.read_text(encoding="utf-8").splitlines()
+        corrupted = lines[:3] + ["{not valid json"] + lines[3:]
+        path.write_text("\n".join(corrupted) + "\n", encoding="utf-8")
+
+        with caplog.at_level(_logging.WARNING):
+            loaded = store.load(s.session_id)
+
+        # All 3 valid events survived
+        assert len(loaded.events) == 3
+        contents = [e.content for e in loaded.events if isinstance(e, UserMessage)]
+        assert contents == ["first", "second", "third"]
+        # And we logged at least one warning naming the session id
+        assert any("corrupt" in r.getMessage().lower() for r in caplog.records)
+
+    def test_load_tolerates_unparseable_event_payload(self, tmp_dir: Path):
+        """A JSON-valid line that fails deserialize_event must be skipped, not raise."""
+        store = SessionStore(tmp_dir)
+        s = Session()
+        s.add_user_message("keep me")
+        path = store.save(s)
+
+        # Append a structurally-bogus event line (unknown 'type').
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "definitely_not_a_real_event_type"}) + "\n")
+
+        loaded = store.load(s.session_id)
+        assert len(loaded.events) == 1
+        assert loaded.events[0].content == "keep me"
+
 
 # ---------------------------------------------------------------------------
 # Compact — companion baseline watermark
