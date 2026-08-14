@@ -872,6 +872,7 @@ async def test_streaming_with_tool_calls(streaming_mock_provider, tool_registry)
                     "tool_call_id": "tc_stream_1",
                     "tool_name": "echo",
                     "arguments": {"message": "streamed"},
+                    "data": {"provider_field": "value"},
                 }
             ),
             StreamDelta(done=True),
@@ -899,6 +900,8 @@ async def test_streaming_with_tool_calls(streaming_mock_provider, tool_registry)
     result = await run_loop(session, streaming_mock_provider, executor, config)
 
     assert result.state == AgentState.COMPLETED
+    tool_calls = [e for e in result.events if isinstance(e, ToolCall)]
+    assert tool_calls[0].data["provider_field"] == "value"
     tool_results = [e for e in result.events if isinstance(e, ToolResult)]
     assert len(tool_results) == 1
     assert "echo: streamed" in tool_results[0].output

@@ -160,6 +160,7 @@ class Provider(ABC):
                     "tool_name": tc.tool_name,
                     "tool_call_id": tc.tool_call_id,
                     "arguments": tc.arguments,
+                    "data": tc.data,
                 }
             )
 

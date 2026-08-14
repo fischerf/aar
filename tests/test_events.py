@@ -214,9 +214,11 @@ class TestEventSerialization:
             tool_name="write_file",
             tool_call_id="tc_99",
             arguments={"path": "/tmp/test.py", "content": "print('hi')"},
+            data={"provider_field": "value"},
         )
         restored = deserialize_event(original.model_dump())
         assert restored.arguments == original.arguments
+        assert restored.data == original.data
 
     def test_json_serialization(self):
         msg = UserMessage(content="json test")

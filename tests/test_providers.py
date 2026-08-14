@@ -515,6 +515,101 @@ class TestOllamaNormalization:
 
 
 # ---------------------------------------------------------------------------
+# Gemini HTTP compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiHttpCompatibility:
+    def test_thought_signature_survives_tool_round_trip(self):
+        from agent.core.session import Session
+        from agent.providers.gemini import _build_contents, _parse_http_response
+
+        signature = "c2lnbmF0dXJl"
+        response = _parse_http_response(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "read_file",
+                                        "args": {"path": "test.py"},
+                                    },
+                                    "thoughtSignature": signature,
+                                }
+                            ]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"totalTokenCount": 10},
+                "modelVersion": "gemini-3.5-flash",
+            },
+            "fallback",
+            {
+                "x-request-id": "req-123",
+                "x-quota-usage-percent": "7",
+                "x-quota-reset-date": "2026-09-01T00:00:00Z",
+            },
+        )
+
+        session = Session()
+        session.add_user_message("Read test.py")
+        session.append(response.tool_calls[0])
+        session.add_assistant_message("", stop_reason=StopReason.TOOL_USE)
+        session.add_tool_result(
+            tool_call_id=response.tool_calls[0].tool_call_id,
+            tool_name="read_file",
+            output="contents",
+        )
+
+        contents = _build_contents(session.to_messages())
+        function_part = contents[1]["parts"][0]
+        assert function_part["thoughtSignature"] == signature
+        assert response.meta is not None
+        assert response.meta.request_id == "req-123"
+        assert response.meta.data["response_headers"]["x-quota-usage-percent"] == "7"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "error_name"),
+        [(400, "InvalidRequest"), (429, "RateLimited"), (503, "Transient")],
+    )
+    async def test_streaming_http_errors_retain_body_and_headers(self, status, error_name):
+        import httpx
+
+        from agent.providers.errors import InvalidRequest, RateLimited, Transient
+        from agent.providers.gemini import _raise_for_status
+
+        error_type = {
+            "InvalidRequest": InvalidRequest,
+            "RateLimited": RateLimited,
+            "Transient": Transient,
+        }[error_name]
+        response = httpx.Response(
+            status,
+            headers={
+                "content-type": "text/event-stream",
+                "x-request-id": "req-error",
+                "x-quota-usage-percent": "100",
+                "x-quota-reset-date": "2026-09-01T00:00:00Z",
+            },
+            stream=httpx.ByteStream(b'{"error":"missing thought signature"}'),
+            request=httpx.Request("POST", "https://example.test/gemini"),
+        )
+
+        with pytest.raises(error_type) as exc_info:
+            await _raise_for_status(response)
+
+        assert type(exc_info.value).__name__ == error_name
+        detail = str(exc_info.value)
+        assert "missing thought signature" in detail
+        assert "x-request-id=req-error" in detail
+        assert "x-quota-usage-percent=100" in detail
+
+
+# ---------------------------------------------------------------------------
 # Ollama message conversion
 # ---------------------------------------------------------------------------
 
@@ -710,6 +805,7 @@ class _FakeStreamResp:
         self.status_code = status_code
         self._lines = lines
         self.text = ""
+        self.headers = {}
 
     async def aread(self):
         return b""
