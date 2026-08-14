@@ -184,6 +184,7 @@ async def _consume_stream(
                         tool_name=tc.get("tool_name", ""),
                         tool_call_id=tc.get("tool_call_id", ""),
                         arguments=tc.get("arguments", {}),
+                        data=tc.get("data", {}),
                     )
                 )
 

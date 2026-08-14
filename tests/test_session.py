@@ -125,6 +125,22 @@ class TestToMessages:
         assert msgs[3]["role"] == "assistant"
         assert msgs[3]["content"] == "The file contains a print statement"
 
+    def test_tool_call_provider_data_is_preserved(self):
+        s = Session()
+        s.add_user_message("Call a tool")
+        s.append(
+            ToolCall(
+                tool_name="echo",
+                tool_call_id="tc_1",
+                arguments={"message": "hi"},
+                data={"provider_field": "value"},
+            )
+        )
+        s.add_assistant_message("", stop_reason=StopReason.TOOL_USE)
+
+        block = s.to_messages()[1]["content"][0]
+        assert block["data"] == {"provider_field": "value"}
+
     def test_multiple_tool_calls_grouped(self):
         """Multiple tool calls should all appear in the assistant message."""
         s = Session()
