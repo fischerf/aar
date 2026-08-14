@@ -55,6 +55,7 @@ GEMINI_API_KEY
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -66,9 +67,24 @@ import httpx
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
 from agent.providers.base import Provider, ProviderResponse, StreamDelta
-from agent.providers.errors import translate_provider_errors
+from agent.providers.errors import (
+    AuthFailure,
+    InvalidRequest,
+    RateLimited,
+    Transient,
+    translate_provider_errors,
+)
 
 logger = logging.getLogger(__name__)
+
+_THOUGHT_SIGNATURE_DATA_KEY = "gemini_thought_signature"
+_DIAGNOSTIC_HEADER_NAMES = (
+    "x-request-id",
+    "x-vertex-ai-llm-request-type",
+    "x-quota-usage-percent",
+    "x-quota-reset-date",
+    "retry-after",
+)
 
 
 class GeminiProvider(Provider):
@@ -232,7 +248,7 @@ class GeminiProvider(Provider):
         tools: list[dict[str, Any]] | None,
         system: str,
     ) -> ProviderResponse:
-        contents = _build_contents(messages)
+        contents = _build_contents(messages, sdk_mode=True)
         cfg = self._build_sdk_config(system, tools)
 
         response = await self._sdk_client.aio.models.generate_content(
@@ -248,7 +264,7 @@ class GeminiProvider(Provider):
         tools: list[dict[str, Any]] | None,
         system: str,
     ) -> AsyncIterator[StreamDelta]:
-        contents = _build_contents(messages)
+        contents = _build_contents(messages, sdk_mode=True)
         cfg = self._build_sdk_config(system, tools)
 
         tool_acc: list[dict[str, Any]] = []
@@ -288,12 +304,16 @@ class GeminiProvider(Provider):
                 elif part.text:
                     yield StreamDelta(text=part.text)
                 elif part.function_call:
+                    signature = _encode_sdk_thought_signature(
+                        getattr(part, "thought_signature", None)
+                    )
                     tool_acc.append(
                         {
                             "name": part.function_call.name,
                             "args": dict(part.function_call.args)
                             if part.function_call.args
                             else {},
+                            "data": _thought_signature_data(signature),
                         }
                     )
 
@@ -309,6 +329,7 @@ class GeminiProvider(Provider):
                             "tool_call_id": f"gemini_tc_{call_uid}_{i}",
                             "tool_name": fc["name"],
                             "arguments": fc["args"],
+                            "data": fc["data"],
                         }
                     )
                 yield StreamDelta(
@@ -380,18 +401,18 @@ class GeminiProvider(Provider):
                 headers=headers,
             )
         except httpx.TimeoutException as exc:
-            raise RuntimeError(f"Gemini request timed out after {self._timeout}s: {exc}") from exc
+            raise Transient(f"Gemini request timed out after {self._timeout}s: {exc}") from exc
         except httpx.RequestError as exc:
-            raise RuntimeError(f"Gemini network error: {exc}") from exc
+            raise Transient(f"Gemini network error: {exc}") from exc
 
-        _raise_for_status(resp)
+        await _raise_for_status(resp)
 
         try:
             data: dict[str, Any] = resp.json()
         except Exception as exc:
             raise RuntimeError(f"Gemini returned a non-JSON body: {resp.text[:200]}") from exc
 
-        return _parse_http_response(data, self.config.model)
+        return _parse_http_response(data, self.config.model, resp.headers)
 
     async def _stream_http(
         self,
@@ -404,6 +425,7 @@ class GeminiProvider(Provider):
 
         tool_acc: list[dict[str, Any]] = []
         usage: dict[str, int] = {}
+        response_headers: httpx.Headers | dict[str, str] = {}
         # #5 — Per-call UUID prefix prevents tool_call_id collisions across turns.
         call_uid = uuid.uuid4().hex[:8]
 
@@ -414,7 +436,8 @@ class GeminiProvider(Provider):
                 json=payload,
                 headers=headers,
             ) as http_resp:
-                _raise_for_status(http_resp)
+                await _raise_for_status(http_resp)
+                response_headers = getattr(http_resp, "headers", {})
 
                 async for line in http_resp.aiter_lines():
                     # SSE format: lines are prefixed with "data: "
@@ -465,6 +488,9 @@ class GeminiProvider(Provider):
                                 {
                                     "name": fc.get("name", ""),
                                     "args": fc.get("args", {}),
+                                    "data": _thought_signature_data(
+                                        str(part.get("thoughtSignature", ""))
+                                    ),
                                 }
                             )
 
@@ -478,14 +504,13 @@ class GeminiProvider(Provider):
                                     "tool_call_id": f"gemini_tc_{call_uid}_{i}",
                                     "tool_name": fc["name"],
                                     "arguments": fc["args"],
+                                    "data": fc["data"],
                                 }
                             )
                         yield StreamDelta(
                             done=True,
-                            meta=ProviderMeta(
-                                provider="gemini",
-                                model=self.config.model,
-                                usage=usage,
+                            meta=_http_provider_meta(
+                                self.config.model, usage, response_headers
                             )
                             if usage
                             else None,
@@ -493,18 +518,14 @@ class GeminiProvider(Provider):
                         return
 
         except httpx.TimeoutException as exc:
-            raise RuntimeError(f"Gemini stream timed out after {self._timeout}s: {exc}") from exc
+            raise Transient(f"Gemini stream timed out after {self._timeout}s: {exc}") from exc
         except httpx.RequestError as exc:
-            raise RuntimeError(f"Gemini stream network error: {exc}") from exc
+            raise Transient(f"Gemini stream network error: {exc}") from exc
 
         # Fallback sentinel if finish_reason never arrived in the stream.
         yield StreamDelta(
             done=True,
-            meta=ProviderMeta(
-                provider="gemini",
-                model=self.config.model,
-                usage=usage,
-            )
+            meta=_http_provider_meta(self.config.model, usage, response_headers)
             if usage
             else None,
         )
@@ -562,7 +583,34 @@ class GeminiProvider(Provider):
 # ---------------------------------------------------------------------------
 
 
-def _build_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _thought_signature_data(signature: str) -> dict[str, str]:
+    return {_THOUGHT_SIGNATURE_DATA_KEY: signature} if signature else {}
+
+
+def _encode_sdk_thought_signature(signature: bytes | str | None) -> str:
+    if isinstance(signature, bytes):
+        return base64.b64encode(signature).decode("ascii")
+    return signature or ""
+
+
+def _signature_for_request(block: dict[str, Any], *, sdk_mode: bool) -> str | bytes:
+    data = block.get("data", {})
+    if not isinstance(data, dict):
+        return ""
+    signature = data.get(_THOUGHT_SIGNATURE_DATA_KEY, "")
+    if not isinstance(signature, str) or not signature:
+        return ""
+    if not sdk_mode:
+        return signature
+    try:
+        return base64.b64decode(signature, validate=True)
+    except ValueError:
+        return signature.encode()
+
+
+def _build_contents(
+    messages: list[dict[str, Any]], *, sdk_mode: bool = False
+) -> list[dict[str, Any]]:
     """Convert internal Anthropic-style messages to Gemini ``contents`` format.
 
     Role mapping:  ``"assistant"`` → ``"model"``,  ``"user"`` → ``"user"``.
@@ -624,14 +672,16 @@ def _build_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 parts.append({"text": block["text"]})
             elif btype == "tool_use":
                 _tool_id_to_name[block.get("id", "")] = block.get("name", "")
-                parts.append(
-                    {
-                        "functionCall": {
-                            "name": block.get("name", ""),
-                            "args": block.get("input", {}),
-                        }
+                function_part: dict[str, Any] = {
+                    "functionCall": {
+                        "name": block.get("name", ""),
+                        "args": block.get("input", {}),
                     }
-                )
+                }
+                signature = _signature_for_request(block, sdk_mode=sdk_mode)
+                if signature:
+                    function_part["thoughtSignature"] = signature
+                parts.append(function_part)
 
         if parts:
             contents.append({"role": gemini_role, "parts": parts})
@@ -685,6 +735,9 @@ def _parse_sdk_response(response: Any, fallback_model: str) -> ProviderResponse:
                 elif part.text:
                     content_text += part.text
                 elif part.function_call:
+                    signature = _encode_sdk_thought_signature(
+                        getattr(part, "thought_signature", None)
+                    )
                     tool_calls.append(
                         ToolCall(
                             tool_name=part.function_call.name,
@@ -692,6 +745,7 @@ def _parse_sdk_response(response: Any, fallback_model: str) -> ProviderResponse:
                             arguments=dict(part.function_call.args)
                             if part.function_call.args
                             else {},
+                            data=_thought_signature_data(signature),
                         )
                     )
 
@@ -724,7 +778,11 @@ def _parse_sdk_response(response: Any, fallback_model: str) -> ProviderResponse:
     )
 
 
-def _parse_http_response(data: dict[str, Any], fallback_model: str) -> ProviderResponse:
+def _parse_http_response(
+    data: dict[str, Any],
+    fallback_model: str,
+    headers: httpx.Headers | dict[str, str] | None = None,
+) -> ProviderResponse:
     """Extract a :class:`ProviderResponse` from a raw GenerateContent JSON body."""
     candidates: list[Any] = data.get("candidates", [])
     if not candidates:
@@ -755,6 +813,7 @@ def _parse_http_response(data: dict[str, Any], fallback_model: str) -> ProviderR
                     tool_name=fc.get("name", ""),
                     tool_call_id=f"gemini_tc_{call_uid}_{len(tool_calls)}",
                     arguments=fc.get("args", {}),
+                    data=_thought_signature_data(str(part.get("thoughtSignature", ""))),
                 )
             )
 
@@ -780,10 +839,8 @@ def _parse_http_response(data: dict[str, Any], fallback_model: str) -> ProviderR
         tool_calls=tool_calls,
         stop_reason=_map_stop_reason(finish_reason, bool(tool_calls)),
         reasoning=reasoning_blocks,
-        meta=ProviderMeta(
-            provider="gemini",
-            model=data.get("modelVersion", fallback_model),
-            usage=usage,
+        meta=_http_provider_meta(
+            data.get("modelVersion", fallback_model), usage, headers or {}
         ),
     )
 
@@ -803,29 +860,66 @@ def _map_stop_reason(finish_reason: str, has_tool_calls: bool = False) -> str:
     return mapping.get(upper, StopReason.END_TURN.value)
 
 
-def _raise_for_status(resp: httpx.Response) -> None:
-    """Raise a descriptive ``RuntimeError`` for non-200 HTTP responses."""
+def _diagnostic_headers(headers: httpx.Headers | dict[str, str]) -> dict[str, str]:
+    lower_headers = {str(key).lower(): str(value) for key, value in headers.items()}
+    return {
+        name: lower_headers[name]
+        for name in _DIAGNOSTIC_HEADER_NAMES
+        if lower_headers.get(name)
+    }
+
+
+def _http_provider_meta(
+    model: str,
+    usage: dict[str, int],
+    headers: httpx.Headers | dict[str, str],
+) -> ProviderMeta:
+    diagnostic_headers = _diagnostic_headers(headers)
+    return ProviderMeta(
+        provider="gemini",
+        model=model,
+        usage=usage,
+        request_id=diagnostic_headers.get("x-request-id", ""),
+        data={"response_headers": diagnostic_headers} if diagnostic_headers else {},
+    )
+
+
+def _http_error_detail(
+    status: int, body: str, headers: httpx.Headers | dict[str, str]
+) -> str:
+    detail = f"HTTP {status}"
+    if body:
+        detail += f": {body[:400]}"
+    diagnostic_headers = _diagnostic_headers(headers)
+    if diagnostic_headers:
+        rendered = ", ".join(f"{key}={value}" for key, value in diagnostic_headers.items())
+        detail += f" [{rendered}]"
+    return detail
+
+
+async def _raise_for_status(resp: httpx.Response) -> None:
+    """Raise a typed provider error while retaining SSE error details."""
     status = resp.status_code
-    if status == 200:
+    if 200 <= status < 300:
         return
 
-    # The response may be a streaming response that hasn't been read yet.
-    # Guard against httpx.ResponseNotRead by falling back to an empty body.
     try:
-        body: str = resp.text or ""
+        body = resp.text or ""
     except httpx.ResponseNotRead:
-        body = ""
+        raw = await resp.aread()
+        body = raw.decode(errors="replace")
+
+    headers = getattr(resp, "headers", {})
+    detail = _http_error_detail(status, body, headers)
 
     if status in (401, 403):
-        raise PermissionError(
-            f"Gemini authentication failed (HTTP {status}). "
-            "Check your API key in ProviderConfig or GEMINI_API_KEY."
+        raise AuthFailure(
+            f"Gemini authentication failed ({detail}). Check the configured API key."
         )
     if status == 429:
-        raise RuntimeError("Gemini rate limit exceeded (HTTP 429). Back off and retry.")
-    body_lower = body.lower()
-    if status == 400 and any(
-        phrase in body_lower for phrase in ("context_length", "maximum context", "token limit")
-    ):
-        raise RuntimeError(f"Gemini context limit exceeded (HTTP 400): {body[:200]}")
-    raise RuntimeError(f"Gemini returned HTTP {status}: {body[:400]}")
+        raise RateLimited(f"Gemini rate limit exceeded ({detail}).")
+    if status in (400, 404, 409, 422):
+        raise InvalidRequest(f"Gemini rejected the request ({detail}).")
+    if status >= 500:
+        raise Transient(f"Gemini service error ({detail}).")
+    raise InvalidRequest(f"Gemini returned an unexpected response ({detail}).")

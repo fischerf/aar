@@ -141,18 +141,19 @@ def events_to_messages(events: list[Event]) -> list[dict[str, Any]]:
 
             if pending_tool_calls:
                 # Assistant message with tool calls
-                content_blocks: list[dict] = []
+                content_blocks: list[dict[str, Any]] = []
                 if event.content:
                     content_blocks.append({"type": "text", "text": event.content})
                 for tc in pending_tool_calls:
-                    content_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.tool_call_id,
-                            "name": tc.tool_name,
-                            "input": tc.arguments,
-                        }
-                    )
+                    block = {
+                        "type": "tool_use",
+                        "id": tc.tool_call_id,
+                        "name": tc.tool_name,
+                        "input": tc.arguments,
+                    }
+                    if tc.data:
+                        block["data"] = tc.data
+                    content_blocks.append(block)
                 messages.append({"role": "assistant", "content": content_blocks})
                 pending_tool_calls = []
             else:
@@ -166,16 +167,17 @@ def events_to_messages(events: list[Event]) -> list[dict[str, Any]]:
 
     # Flush remaining
     if pending_tool_calls:
-        content_blocks = []
+        content_blocks: list[dict[str, Any]] = []
         for tc in pending_tool_calls:
-            content_blocks.append(
-                {
-                    "type": "tool_use",
-                    "id": tc.tool_call_id,
-                    "name": tc.tool_name,
-                    "input": tc.arguments,
-                }
-            )
+            block = {
+                "type": "tool_use",
+                "id": tc.tool_call_id,
+                "name": tc.tool_name,
+                "input": tc.arguments,
+            }
+            if tc.data:
+                block["data"] = tc.data
+            content_blocks.append(block)
         messages.append({"role": "assistant", "content": content_blocks})
 
     if pending_tool_results:
