@@ -62,12 +62,21 @@ class _AsgiDriver:
                 ) from exc
 
 
-def _make_post_scope(path: str) -> dict:
+def _make_post_scope(path: str, app=None, extra_headers: list | None = None) -> dict:
+    """Build a POST scope, authenticated against *app* when one is given.
+
+    C1 — every route but ``/health`` now requires a bearer token; the app
+    generates one at construction and exposes it as ``app.auth``.
+    """
+    headers: list[list[bytes]] = []
+    if app is not None and getattr(app, "auth", None) is not None:
+        headers.append([b"authorization", f"Bearer {app.auth.token}".encode()])
+    headers.extend(extra_headers or [])
     return {
         "type": "http",
         "method": "POST",
         "path": path,
-        "headers": [],
+        "headers": headers,
         "query_string": b"",
     }
 
@@ -75,7 +84,7 @@ def _make_post_scope(path: str) -> dict:
 async def _post(app, path: str, body: bytes) -> _AsgiDriver:
     driver = _AsgiDriver()
     await driver.recv_queue.put({"type": "http.request", "body": body, "more_body": False})
-    await app(_make_post_scope(path), driver.receive, driver.send)
+    await app(_make_post_scope(path, app), driver.receive, driver.send)
     return driver
 
 
@@ -224,7 +233,7 @@ class TestSseDisconnectCancelsRun:
             await driver.recv_queue.put({"type": "http.request", "body": body, "more_body": False})
 
             app_task = asyncio.create_task(
-                app(_make_post_scope("/chat/stream"), driver.receive, driver.send)
+                app(_make_post_scope("/chat/stream", app), driver.receive, driver.send)
             )
 
             # Wait until the response has started (so the disconnect watcher

@@ -71,8 +71,12 @@ class Agent:
         provider: Provider | None = None,
         registry: ToolRegistry | None = None,
         approval_callback: ApprovalCallback | None = None,
+        extension_trust_prompt: Any = None,
     ) -> None:
         self.config = config or AgentConfig()
+        # C3 — Only interactive transports pass a prompt; without one,
+        # untrusted ``.agent/extensions`` code from the CWD is never executed.
+        self._extension_trust_prompt = extension_trust_prompt
         self.provider = provider or _create_provider(self.config.resolve_provider())
         self.registry = registry or ToolRegistry()
         self.executor = ToolExecutor(
@@ -116,6 +120,7 @@ class Agent:
                 self.registry,
                 sandbox=self.executor.sandbox,
                 default_timeout=self.config.tools.bash_default_timeout,
+                hard_cap=self.config.tools.command_timeout,
             )
         if enabled & search_tools:
             register_search_tools(self.registry)
@@ -256,7 +261,19 @@ class Agent:
     ) -> None:
         """Initialize the extension manager and register extension tools."""
         mgr = ExtensionManager()
-        await mgr.initialize(session, self.config, cancel_event)
+        await mgr.initialize(
+            session,
+            self.config,
+            cancel_event,
+            trust_prompt=self._extension_trust_prompt,
+            force_trust=self.config.trust_project_extensions,
+        )
+
+        # C3(c) — Surface which extensions are live and which tier they came
+        # from, so a project-tier extension is never invisible.
+        for info in mgr._extensions:
+            if info.error is None:
+                logger.info("Extension active: %s (%s)", info.name, info.source)
 
         # Register extension tools
         count = mgr.register_tools(self.registry)

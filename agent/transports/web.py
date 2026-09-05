@@ -22,6 +22,13 @@ from agent.memory.session_store import SessionStore, validate_session_id
 from agent.safety.permissions import ApprovalCallback, ApprovalResult
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import ToolSpec
+from agent.transports._http_auth import (
+    PUBLIC_PATHS,
+    BearerAuth,
+    apply_safety_override,
+    cors_headers,
+    normalize_origins,
+)
 from agent.transports.stream import EventStream
 
 logger = logging.getLogger(__name__)
@@ -41,6 +48,21 @@ async def _auto_approve_callback(spec: ToolSpec, tc: ToolCall) -> ApprovalResult
     return ApprovalResult.APPROVED
 
 
+async def _deny_approval_callback(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
+    """Default web approval: refuse anything the policy wants a human to see.
+
+    C1 — ``_auto_approve_callback`` combined with an unauthenticated endpoint
+    meant a request could run ``bash`` with no human in the loop.  Denying by
+    default keeps read-only work flowing while requiring an explicit
+    ``--approval auto`` (or a custom callback) to hand over write/execute.
+    """
+    logger.warning(
+        "Web transport: denying %s (no approval channel; pass --approval auto to allow)",
+        tc.tool_name,
+    )
+    return ApprovalResult.DENIED
+
+
 class WebTransport:
     """Manages agent sessions and exposes them over an event-stream interface.
 
@@ -53,6 +75,7 @@ class WebTransport:
         config: AgentConfig | None = None,
         approval_callback: ApprovalCallback | None = None,
         registry: ToolRegistry | None = None,
+        allow_safety_override: bool = False,
     ) -> None:
         if config is None:
             if _USER_CONFIG.is_file():
@@ -60,10 +83,16 @@ class WebTransport:
             else:
                 config = AgentConfig()
         self.config = config
+        # C1 — Deny by default. The web transport has no interactive channel,
+        # so "the request itself is implicit approval" meant an unauthenticated
+        # POST could run arbitrary shell commands.
         self.approval_callback: ApprovalCallback = (
-            approval_callback if approval_callback is not None else _auto_approve_callback
+            approval_callback if approval_callback is not None else _deny_approval_callback
         )
         self.registry = registry  # shared across requests; None = each Agent builds its own
+        # C1 — When False (the default) a client-supplied ``safety`` block may
+        # only tighten the server policy, never loosen it.
+        self.allow_safety_override = allow_safety_override
         self.store = SessionStore(self.config.session_dir)
         self._active_streams: dict[str, EventStream] = {}
         self._sessions: dict[str, Session] = {}
@@ -75,8 +104,11 @@ class WebTransport:
     ) -> Agent:
         config = self.config
         if safety_override:
-            merged_safety = config.safety.model_copy(update=safety_override)
-            config = config.model_copy(update={"safety": merged_safety})
+            merged_safety = apply_safety_override(
+                config.safety, safety_override, self.allow_safety_override
+            )
+            if merged_safety is not config.safety:
+                config = config.model_copy(update={"safety": merged_safety})
         if provider_override:
             try:
                 provider_cfg = config.resolve_provider(provider_override)
@@ -297,6 +329,10 @@ def create_asgi_app(
     config: AgentConfig | None = None,
     approval_callback: ApprovalCallback | None = None,
     registry: ToolRegistry | None = None,
+    *,
+    auth: BearerAuth | None = None,
+    cors_origins: list[str] | None = None,
+    allow_safety_override: bool = False,
 ) -> Any:
     """Create a minimal ASGI application wrapping the web transport.
 
@@ -306,20 +342,34 @@ def create_asgi_app(
         POST /chat/stream   — JSON body {prompt, session_id?} → SSE stream
         GET  /sessions      — list session IDs
         GET  /sessions/{id} — session details
-        GET  /health        — health check
+        GET  /health        — health check (the only unauthenticated route)
 
     Args:
         config: Agent configuration. If None, auto-loads ``~/.aar/config.json``
             or falls back to built-in defaults.
         approval_callback: Called when a tool needs human approval. Defaults to
-            ``_auto_approve_callback`` (auto-approve all — the HTTP request is
-            treated as implicit approval). Pass a custom callback for webhook-
-            style approval or to deny all writes.
+            ``_deny_approval_callback`` — anything the policy wants a human to
+            confirm is refused. Pass ``_auto_approve_callback`` (or your own)
+            to opt into unattended execution.
         registry: Optional shared :class:`ToolRegistry`. Use this to expose MCP
             tools over the web API (register them once, reuse across requests).
             If None, each agent request builds a fresh registry from built-ins.
+        auth: Bearer-token gate. Defaults to a fresh :class:`BearerAuth` with a
+            generated token — read ``app.auth.token`` to learn it, or pass
+            ``BearerAuth.disabled()`` when fronted by your own auth layer.
+        cors_origins: Exact origins allowed to make cross-origin requests.
+            Empty (the default) emits no CORS headers at all.
+        allow_safety_override: Let a request body replace the server's safety
+            policy wholesale instead of only tightening it.
     """
-    transport = WebTransport(config, approval_callback, registry)
+    transport = WebTransport(
+        config,
+        approval_callback if approval_callback is not None else _deny_approval_callback,
+        registry,
+        allow_safety_override=allow_safety_override,
+    )
+    auth = auth if auth is not None else BearerAuth()
+    allowed_origins = normalize_origins(cors_origins)
 
     async def app(scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -327,25 +377,32 @@ def create_asgi_app(
 
         path = scope["path"]
         method = scope["method"]
+        cors = cors_headers(scope, allowed_origins)
 
         if method == "OPTIONS":
-            await _cors_preflight(send)
+            await _cors_preflight(send, cors)
+            return
+
+        # C1 — Authenticate before routing. ``/health`` stays open so process
+        # supervisors can probe liveness without holding the token.
+        if path not in PUBLIC_PATHS and not auth.check(scope):
+            await _json_response(send, {"error": "unauthorized"}, status=401, cors=cors)
             return
 
         if method == "GET" and path == "/health":
-            await _json_response(send, {"status": "ok"})
+            await _json_response(send, {"status": "ok"}, cors=cors)
 
         elif method == "GET" and path == "/sessions":
             sessions = transport.list_sessions()
-            await _json_response(send, {"sessions": sessions})
+            await _json_response(send, {"sessions": sessions}, cors=cors)
 
         elif method == "GET" and path.startswith("/sessions/"):
             sid = path.split("/sessions/", 1)[1]
             info = transport.get_session(sid)
             if info:
-                await _json_response(send, info)
+                await _json_response(send, info, cors=cors)
             else:
-                await _json_response(send, {"error": "not found"}, status=404)
+                await _json_response(send, {"error": "not found"}, status=404, cors=cors)
 
         elif method == "POST" and path == "/chat":
             body = await _read_body(receive)
@@ -357,14 +414,16 @@ def create_asgi_app(
                 # #7 — Malformed JSON used to bubble up as an uncaught
                 # ``json.JSONDecodeError`` and surface as a 500. Treat it (and
                 # missing required fields) as a 400 with a brief diagnostic.
-                await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                await _json_response(send, {"error": f"bad request: {exc}"}, status=400, cors=cors)
                 return
             sid = data.get("session_id")
             if sid is not None:
                 try:
                     validate_session_id(sid)
                 except ValueError as exc:
-                    await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                    await _json_response(
+                        send, {"error": f"bad request: {exc}"}, status=400, cors=cors
+                    )
                     return
             result = await transport.handle_chat(
                 prompt=data["prompt"],
@@ -372,7 +431,7 @@ def create_asgi_app(
                 safety_override=data.get("safety"),
                 provider_override=data.get("provider"),
             )
-            await _json_response(send, result)
+            await _json_response(send, result, cors=cors)
 
         elif method == "POST" and path == "/chat/stream":
             body = await _read_body(receive)
@@ -381,14 +440,16 @@ def create_asgi_app(
                 if not isinstance(data, dict) or "prompt" not in data:
                     raise ValueError("request body must be a JSON object with a 'prompt' field")
             except (ValueError, json.JSONDecodeError) as exc:
-                await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                await _json_response(send, {"error": f"bad request: {exc}"}, status=400, cors=cors)
                 return
             sid = data.get("session_id")
             if sid is not None:
                 try:
                     validate_session_id(sid)
                 except ValueError as exc:
-                    await _json_response(send, {"error": f"bad request: {exc}"}, status=400)
+                    await _json_response(
+                        send, {"error": f"bad request: {exc}"}, status=400, cors=cors
+                    )
                     return
             iterator = await transport.handle_stream(
                 prompt=data["prompt"],
@@ -396,11 +457,13 @@ def create_asgi_app(
                 safety_override=data.get("safety"),
                 provider_override=data.get("provider"),
             )
-            await _sse_response(send, receive, iterator)
+            await _sse_response(send, receive, iterator, cors)
 
         else:
-            await _json_response(send, {"error": "not found"}, status=404)
+            await _json_response(send, {"error": "not found"}, status=404, cors=cors)
 
+    app.auth = auth  # type: ignore[attr-defined]
+    app.transport = transport  # type: ignore[attr-defined]
     return app
 
 
@@ -414,25 +477,23 @@ async def _read_body(receive: Any) -> bytes:
     return body
 
 
-_CORS_HEADERS = [
-    [b"access-control-allow-origin", b"*"],
-    [b"access-control-allow-methods", b"GET, POST, OPTIONS"],
-    [b"access-control-allow-headers", b"content-type"],
-]
-
-
-async def _cors_preflight(send: Any) -> None:
+async def _cors_preflight(send: Any, cors: list[list[bytes]] | None = None) -> None:
     await send(
         {
             "type": "http.response.start",
             "status": 204,
-            "headers": _CORS_HEADERS,
+            "headers": list(cors or []),
         }
     )
     await send({"type": "http.response.body", "body": b""})
 
 
-async def _json_response(send: Any, data: dict, status: int = 200) -> None:
+async def _json_response(
+    send: Any,
+    data: dict,
+    status: int = 200,
+    cors: list[list[bytes]] | None = None,
+) -> None:
     body = json.dumps(data).encode()
     await send(
         {
@@ -441,14 +502,19 @@ async def _json_response(send: Any, data: dict, status: int = 200) -> None:
             "headers": [
                 [b"content-type", b"application/json"],
                 [b"content-length", str(len(body)).encode()],
-                *_CORS_HEADERS,
+                *(cors or []),
             ],
         }
     )
     await send({"type": "http.response.body", "body": body})
 
 
-async def _sse_response(send: Any, receive: Any, iterator: AsyncEventIterator) -> None:
+async def _sse_response(
+    send: Any,
+    receive: Any,
+    iterator: AsyncEventIterator,
+    cors: list[list[bytes]] | None = None,
+) -> None:
     # #7 — Monitor for ASGI ``http.disconnect`` in parallel with the SSE
     # write loop. If the client closes the connection we must cancel the
     # background run task; otherwise the agent keeps burning tokens until
@@ -461,7 +527,7 @@ async def _sse_response(send: Any, receive: Any, iterator: AsyncEventIterator) -
                 [b"content-type", b"text/event-stream"],
                 [b"cache-control", b"no-cache"],
                 [b"connection", b"keep-alive"],
-                *_CORS_HEADERS,
+                *(cors or []),
             ],
         }
     )

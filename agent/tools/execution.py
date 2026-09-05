@@ -64,7 +64,7 @@ class ToolExecutor:
                 _raw_mode = "linux"
             else:
                 _raw_mode = "local"
-        policy_cfg = PolicyConfig(
+        policy_kwargs: dict = dict(
             read_only=sc.read_only,
             require_approval_for_writes=sc.require_approval_for_writes,
             require_approval_for_execute=sc.require_approval_for_execute,
@@ -73,6 +73,11 @@ class ToolExecutor:
             sandbox_mode=_raw_mode,
             log_all_commands=sc.log_all_commands,
         )
+        if sc.denied_commands is not None:
+            policy_kwargs["denied_commands"] = sc.denied_commands
+        if sc.denied_command_patterns is not None:
+            policy_kwargs["denied_command_patterns"] = sc.denied_command_patterns
+        policy_cfg = PolicyConfig(**policy_kwargs)
         self.policy = SafetyPolicy(policy_cfg)
         self.permissions = PermissionManager(approval_callback)
         self.sandbox = _create_sandbox(sc)
@@ -248,6 +253,10 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
         else:
             mode = "local"
 
+    # H2 — the deny-list is shared by every backend so widening a mode's
+    # ``allowed_env_vars`` can't accidentally re-expose provider credentials.
+    denylist = sb.env_denylist_patterns
+
     if mode == "wsl":
         return WslDistroSandbox(
             distro_name=sb.wsl.distro,
@@ -255,11 +264,14 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
             shell=sb.wsl.shell,
             wsl_user=sb.wsl.wsl_user,
             restrict_to_workspace=sb.wsl.restrict_to_workspace,
+            env_denylist_patterns=denylist,
         )
     if mode == "linux":
         return LinuxSandbox(
             workspace=sb.linux.workspace,
             max_memory_mb=sb.linux.max_memory_mb,
+            allowed_env_vars=sb.linux.allowed_env_vars,
+            env_denylist_patterns=denylist,
         )
     if mode == "windows":
         return WindowsSubprocessSandbox(
@@ -267,5 +279,11 @@ def _create_sandbox(config: SafetyConfig) -> Sandbox:
             max_memory_mb=sb.windows.max_memory_mb,
             max_processes=sb.windows.max_processes,
             use_low_integrity=sb.windows.use_low_integrity,
+            allowed_env_vars=sb.windows.allowed_env_vars,
+            env_denylist_patterns=denylist,
         )
-    return LocalSandbox()
+    return LocalSandbox(
+        restricted_env=sb.local.restricted_env,
+        allowed_env_vars=sb.local.allowed_env_vars,
+        env_denylist_patterns=denylist,
+    )

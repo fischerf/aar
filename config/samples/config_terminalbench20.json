@@ -63,6 +63,8 @@
       "**/.pypirc"
     ],
     "allowed_paths": [],
+    "denied_commands": null,
+    "denied_command_patterns": null,
     "sandbox": {
       "mode": "wsl",
       "local": {},
@@ -127,6 +129,7 @@
     "truncate_keep_recent": 6,
     "truncate_max_chars": 500
   },
+  "trust_project_extensions": false,
   "max_steps": 150,
   "timeout": 0.0,
   "max_retries": 3,

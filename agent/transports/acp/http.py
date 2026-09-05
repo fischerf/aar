@@ -60,7 +60,14 @@ from agent.memory.session_store import SessionStore
 from agent.safety.permissions import ApprovalCallback
 from agent.tools.registry import ToolRegistry
 
-from .common import _auto_approve, _load_default_config
+from agent.transports._http_auth import (
+    PUBLIC_PATHS,
+    BearerAuth,
+    cors_headers,
+    normalize_origins,
+)
+
+from .common import _auto_approve, _deny_approval, _load_default_config
 
 logger = logging.getLogger(__name__)
 
@@ -487,6 +494,9 @@ def create_acp_asgi_app(
     registry: ToolRegistry | None = None,
     agent_name: str = "aar",
     agent_description: str = "Aar adaptive action & reasoning agent",
+    *,
+    auth: BearerAuth | None = None,
+    cors_origins: list[str] | None = None,
 ) -> Any:
     """Create a minimal ASGI app that speaks the ACP v0.2 HTTP/SSE protocol.
 
@@ -503,55 +513,72 @@ def create_acp_asgi_app(
     POST /runs/{run_id}/cancel    — cancel run
     GET  /runs/{run_id}/events    — ACP event log
     GET  /sessions/{session_id}   — session metadata
-    GET  /ping                    — health check
+    GET  /ping                    — health check (the only unauthenticated route)
+
+    C1 — Every other route requires ``Authorization: Bearer <token>``.  With
+    no *auth* argument a token is generated; read it from ``app.auth.token``.
+    Cross-origin requests are refused unless the origin is listed in
+    *cors_origins*.
     """
     transport = AcpTransport(
         config=config,
-        approval_callback=approval_callback,
+        approval_callback=(approval_callback if approval_callback is not None else _deny_approval),
         registry=registry,
         agent_name=agent_name,
         agent_description=agent_description,
     )
+
+    resolved_auth = auth if auth is not None else BearerAuth()
+    allowed_origins = normalize_origins(cors_origins)
 
     async def app(scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             return
         path: str = scope["path"]
         method: str = scope["method"]
+        cors = cors_headers(scope, allowed_origins)
+
+        async def _reply(data: dict, status: int = 200) -> None:
+            await _json(send, data, status=status, cors=cors)
 
         if method == "OPTIONS":
-            await _cors_preflight(send)
+            await _cors_preflight(send, cors)
+            return
+
+        # C1 — Authenticate before routing; ``/ping`` stays open for liveness.
+        if path not in PUBLIC_PATHS and not resolved_auth.check(scope):
+            await _reply({"detail": "Unauthorized"}, status=401)
             return
 
         if method == "GET" and path == "/ping":
-            await _json(send, {"status": "ok"})
+            await _reply({"status": "ok"})
 
         elif method == "GET" and path == "/agents":
-            await _json(send, {"agents": [transport.get_manifest().model_dump()]})
+            await _reply({"agents": [transport.get_manifest().model_dump()]})
 
         elif method == "GET" and path.startswith("/agents/"):
             name = path[len("/agents/") :]
             if name == transport.agent_name:
-                await _json(send, transport.get_manifest().model_dump())
+                await _reply(transport.get_manifest().model_dump())
             else:
-                await _json(send, {"detail": f"Agent '{name}' not found"}, status=404)
+                await _reply({"detail": f"Agent '{name}' not found"}, status=404)
 
         elif method == "POST" and path == "/runs":
             body = await _read_body(receive)
             try:
                 data = json.loads(body)
             except json.JSONDecodeError:
-                await _json(send, {"detail": "Invalid JSON"}, status=400)
+                await _reply({"detail": "Invalid JSON"}, status=400)
                 return
             try:
                 mode = RunMode(data.get("mode", "sync"))
             except ValueError:
-                await _json(send, {"detail": f"Invalid mode: {data.get('mode')!r}"}, status=400)
+                await _reply({"detail": f"Invalid mode: {data.get('mode')!r}"}, status=400)
                 return
             try:
                 msgs = [AcpMessage.model_validate(m) for m in data.get("input", [])]
             except Exception as exc:
-                await _json(send, {"detail": f"Invalid input: {exc}"}, status=400)
+                await _reply({"detail": f"Invalid input: {exc}"}, status=400)
                 return
             try:
                 run, queue = await transport.create_run(
@@ -561,63 +588,63 @@ def create_acp_asgi_app(
                     session_id=data.get("session_id"),
                 )
             except ValueError as exc:
-                await _json(send, {"detail": str(exc)}, status=404)
+                await _reply({"detail": str(exc)}, status=404)
                 return
             if mode == RunMode.STREAM and queue is not None:
-                await _sse_run_stream(send, queue)
+                await _sse_run_stream(send, queue, cors)
             elif mode == RunMode.ASYNC:
-                await _json(send, run.model_dump(), status=202)
+                await _reply(run.model_dump(), status=202)
             else:
-                await _json(send, run.model_dump())
+                await _reply(run.model_dump())
 
         elif method == "GET" and _matches(path, "/runs/", 1):
             run_id = _path_tail(path, "/runs/")
             if "/" in run_id:
-                await _json(send, {"detail": "Not found"}, status=404)
+                await _reply({"detail": "Not found"}, status=404)
                 return
             run = transport.get_run(run_id)
             if run:
-                await _json(send, run.model_dump())
+                await _reply(run.model_dump())
             else:
-                await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
+                await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
 
         elif method == "POST" and path.endswith("/cancel") and "/runs/" in path:
             run_id = path[len("/runs/") :].removesuffix("/cancel")
             run = await transport.cancel_run(run_id)
             if run:
-                await _json(send, run.model_dump())
+                await _reply(run.model_dump())
             else:
-                await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
+                await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
 
         elif method == "GET" and path.endswith("/events") and "/runs/" in path:
             run_id = path[len("/runs/") :].removesuffix("/events")
             events = transport.get_run_events(run_id)
             if events is not None:
-                await _json(send, {"events": [e.model_dump() for e in events]})
+                await _reply({"events": [e.model_dump() for e in events]})
             else:
-                await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
+                await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
 
         elif method == "POST" and _matches(path, "/runs/", 1):
             run_id = _path_tail(path, "/runs/")
             run = transport.get_run(run_id)
             if run:
-                await _json(
-                    send, {"detail": "Resume not supported; run is not awaiting"}, status=422
-                )
+                await _reply({"detail": "Resume not supported; run is not awaiting"}, status=422)
             else:
-                await _json(send, {"detail": f"Run '{run_id}' not found"}, status=404)
+                await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
 
         elif method == "GET" and path.startswith("/sessions/"):
             sid = path[len("/sessions/") :]
             info = transport.get_session(sid)
             if info:
-                await _json(send, info)
+                await _reply(info)
             else:
-                await _json(send, {"detail": f"Session '{sid}' not found"}, status=404)
+                await _reply({"detail": f"Session '{sid}' not found"}, status=404)
 
         else:
-            await _json(send, {"detail": "Not found"}, status=404)
+            await _reply({"detail": "Not found"}, status=404)
 
+    app.auth = resolved_auth  # type: ignore[attr-defined]
+    app.transport = transport  # type: ignore[attr-defined]
     return app
 
 
@@ -646,19 +673,17 @@ async def _read_body(receive: Any) -> bytes:
     return body
 
 
-_CORS = [
-    [b"access-control-allow-origin", b"*"],
-    [b"access-control-allow-methods", b"GET, POST, OPTIONS"],
-    [b"access-control-allow-headers", b"content-type"],
-]
-
-
-async def _cors_preflight(send: Any) -> None:
-    await send({"type": "http.response.start", "status": 204, "headers": _CORS})
+async def _cors_preflight(send: Any, cors: list[list[bytes]] | None = None) -> None:
+    await send({"type": "http.response.start", "status": 204, "headers": list(cors or [])})
     await send({"type": "http.response.body", "body": b""})
 
 
-async def _json(send: Any, data: dict, status: int = 200) -> None:
+async def _json(
+    send: Any,
+    data: dict,
+    status: int = 200,
+    cors: list[list[bytes]] | None = None,
+) -> None:
     body = json.dumps(data).encode()
     await send(
         {
@@ -667,7 +692,7 @@ async def _json(send: Any, data: dict, status: int = 200) -> None:
             "headers": [
                 [b"content-type", b"application/json"],
                 [b"content-length", str(len(body)).encode()],
-                *_CORS,
+                *(cors or []),
             ],
         }
     )
@@ -677,6 +702,7 @@ async def _json(send: Any, data: dict, status: int = 200) -> None:
 async def _sse_run_stream(
     send: Any,
     queue: asyncio.Queue[AcpSseEvent | None],
+    cors: list[list[bytes]] | None = None,
 ) -> None:
     await send(
         {
@@ -686,7 +712,7 @@ async def _sse_run_stream(
                 [b"content-type", b"text/event-stream"],
                 [b"cache-control", b"no-cache"],
                 [b"connection", b"keep-alive"],
-                *_CORS,
+                *(cors or []),
             ],
         }
     )

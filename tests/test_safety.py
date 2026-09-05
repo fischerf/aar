@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -17,10 +21,12 @@ from agent.safety.policy import (
     SafetyPolicy,
 )
 from agent.safety.sandbox import (
+    DEFAULT_ENV_DENYLIST_PATTERNS,
     LinuxSandbox,
     LocalSandbox,
     SandboxResult,
     WindowsSubprocessSandbox,
+    _select_env,
 )
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
@@ -1475,3 +1481,114 @@ class TestIntegratedSafety:
 
         assert results[0].is_error
         assert "denied" in results[0].output.lower()
+
+
+# ===========================================================================
+# C2 — timeout must kill the process tree and return promptly
+# ===========================================================================
+
+
+class TestC2TimeoutProcessTree:
+    """C2: ``proc.kill(); await proc.communicate()`` hangs forever when the
+    command backgrounded a child that still holds the output pipe."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_despite_background_child(self):
+        """The classic hang: a backgrounded grandchild inherits stdout."""
+        sb = LocalSandbox()
+        started = time.monotonic()
+        # An outer wait_for is the assertion: before the fix this never returned.
+        result = await asyncio.wait_for(sb.execute("sleep 30 & sleep 30", timeout=1), timeout=15)
+        elapsed = time.monotonic() - started
+        assert result.timed_out
+        assert result.exit_code == -1
+        assert elapsed < 15
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+    async def test_timeout_kills_process_tree(self):
+        """No orphaned grandchildren survive the timeout."""
+        marker = "sleep 3137"  # unusual duration — won't collide with other tests
+        sb = LocalSandbox()
+        result = await asyncio.wait_for(sb.execute(f"{marker} & {marker}", timeout=1), timeout=15)
+        assert result.timed_out
+        await asyncio.sleep(0.3)
+        ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True)
+        assert marker not in ps.stdout
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+    async def test_child_is_process_group_leader(self):
+        """start_new_session makes proc.pid a pgid, which is what _kill_tree signals."""
+        sb = LocalSandbox()
+        result = await sb.execute("echo $$; ps -o pgid= -p $$")
+        pid_line, pgid_line = result.stdout.split()[:2]
+        assert pid_line == pgid_line
+
+
+# ===========================================================================
+# H2 — secrets must not reach the model's shell
+# ===========================================================================
+
+
+class TestH2EnvironmentLeak:
+    """H2: the default (local) sandbox handed the model every exported API key."""
+
+    def test_local_sandbox_restricts_env_by_default(self, monkeypatch):
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        monkeypatch.setenv("SOME_RANDOM_VAR", "visible-but-not-allow-listed")
+        env = LocalSandbox()._build_env(None)
+        assert "MYPROVIDER_API_KEY" not in env
+        assert "SOME_RANDOM_VAR" not in env
+        assert "PATH" in env
+
+    def test_denylist_applies_even_when_unrestricted(self, monkeypatch):
+        """Opting into the full parent env still doesn't hand over credentials."""
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+        monkeypatch.setenv("DB_PASSWORD", "hunter2")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA")
+        monkeypatch.setenv("MY_ORDINARY_VAR", "keep-me")
+        env = LocalSandbox(restricted_env=False)._build_env(None)
+        assert "MYPROVIDER_API_KEY" not in env
+        assert "GITHUB_TOKEN" not in env
+        assert "DB_PASSWORD" not in env
+        assert "AWS_ACCESS_KEY_ID" not in env
+        assert env["MY_ORDINARY_VAR"] == "keep-me"
+
+    def test_empty_denylist_is_an_explicit_opt_out(self, monkeypatch):
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        env = LocalSandbox(restricted_env=False, env_denylist_patterns=[])._build_env(None)
+        assert env["MYPROVIDER_API_KEY"] == "sk-secret"
+
+    def test_denylist_applies_on_top_of_a_widened_allowlist(self, monkeypatch):
+        """An operator who adds a secret to allowed_env_vars still doesn't leak it."""
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        env = _select_env(["PATH", "MYPROVIDER_API_KEY"], list(DEFAULT_ENV_DENYLIST_PATTERNS))
+        assert "MYPROVIDER_API_KEY" not in env
+
+    def test_explicit_extra_env_is_not_filtered(self, monkeypatch):
+        """Host-supplied env (not model-supplied) is deliberate and passes through."""
+        env = LocalSandbox()._build_env({"BUILD_TOKEN": "given-by-host"})
+        assert env["BUILD_TOKEN"] == "given-by-host"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"), reason="needs a POSIX shell in-process"
+    )
+    async def test_local_sandbox_strips_secrets_end_to_end(self, monkeypatch):
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        result = await LocalSandbox().execute("echo [$MYPROVIDER_API_KEY]")
+        assert "sk-secret" not in result.stdout
+        assert "[]" in result.stdout
+
+    def test_linux_sandbox_applies_denylist(self, monkeypatch):
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        sb = LinuxSandbox(allowed_env_vars=["PATH", "MYPROVIDER_API_KEY"])
+        env = _select_env(sb.allowed_env_vars, sb.env_denylist_patterns)
+        assert "MYPROVIDER_API_KEY" not in env
+
+    def test_windows_sandbox_applies_denylist(self, monkeypatch):
+        monkeypatch.setenv("MYPROVIDER_API_KEY", "sk-secret")
+        sb = WindowsSubprocessSandbox(allowed_env_vars=["PATH", "MYPROVIDER_API_KEY"])
+        assert "MYPROVIDER_API_KEY" not in sb._build_env(None)

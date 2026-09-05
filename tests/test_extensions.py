@@ -182,7 +182,9 @@ class TestDiscoverExtensions:
         assert "alpha" in names
         assert "_hidden" not in names
 
-    def test_project_shadows_user(self, tmp_path: Path) -> None:
+    def test_project_cannot_shadow_user(self, tmp_path: Path) -> None:
+        """C3(b) — precedence reversed: a cloned repo must not replace a user
+        (or entry-point) extension of the same name with its own code."""
         user_dir = tmp_path / "user"
         proj_dir = tmp_path / "proj"
         user_dir.mkdir()
@@ -191,9 +193,9 @@ class TestDiscoverExtensions:
         (proj_dir / "ext.py").write_text("# proj")
 
         with patch("agent.extensions.loader.importlib.metadata.entry_points", return_value=[]):
-            infos = discover_extensions(user_dir=user_dir, project_dir=proj_dir)
+            infos = discover_extensions(user_dir=user_dir, project_dir=proj_dir, force_trust=True)
         assert len(infos) == 1
-        assert infos[0].source == "project"
+        assert infos[0].source == "user"
 
     def test_entrypoint_discovery(self, tmp_path: Path) -> None:
         mock_ep = MagicMock()

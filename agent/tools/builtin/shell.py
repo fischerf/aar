@@ -2,76 +2,58 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
-
-from agent.safety.sandbox import Sandbox
+from agent.safety.sandbox import LocalSandbox, Sandbox
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
+
+# M1 — Absolute upper bound for the model-supplied ``timeout`` when the caller
+# gives no executor-derived cap. Without a bound the model can request
+# ``timeout=10**9`` and, if the executor's outer guard is disabled
+# (``tools.command_timeout = 0``), hang the run forever.
+DEFAULT_TIMEOUT_HARD_CAP = 3600
 
 
 def register_shell_tools(
     registry: ToolRegistry,
     sandbox: Sandbox | None = None,
     default_timeout: int = 120,
+    hard_cap: int | None = None,
 ) -> None:
     """Register the bash tool into the given registry.
 
-    When *sandbox* is provided, all commands are executed through it (applying
-    whatever isolation the sandbox implements).  Falls back to direct subprocess
-    creation when *sandbox* is None, preserving backwards compatibility.
+    All commands are executed through *sandbox*.  When *sandbox* is None a
+    plain :class:`LocalSandbox` is created, so there is exactly one process
+    management code path (C2's timeout/process-group handling lands in one
+    place instead of being duplicated here).
 
     *default_timeout* is the timeout (seconds) used when the model omits the
     ``timeout`` argument.  Pass ``config.tools.bash_default_timeout`` here so
     the config drives the behaviour instead of a hardcoded value.
+
+    *hard_cap* clamps whatever the model asks for.  Pass
+    ``config.tools.command_timeout`` so the tool never outlives the executor's
+    outer guard; ``None`` / ``0`` falls back to ``DEFAULT_TIMEOUT_HARD_CAP``.
     """
+    active_sandbox = sandbox if sandbox is not None else LocalSandbox()
+    cap = hard_cap or DEFAULT_TIMEOUT_HARD_CAP
+    effective_default = max(1, min(default_timeout, cap))
 
-    async def bash(command: str, timeout: int = default_timeout) -> str:
+    async def bash(command: str, timeout: int = effective_default) -> str:
         """Execute a shell command and return stdout + stderr."""
-        if sandbox is not None:
-            result = await sandbox.execute(command, timeout=timeout)
-            return result.output
-
-        # Fallback: direct subprocess (sandbox=None).
-        # On Windows, bash resolves to WSL; on Unix use the system shell.
-        if os.name == "nt":
-            proc = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
-            )
-        else:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
-            )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+        # M1 — clamp: ``timeout`` arrives straight from the model.
+        timeout = max(1, min(int(timeout), cap))
+        result = await active_sandbox.execute(command, timeout=timeout)
+        if result.timed_out:
             return f"Error: command timed out after {timeout}s"
-
-        output_parts = []
-        if stdout:
-            output_parts.append(stdout.decode("utf-8", errors="replace"))
-        if stderr:
-            output_parts.append(f"STDERR:\n{stderr.decode('utf-8', errors='replace')}")
-        if proc.returncode != 0:
-            output_parts.append(f"Exit code: {proc.returncode}")
-        return "\n".join(output_parts) if output_parts else "(no output)"
+        return result.output
 
     registry.add(
         ToolSpec(
             name="bash",
             description=(
                 "Execute a shell command. Returns stdout, stderr, and exit code. "
-                f"Default timeout: {default_timeout}s — increase for slow commands."
+                f"Default timeout: {effective_default}s — increase for slow commands "
+                f"(maximum {cap}s)."
             ),
             prompt_snippet=("Execute a shell command (returns stdout, stderr, exit code)"),
             prompt_guidelines=[
@@ -88,7 +70,12 @@ def register_shell_tools(
                     "command": {"type": "string", "description": "The shell command to execute"},
                     "timeout": {
                         "type": "integer",
-                        "description": f"Timeout in seconds (default: {default_timeout}). Increase for slow commands.",
+                        "minimum": 1,
+                        "maximum": cap,
+                        "description": (
+                            f"Timeout in seconds (default: {effective_default}, max: {cap}). "
+                            "Increase for slow commands."
+                        ),
                     },
                 },
                 "required": ["command"],

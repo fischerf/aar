@@ -507,17 +507,17 @@ class TestWireJsonRpc:
         agent = _make_aar_sdk_agent(_make_config(tmp_path), MockProvider())
         client = _CaptureClient()
 
-        async with _AcpPair(agent, client) as (_, client_side):
+        pair = _AcpPair(agent, client)
+        async with pair as (_, client_side):
             await client_side.initialize(protocol_version=1)
 
-            # Push a non-JSON line directly at the agent's reader. The agent
-            # socket's writer (``_client_writer`` from the pair's client side)
-            # is the way raw bytes reach the agent's reader.
-            # Access the pair via the enclosing context.
-            # Use the underlying transport through the SDK connection object.
-            inner = client_side._conn  # type: ignore[attr-defined]
-            inner._writer.write(b"this is not json\n")  # type: ignore[attr-defined]
-            await inner._writer.drain()  # type: ignore[attr-defined]
+            # Push a non-JSON line straight at the agent's reader using the
+            # pair's own socket writer. (Reaching in via
+            # ``client_side._conn._writer`` broke when the SDK reworked
+            # ``Connection``'s internals in agent-client-protocol 0.12.)
+            assert pair._client_writer is not None
+            pair._client_writer.write(b"this is not json\n")
+            await pair._client_writer.drain()
 
             # If the receive loop survived, a valid request still works.
             resp = await client_side.new_session(cwd="/ws", mcp_servers=[])
