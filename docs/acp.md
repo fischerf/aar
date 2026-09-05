@@ -227,6 +227,40 @@ curl -s -N -X POST http://127.0.0.1:8000/runs \
 | `session_info_update` | After the first assistant response — sets the session title in the editor sidebar |
 | `available_commands_update` | Once per session on first prompt — advertises `/model` and `/clear` slash commands |
 
+### Extension UI panels (`_aar/panel_*`)
+
+Extensions can register a **UI panel** — a JSON-safe tree of nodes plus a list
+of actions (see `agent.extensions.api.UIPanel`). The fixed TUI draws it behind
+`ctrl+b`; over stdio ACP the same data is exposed through custom methods so an
+editor extension can render it. The SDK prefixes custom methods with `_`; Aar
+strips the prefix and dispatches on the `aar/…` name.
+
+| Direction | Method | Params | Result |
+|-----------|--------|--------|--------|
+| client → agent | `_aar/panel_list` | `sessionId` | `{panels: [{name, title, status, actions: [{id, label, key, kinds, destructive, confirm, inputs, mutates}]}]}` |
+| client → agent | `_aar/panel_snapshot` | `sessionId`, `panel` | `{panel, root, status}` — `root` is a `UINode` (`id`, `label`, `kind`, `style`, `expanded`, `data`, `children`) |
+| client → agent | `_aar/panel_action` | `sessionId`, `panel`, `action`, `nodeId`, `args?` | `{panel, action, message, root, status}` — `message` is the same line the slash command would print; `root` is a fresh snapshot |
+| agent → client | `_aar/panel_changed` | `sessionId`, `panel` | notification, sent after a prompt or slash command when the extension flagged its state as stale; fetch a new snapshot to clear it |
+
+Rules:
+
+* `args` carries what the UI collected for the action's `inputs` — e.g.
+  `{"force": true}` for a shadow-branching `undo`, `{"message": "…"}` for `done`.
+  **Destructive actions are not confirmed server-side** — the client is
+  expected to confirm using the action's `confirm` template (`{label}` is the
+  node label).
+* Actions with `mutates: true` are rejected with *invalid params* while a
+  prompt is in flight for the session; cancel first.
+* Unknown session / panel / action / node → JSON-RPC *invalid params*;
+  unknown `_aar/…` method → *method not found*.
+* `sessionId` / `nodeId` are also accepted as `session_id` / `node_id`.
+
+The shadow-branching extension (`aar-ext-shadow-branching` ≥ 0.3.0) registers
+the panel `shadow_branching` with actions `undo`, `branch`, `switch`, `diff`,
+`delete`, `done`, `refresh`.
+
+Not available over the HTTP/SSE transport (it loads no extensions).
+
 ### Permission requests
 
 By default, Aar forwards tool-approval prompts to the editor via the ACP `request_permission` mechanism.
