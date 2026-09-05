@@ -21,6 +21,75 @@
         "timeout": null
       }
     },
+    "claude-opus-5": {
+      "name": "anthropic",
+      "model": "claude-opus-5",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 128000,
+      "temperature": 0.0,
+      "context_window": 1000000,
+      "token_budget": 500000,
+      "cost_limit": 5.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "prompt_caching": true,
+        "thinking": {
+          "type": "adaptive"
+        },
+        "output_config": {
+          "effort": "high"
+        },
+        "timeout": null
+      }
+    },
+    "claude-sonnet-5": {
+      "name": "anthropic",
+      "model": "claude-sonnet-5",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 128000,
+      "temperature": 0.0,
+      "context_window": 1000000,
+      "token_budget": 500000,
+      "cost_limit": 5.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "prompt_caching": true,
+        "thinking": {
+          "type": "adaptive"
+        },
+        "output_config": {
+          "effort": "high"
+        },
+        "timeout": null
+      }
+    },
+    "claude-fable-5-1": {
+      "name": "anthropic",
+      "model": "claude-fable-5-1",
+      "api_key": "",
+      "base_url": "",
+      "max_tokens": 128000,
+      "temperature": 0.0,
+      "context_window": 1000000,
+      "token_budget": 500000,
+      "cost_limit": 10.0,
+      "response_format": "",
+      "json_schema": {},
+      "extra": {
+        "prompt_caching": true,
+        "thinking": {
+          "type": "adaptive"
+        },
+        "output_config": {
+          "effort": "high"
+        },
+        "timeout": null
+      }
+    },
     "openai": {
       "name": "openai",
       "model": "gpt-5.4-mini",
