@@ -238,18 +238,26 @@
       "**/.pypirc"
     ],
     "allowed_paths": ["<cwd>/**"],
+    "denied_commands": null,
+    "denied_command_patterns": null,
     "sandbox": {
       "mode": "local",
-      "local": {},
+      "env_denylist_patterns": null,
+      "local": {
+        "restricted_env": true,
+        "allowed_env_vars": null
+      },
       "linux": {
         "workspace": null,
-        "max_memory_mb": 512
+        "max_memory_mb": 512,
+        "allowed_env_vars": null
       },
       "windows": {
         "workspace": null,
         "max_memory_mb": 512,
         "max_processes": 10,
-        "use_low_integrity": true
+        "use_low_integrity": true,
+        "allowed_env_vars": null
       },
       "wsl": {
         "profile": null,
@@ -260,6 +268,7 @@
         "workspace": null,
         "install_path": null,
         "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
+        "rootfs_sha256": "ce8f782f1628d046fb6360eff880b898e5205ed91106d9d14ff4fcb97431bbde",
         "pre_install_commands": [],
         "packages": ["python3", "py3-pip"],
         "package_install_command": "apk add --no-cache {packages}",
@@ -290,6 +299,7 @@
     "truncate_keep_recent": 4,
     "truncate_max_chars": 300
   },
+  "trust_project_extensions": false,
   "skills_dirs": [],
   "skills_enabled": true,
   "max_steps": 80,

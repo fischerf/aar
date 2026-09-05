@@ -568,8 +568,11 @@ class TestSandboxWiring:
         assert "mocked_output" in output
 
     @pytest.mark.asyncio
-    async def test_no_sandbox_uses_direct_subprocess(self):
-        """With sandbox=None the bash tool executes directly (fallback path).
+    async def test_no_sandbox_falls_back_to_local_sandbox(self):
+        """M1: sandbox=None no longer bypasses the sandbox layer.
+
+        The old fallback duplicated subprocess management (and C2's timeout
+        bug) inside the tool; it now routes through a plain ``LocalSandbox``.
 
         The timeout is intentionally generous: on Windows this path spawns
         a fresh WSL session, whose cold-start can exceed 10s when the rest
@@ -584,6 +587,93 @@ class TestSandboxWiring:
         assert spec is not None
         output = await spec.handler(command="echo direct_ok", timeout=60)
         assert "direct_ok" in output, f"unexpected output: {output!r}"
+
+
+# ---------------------------------------------------------------------------
+# M1 — model-controlled bash timeout must be bounded
+# ---------------------------------------------------------------------------
+
+
+class TestM1TimeoutClamp:
+    """M1: ``timeout`` comes straight from the model and was unbounded."""
+
+    @staticmethod
+    def _recording_sandbox():
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agent.safety.sandbox import SandboxResult
+
+        sb = MagicMock()
+        sb.execute = AsyncMock(return_value=SandboxResult(stdout="ok", exit_code=0))
+        return sb
+
+    @pytest.mark.asyncio
+    async def test_absurd_timeout_is_clamped_to_hard_cap(self):
+        from agent.tools.builtin.shell import register_shell_tools
+
+        sb = self._recording_sandbox()
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=sb, default_timeout=10, hard_cap=30)
+
+        await reg.get("bash").handler(command="echo x", timeout=10**9)
+        sb.execute.assert_called_once_with("echo x", timeout=30)
+
+    @pytest.mark.asyncio
+    async def test_zero_and_negative_timeouts_are_floored(self):
+        from agent.tools.builtin.shell import register_shell_tools
+
+        sb = self._recording_sandbox()
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=sb, default_timeout=10, hard_cap=30)
+
+        await reg.get("bash").handler(command="echo x", timeout=0)
+        sb.execute.assert_called_once_with("echo x", timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_disabled_outer_guard_still_bounded(self):
+        """tools.command_timeout = 0 disables the executor guard — the tool
+        must still refuse to run forever."""
+        from agent.tools.builtin.shell import DEFAULT_TIMEOUT_HARD_CAP, register_shell_tools
+
+        sb = self._recording_sandbox()
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=sb, default_timeout=10, hard_cap=0)
+
+        await reg.get("bash").handler(command="echo x", timeout=10**9)
+        sb.execute.assert_called_once_with("echo x", timeout=DEFAULT_TIMEOUT_HARD_CAP)
+
+    def test_schema_declares_the_bound(self):
+        from agent.tools.builtin.shell import register_shell_tools
+
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=self._recording_sandbox(), hard_cap=30)
+        schema = reg.get("bash").input_schema["properties"]["timeout"]
+        assert schema["maximum"] == 30
+        assert schema["minimum"] == 1
+
+    def test_default_timeout_never_exceeds_the_cap(self):
+        from agent.tools.builtin.shell import register_shell_tools
+
+        reg = ToolRegistry()
+        register_shell_tools(
+            reg, sandbox=self._recording_sandbox(), default_timeout=600, hard_cap=30
+        )
+        assert reg.get("bash").input_schema["properties"]["timeout"]["maximum"] == 30
+
+    @pytest.mark.asyncio
+    async def test_timeout_reported_as_error(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agent.safety.sandbox import SandboxResult
+        from agent.tools.builtin.shell import register_shell_tools
+
+        sb = MagicMock()
+        sb.execute = AsyncMock(return_value=SandboxResult(timed_out=True, exit_code=-1))
+        reg = ToolRegistry()
+        register_shell_tools(reg, sandbox=sb, default_timeout=5, hard_cap=30)
+
+        output = await reg.get("bash").handler(command="sleep 99", timeout=5)
+        assert "timed out after 5s" in output
 
 
 # ---------------------------------------------------------------------------

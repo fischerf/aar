@@ -31,6 +31,20 @@ async def _auto_approve(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
     return ApprovalResult.APPROVED
 
 
+async def _deny_approval(spec: ToolSpec, tc: ToolCall) -> ApprovalResult:
+    """C1 — Default for the HTTP transport, which has no approval channel.
+
+    ``--http`` has no way to ask a human, so auto-approving every write and
+    shell command turned an unattended endpoint into remote code execution.
+    Pass ``--approval auto`` to opt back in.
+    """
+    logger.warning(
+        "ACP HTTP transport: denying %s (no approval channel; pass --approval auto to allow)",
+        tc.tool_name,
+    )
+    return ApprovalResult.DENIED
+
+
 def _side_effects_to_tool_kind(side_effects: list[SideEffect], tool_name: str = "") -> str:
     """Map Aar ``SideEffect`` list to an ACP ``ToolKind`` string.
 

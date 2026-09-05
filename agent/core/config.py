@@ -226,9 +226,17 @@ class ToolConfig(BaseModel):
 
 
 class LocalSandboxConfig(BaseModel):
-    """No isolation — direct subprocess execution (trusted dev environments)."""
+    """No process isolation — direct subprocess execution (trusted dev environments).
 
-    pass  # no configuration options
+    H2 — ``restricted_env`` defaults to True so the model's shell only sees the
+    allow-listed variables, the same as the ``linux`` and ``windows`` modes.
+    Set it to False to inherit the full parent environment (the deny-list in
+    :class:`SandboxConfig` still applies).
+    """
+
+    restricted_env: bool = True
+    # None → agent.safety.sandbox.DEFAULT_ALLOWED_ENV_VARS
+    allowed_env_vars: list[str] | None = None
 
 
 class LinuxSandboxConfig(BaseModel):
@@ -236,6 +244,8 @@ class LinuxSandboxConfig(BaseModel):
 
     workspace: str | None = None  # None → cwd at runtime
     max_memory_mb: int = 512
+    # None → agent.safety.sandbox.DEFAULT_ALLOWED_ENV_VARS
+    allowed_env_vars: list[str] | None = None
 
 
 class WindowsSandboxConfig(BaseModel):
@@ -245,6 +255,8 @@ class WindowsSandboxConfig(BaseModel):
     max_memory_mb: int = 512
     max_processes: int = 10
     use_low_integrity: bool = True
+    # None → agent.safety.sandbox.DEFAULT_ALLOWED_ENV_VARS
+    allowed_env_vars: list[str] | None = None
 
 
 class WslSandboxConfig(BaseModel):
@@ -326,6 +338,11 @@ class SandboxConfig(BaseModel):
     """
 
     mode: str = "local"
+    # H2 — Environment variable names (case-insensitive globs) stripped from the
+    # child environment in *every* mode, including when ``restricted_env`` is
+    # off.  ``None`` uses agent.safety.sandbox.DEFAULT_ENV_DENYLIST_PATTERNS;
+    # set to ``[]`` to deliberately expose credentials to the model's shell.
+    env_denylist_patterns: list[str] | None = None
     local: LocalSandboxConfig = Field(default_factory=LocalSandboxConfig)
     linux: LinuxSandboxConfig = Field(default_factory=LinuxSandboxConfig)
     windows: WindowsSandboxConfig = Field(default_factory=WindowsSandboxConfig)
@@ -380,6 +397,13 @@ class SafetyConfig(BaseModel):
         ]
     )
     allowed_paths: list[str] = Field(default_factory=lambda: ["<cwd>/**"])
+    # Best-effort shell-command deny-list. ``None`` uses
+    # ``PolicyConfig.denied_commands``' built-in defaults; a list replaces them.
+    denied_commands: list[str] | None = None
+    # Regex deny-list matched against the raw command line (download-and-execute,
+    # fork bombs — shapes that token matching can't express). ``None`` uses
+    # ``PolicyConfig.denied_command_patterns``' defaults; ``[]`` disables them.
+    denied_command_patterns: list[str] | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     log_all_commands: bool = True
     acp_approval_timeout: float = (
@@ -416,6 +440,9 @@ class AgentConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    # C3 — Execute ``.agent/extensions/*.py`` from the CWD without prompting.
+    # Off by default: those files arrive with ``git clone`` and run as you.
+    trust_project_extensions: bool = False
     skills_dirs: list[str] = Field(default_factory=list)  # extra skill discovery paths
     skills_enabled: bool = True  # set to False to disable skill loading
     max_steps: int = 50

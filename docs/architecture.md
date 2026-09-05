@@ -7,7 +7,7 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 1. **Thin core loop** — the main execution path (`loop.py`) is a single coroutine focused on control flow only. Helpers for provider requests, retries, event emission, and budget accounting live in sibling modules (`provider_runner.py`, `loop_helpers.py`). The loop does exactly three things: call the provider, execute tool calls, and append events to the session.
 2. **Typed event model** — every interaction (messages, tool calls, results, metadata) is a Pydantic model. Events are serializable, inspectable, and carry timing data.
 3. **Provider-agnostic** — the agent loop works with any provider that implements the `Provider` ABC. Swapping between Anthropic, OpenAI, Ollama, or a generic endpoint requires changing one config field.
-4. **Safe by default** — path restrictions, command deny-lists, and approval gates are built in and always active. Interactive modes enable a workspace sandbox by default.
+4. **Safe by default** — path restrictions, a best-effort command deny-list, and approval gates are built in and always active. Interactive modes enable a workspace sandbox by default.
 5. **Modular transports** — the same `Agent` class runs from CLI, TUI, web API, or embedded in your code. Transports only handle I/O; they never contain business logic.
 
 ## Component overview

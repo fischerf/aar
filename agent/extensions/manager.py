@@ -33,8 +33,15 @@ class ExtensionManager:
         *,
         user_dir: Path | None = None,
         project_dir: Path | None = None,
+        trust_prompt: Any = None,
+        force_trust: bool = False,
     ) -> None:
-        """Load all extensions and create the shared context."""
+        """Load all extensions and create the shared context.
+
+        C3 — *trust_prompt* / *force_trust* are forwarded to
+        :func:`~agent.extensions.loader.discover_extensions`; without them,
+        untrusted project-local extensions are skipped rather than executed.
+        """
         self._context = ExtensionContext(
             session=session,
             config=config,
@@ -42,7 +49,12 @@ class ExtensionManager:
             logger=logging.getLogger("aar.extensions"),
         )
 
-        infos = discover_extensions(user_dir=user_dir, project_dir=project_dir)
+        infos = discover_extensions(
+            user_dir=user_dir,
+            project_dir=project_dir,
+            trust_prompt=trust_prompt,
+            force_trust=force_trust,
+        )
         logger.info("Discovered %d extension(s)", len(infos))
 
         for info in infos:

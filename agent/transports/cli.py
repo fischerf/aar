@@ -36,6 +36,10 @@ from agent.transports.tui_utils.formatting import _format_approval_args
 
 app = typer.Typer(name="aar", help="Lean Python Agent CLI", no_args_is_help=True)
 console = Console()
+# Rich's ``Console.print`` has no ``err`` keyword — a second console bound to
+# stderr is how you write there. ``aar acp --http`` used to crash on startup
+# trying to pass one.
+err_console = Console(stderr=True)
 
 _USER_DIR = Path.home() / ".aar"
 _USER_CONFIG = _USER_DIR / "config.json"
@@ -73,7 +77,11 @@ def _harvest_tool_prompt_metadata(
     if enabled & fs_tools:
         register_filesystem_tools(reg)
     if enabled & shell_tools:
-        register_shell_tools(reg)
+        register_shell_tools(
+            reg,
+            default_timeout=config.tools.bash_default_timeout,
+            hard_cap=config.tools.command_timeout,
+        )
     if enabled & search_tools:
         register_search_tools(reg)
 
@@ -304,6 +312,42 @@ def _make_event_handler(verbose: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# C3 — project extension trust prompt (interactive transports only)
+# ---------------------------------------------------------------------------
+
+
+def _terminal_extension_trust_prompt(directory: Path, infos: list[Any]) -> str:
+    """Ask once before executing ``.agent/extensions`` code from this project.
+
+    Returns "always" (remember this exact tree), "yes" (this run only) or "no".
+    Blocking input is fine here: this runs once, at startup, before the agent
+    has anything else in flight.
+    """
+    listing = "\n".join(f"  • {i.name}  [dim]{i.path}[/]" for i in infos)
+    console.print(
+        Panel(
+            f"[bold yellow]This project ships {len(infos)} extension(s)[/] in "
+            f"[cyan]{directory}[/].\n"
+            f"{listing}\n\n"
+            "[dim]Extensions are Python code that runs as you, with no sandbox, "
+            "before any safety policy applies. Only load them if you trust this "
+            "repository.[/]",
+            title="Untrusted project extensions",
+            border_style="yellow",
+        )
+    )
+    try:
+        answer = console.input("Load them? [y]es once / [a]lways / [N]o: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return "no"
+    if answer in ("a", "always"):
+        return "always"
+    if answer in ("y", "yes"):
+        return "yes"
+    return "no"
+
+
+# ---------------------------------------------------------------------------
 # MCP-aware agent creation
 # ---------------------------------------------------------------------------
 
@@ -313,6 +357,7 @@ async def _run_with_mcp(
     config: AgentConfig,
     mcp_config_path: str | None = None,
     approval_callback: Any = None,
+    extension_trust_prompt: Any = None,
 ) -> Any:
     """Run an async operation with optional MCP bridge lifecycle management.
 
@@ -338,10 +383,19 @@ async def _run_with_mcp(
         async with MCPBridge(servers) as bridge:
             count = await bridge.register_all(registry)
             console.print(f"[dim]Registered {count} MCP tool(s)[/]")
-            agent = Agent(config=config, registry=registry, approval_callback=approval_callback)
+            agent = Agent(
+                config=config,
+                registry=registry,
+                approval_callback=approval_callback,
+                extension_trust_prompt=extension_trust_prompt,
+            )
             return await coro_factory(agent)
     else:
-        agent = Agent(config=config, approval_callback=approval_callback)
+        agent = Agent(
+            config=config,
+            approval_callback=approval_callback,
+            extension_trust_prompt=extension_trust_prompt,
+        )
         return await coro_factory(agent)
 
 
@@ -570,6 +624,7 @@ def chat(
             config,
             mcp_config,
             approval_callback=_terminal_approval_callback,
+            extension_trust_prompt=_terminal_extension_trust_prompt,
         )
     )
 
@@ -633,6 +688,14 @@ def run(
         "--log-file",
         help="Path to log file (append mode). Default: stderr only.",
     ),
+    trust_project_extensions: bool = typer.Option(
+        False,
+        "--trust-project-extensions",
+        help=(
+            "Execute .agent/extensions/*.py from the current directory. "
+            "Off by default: those files arrive with the repository and run as you."
+        ),
+    ),
 ) -> None:
     """Run a single task and exit."""
     config = _build_config(
@@ -650,6 +713,8 @@ def run(
         log_level=log_level,
         log_file=log_file,
     )
+    if trust_project_extensions:
+        config.trust_project_extensions = True
     _apply_logging(config)
 
     async def _do(agent: Agent) -> None:
@@ -917,8 +982,85 @@ def tui(
             config,
             mcp_config,
             approval_callback=_terminal_approval_callback,
+            extension_trust_prompt=_terminal_extension_trust_prompt,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# C1 — HTTP transport hardening helpers (shared by `serve` and `acp --http`)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_http_auth(token: Optional[str], no_auth: bool, host: str) -> Any:
+    """Build the bearer-token gate, refusing unsafe public binds.
+
+    A public bind (``--host 0.0.0.0``) with a *generated* token would print a
+    secret to a log nobody reads while exposing the agent to the whole network;
+    require the operator to say what the token is. ``--no-auth`` is honoured but
+    loudly flagged.
+    """
+    from agent.transports._http_auth import TOKEN_ENV_VAR, BearerAuth, is_loopback
+
+    public = not is_loopback(host)
+    if no_auth:
+        if public:
+            console.print(
+                f"[red]Refusing to bind {host} with --no-auth: an unauthenticated agent "
+                "on a public interface is remote code execution for anyone who can reach "
+                "it. Bind to 127.0.0.1 or drop --no-auth.[/]"
+            )
+            raise typer.Exit(2)
+        console.print(
+            "[yellow]Warning: --no-auth — any local process (including a web page you "
+            "visit) can drive this agent.[/]"
+        )
+        return BearerAuth.disabled()
+
+    auth = BearerAuth(token)
+    if public and auth.generated:
+        console.print(
+            f"[red]Refusing to bind {host} without a token. Pass --token <secret> or set "
+            f"${TOKEN_ENV_VAR}.[/]"
+        )
+        raise typer.Exit(2)
+    return auth
+
+
+def _resolve_http_approval(approval: str, host: str) -> Any:
+    """Map ``--approval`` to a callback; warn loudly about auto on a public bind."""
+    from agent.transports._http_auth import is_loopback
+
+    choice = (approval or "deny").strip().lower()
+    if choice not in ("deny", "auto"):
+        console.print(f"[red]Invalid --approval {approval!r}: expected 'deny' or 'auto'.[/]")
+        raise typer.Exit(2)
+    if choice == "deny":
+        from agent.transports.web import _deny_approval_callback
+
+        return _deny_approval_callback
+    if not is_loopback(host):
+        console.print(
+            f"[red]--approval auto on {host}: anyone who can reach this port and holds the "
+            "token can run arbitrary commands as you.[/]"
+        )
+    from agent.transports.web import _auto_approve_callback
+
+    return _auto_approve_callback
+
+
+def _print_http_token(auth: Any, console_: Any = None) -> None:
+    """Print a generated token once so the operator can actually use the server."""
+    out = console_ or console
+    if not getattr(auth, "enabled", True):
+        return
+    if auth.generated:
+        out.print(
+            f"[bold]Auth token (generated):[/] {auth.token}\n"
+            f"[dim]Use: Authorization: Bearer {auth.token}[/]"
+        )
+    else:
+        out.print("[dim]Auth: bearer token required (supplied).[/]")
 
 
 @app.command()
@@ -956,6 +1098,42 @@ def serve(
         "--log-file",
         help="Path to log file (append mode). Default: stderr only.",
     ),
+    token: Optional[str] = typer.Option(
+        None,
+        "--token",
+        help=(
+            "Bearer token required on every request. Defaults to $AAR_HTTP_TOKEN, "
+            "or a generated token printed once at startup."
+        ),
+    ),
+    no_auth: bool = typer.Option(
+        False,
+        "--no-auth",
+        help="Disable authentication entirely (only behind your own auth layer).",
+    ),
+    cors_origin: list[str] = typer.Option(
+        [],
+        "--cors-origin",
+        help="Allow cross-origin requests from this exact origin (repeatable).",
+    ),
+    approval: str = typer.Option(
+        "deny",
+        "--approval",
+        help="What to do when a tool needs approval: deny (default) | auto.",
+    ),
+    allow_safety_override: bool = typer.Option(
+        False,
+        "--allow-safety-override",
+        help="Let request bodies replace the safety policy (default: tighten-only).",
+    ),
+    trust_project_extensions: bool = typer.Option(
+        False,
+        "--trust-project-extensions",
+        help=(
+            "Execute .agent/extensions/*.py from the current directory. "
+            "Off by default: those files arrive with the repository and run as you."
+        ),
+    ),
 ) -> None:
     """Start the web API server (requires uvicorn)."""
     config = _build_config(
@@ -968,6 +1146,8 @@ def serve(
         log_level=log_level,
         log_file=log_file,
     )
+    if trust_project_extensions:
+        config.trust_project_extensions = True
     _apply_logging(config)
     from agent.transports.web import create_asgi_app
 
@@ -975,7 +1155,8 @@ def serve(
         import uvicorn
     except ImportError:
         console.print(
-            "[red]uvicorn is required for the web server. Install with: pip install uvicorn[/]"
+            "[red]uvicorn is required for the web server. "
+            'Install with: pip install "aar-agent[serve]"[/]'
         )
         raise typer.Exit(1)
 
@@ -984,9 +1165,23 @@ def serve(
             "[yellow]Warning: --mcp-config is not yet supported for the serve command.[/]"
         )
 
-    asgi_app = create_asgi_app(config)
+    auth = _resolve_http_auth(token=token, no_auth=no_auth, host=host)
+    approval_callback = _resolve_http_approval(approval, host=host)
+
+    asgi_app = create_asgi_app(
+        config,
+        approval_callback=approval_callback,
+        auth=auth,
+        cors_origins=list(cors_origin),
+        allow_safety_override=allow_safety_override,
+    )
+    if allow_safety_override:
+        console.print(
+            "[red]--allow-safety-override: request bodies can replace the safety policy.[/]"
+        )
     console.print(f"[bold green]Starting web server on {host}:{port}[/]")
     console.print("[dim]POST /chat, POST /chat/stream, GET /sessions, GET /health[/]")
+    _print_http_token(auth)
     uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
 
 
@@ -1032,6 +1227,29 @@ def acp(
         "--log-file",
         help="Path to log file (append mode). Default: stderr only.",
     ),
+    token: Optional[str] = typer.Option(
+        None,
+        "--token",
+        help=(
+            "Bearer token required on every HTTP request (--http only). Defaults to "
+            "$AAR_HTTP_TOKEN, or a generated token printed once at startup."
+        ),
+    ),
+    no_auth: bool = typer.Option(
+        False,
+        "--no-auth",
+        help="Disable HTTP authentication entirely (--http only).",
+    ),
+    cors_origin: list[str] = typer.Option(
+        [],
+        "--cors-origin",
+        help="Allow cross-origin requests from this exact origin (repeatable, --http only).",
+    ),
+    approval: str = typer.Option(
+        "deny",
+        "--approval",
+        help="HTTP mode only — tool approval: deny (default) | auto.",
+    ),
 ) -> None:
     """Start an ACP agent (Agent Communication Protocol).
 
@@ -1044,7 +1262,7 @@ def acp(
       }
 
     HTTP mode (--http): start a REST/SSE server for remote or programmatic
-    access.  Requires uvicorn (pip install uvicorn).
+    access.  Requires uvicorn (pip install "aar-agent[serve]").
     """
     config = _build_config(
         model=model,
@@ -1064,27 +1282,31 @@ def acp(
         try:
             import uvicorn
         except ImportError:
-            console.print(
-                "[red]uvicorn is required for --http mode. Install with: pip install uvicorn[/]",
-                err=True,
+            err_console.print(
+                "[red]uvicorn is required for --http mode. "
+                'Install with: pip install "aar-agent[serve]"[/]'
             )
             raise typer.Exit(1)
 
+        auth = _resolve_http_auth(token=token, no_auth=no_auth, host=host)
         asgi_app = create_acp_asgi_app(
             config=config,
+            approval_callback=_resolve_http_approval(approval, host=host),
             agent_name=agent_name,
             agent_description=agent_description,
+            auth=auth,
+            cors_origins=list(cors_origin),
         )
-        console.print(f"[bold green]ACP HTTP server on {host}:{port}[/]", err=True)
+        err_console.print(f"[bold green]ACP HTTP server on {host}:{port}[/]")
+        _print_http_token(auth, console_=err_console)
         # #3b — Make the feature gap obvious to operators on the command
         # line, in addition to the structured logger.warning emitted by
         # AcpTransport.__init__.
-        console.print(
+        err_console.print(
             "[yellow]Note: --http transport is feature-incomplete vs stdio "
             "(no MCP, slash commands, extensions, ACP permissions, "
             "session_update replay, set_session_model, fork/resume/list). "
-            "For full editor integration, use stdio instead.[/]",
-            err=True,
+            "For full editor integration, use stdio instead.[/]"
         )
         uvicorn.run(asgi_app, host=host, port=port, log_level=config.log_level.lower())
     else:
@@ -1475,9 +1697,11 @@ def register(api: ExtensionAPI) -> None:
     if _builtin_rules_path.is_file():
         _rules_text = _builtin_rules_path.read_text(encoding="utf-8")
 
-    # config_reference.json → ~/.aar/config.example.json
+    # config/samples/config.json → ~/.aar/config.example.json
+    # (this pointed at a "config_reference.json" that has never existed, so the
+    # example config documented in docs/configuration.md was never written)
     _USER_CONFIG_EXAMPLE = _USER_DIR / "config.example.json"
-    _builtin_config_ref = _BUILTIN_SAMPLES_DIR / "config_reference.json"
+    _builtin_config_ref = _BUILTIN_SAMPLES_DIR / "config.json"
     _config_example_data: dict | None = None
     if _builtin_config_ref.is_file():
         _config_example_data = _json.loads(_builtin_config_ref.read_text(encoding="utf-8"))

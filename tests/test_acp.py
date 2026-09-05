@@ -2553,11 +2553,21 @@ class TestAcpTransportSession:
 # ---------------------------------------------------------------------------
 
 
+def _auth_headers(app: Any, extra: list | None = None) -> list:
+    """C1 — every ACP route but ``/ping`` requires the app's bearer token."""
+    headers: list = [[b"content-type", b"application/json"]]
+    if getattr(app, "auth", None) is not None:
+        headers.append([b"authorization", f"Bearer {app.auth.token}".encode()])
+    headers.extend(extra or [])
+    return headers
+
+
 async def _call_asgi(
     app: Any,
     method: str,
     path: str,
     body: dict | None = None,
+    headers: list | None = None,
 ) -> tuple[int, dict]:
     """Minimal ASGI test client — drives the app without a real HTTP server."""
 
@@ -2568,7 +2578,7 @@ async def _call_asgi(
         "method": method.upper(),
         "path": path,
         "query_string": b"",
-        "headers": [[b"content-type", b"application/json"]],
+        "headers": headers if headers is not None else _auth_headers(app),
     }
 
     response_started: list[dict] = []
@@ -2634,7 +2644,7 @@ class TestAcpAsgiApp:
         config = _make_config()
         app = create_acp_asgi_app(config=config)
 
-        scope = {"type": "http", "method": "POST", "path": "/runs", "headers": []}
+        scope = {"type": "http", "method": "POST", "path": "/runs", "headers": _auth_headers(app)}
         received: list[dict] = []
 
         async def receive():
@@ -2697,6 +2707,8 @@ class TestAcpAsgiApp:
         app = create_acp_asgi_app(config=config)
 
         scope = {"type": "http", "method": "OPTIONS", "path": "/runs", "headers": []}
+        # OPTIONS is answered before the auth gate — a preflight can't carry
+        # the Authorization header, that's what it is asking permission for.
         received: list[dict] = []
 
         async def receive():
@@ -2799,7 +2811,7 @@ class TestSseByteFraming:
             "method": "POST",
             "path": "/runs",
             "query_string": b"",
-            "headers": [[b"content-type", b"application/json"]],
+            "headers": _auth_headers(app),
         }
         body_bytes = json.dumps(
             {
