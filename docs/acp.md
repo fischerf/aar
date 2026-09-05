@@ -122,6 +122,16 @@ aar acp --http --host 0.0.0.0 --port 9000
 | `POST` | `/runs/{run_id}/cancel` | Cancel an in-progress run |
 | `GET` | `/runs/{run_id}/events` | Full ACP event log for a run |
 | `GET` | `/sessions/{session_id}` | Session metadata |
+| `GET` | `/sessions/{session_id}/panels` | Extension UI panels registered for the session, with their actions |
+| `GET` | `/sessions/{session_id}/panels/{name}` | Panel snapshot — `{panel, root, status}`; `root` is a `UINode` tree |
+| `POST` | `/sessions/{session_id}/panels/{name}/actions/{action}` | Run an action; body `{"node_id": "...", "args": {...}}` → `{message, root, status}` |
+
+Panel semantics match the stdio `_aar/panel_*` methods (see §4): the client
+confirms destructive actions itself; mutating actions return `409` while a run
+is in progress for the session; unknown session/panel/action/node → `404`,
+wrong node kind → `422`. In `stream` mode a `panel_changed` SSE event is emitted
+after the run for every panel the extension flagged as stale. The transport
+keeps one `Agent` per `session_id`, so extension state persists across runs.
 
 ### Limitations vs stdio
 
@@ -137,7 +147,8 @@ Missing relative to stdio (as of the Wave 4 audit, 2026-06):
 | Run a prompt, stream assistant text | ✅ | ✅ |
 | MCP servers from the client (`initialize.mcp_servers`) | ✅ | ❌ |
 | Slash commands (`/model`, `/help`, `/clear`, …) | ✅ | ❌ |
-| Extension auto-discovery and `register(api)` hooks | ✅ | ❌ |
+| Extension auto-discovery and `register(api)` hooks | ✅ | ✅ (per session; extension slash commands not parsed) |
+| Extension UI panels | ✅ (`_aar/panel_*`) | ✅ (`/sessions/{id}/panels…`) |
 | ACP `session/request_permission` round-trip | ✅ | ❌ (auto-approve fallback) |
 | `session/update` notifications for live IDEs | ✅ | ❌ (events buffered on the run only) |
 | `set_session_model` (provider/model switch mid-session) | ✅ | ❌ |
@@ -174,6 +185,7 @@ created → in-progress → completed
 | `run_completed` | Run finished successfully |
 | `run_failed` | Run terminated with an error |
 | `run_cancelled` | Run was cancelled |
+| `panel_changed` | An extension UI panel is stale (`session_id`, `panel`) — fetch a new snapshot |
 
 ### Quick example
 
@@ -259,7 +271,7 @@ The shadow-branching extension (`aar-ext-shadow-branching` ≥ 0.3.0) registers
 the panel `shadow_branching` with actions `undo`, `branch`, `switch`, `diff`,
 `delete`, `done`, `refresh`.
 
-Not available over the HTTP/SSE transport (it loads no extensions).
+Over HTTP/SSE the same data is served by `GET /sessions/{id}/panels…` (see §3).
 
 ### Permission requests
 
