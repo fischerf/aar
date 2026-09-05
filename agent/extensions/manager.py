@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agent.extensions.api import BlockResult, ExtensionContext
+from agent.extensions.api import BlockResult, ExtensionContext, UIPanel
 from agent.extensions.loader import ExtensionInfo, discover_extensions, load_extension
 
 if TYPE_CHECKING:
@@ -157,6 +157,17 @@ class ExtensionManager:
             if info.api is None:
                 continue
             merged.update(info.api._commands)
+        return merged
+
+    @property
+    def panels(self) -> dict[str, UIPanel]:
+        """All registered UI panels from all extensions, keyed by panel name."""
+        merged: dict[str, UIPanel] = {}
+        for info in self._extensions:
+            if info.api is None:
+                continue
+            for panel in info.api._panels:
+                merged[panel.name] = panel
         return merged
 
     @property

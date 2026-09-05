@@ -18,8 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Writes to skill files stay denied, and `denied_paths` still takes precedence
   (a credential file under a skills dir is never exposed). New helper
   `agent.core.skills.skill_read_paths`.
+- **Extension UI panels** — extensions can register a transport-agnostic
+  panel (`UIPanel`: a `UINode` tree + `UIAction` list) via
+  `api.register_panel()`. The fixed TUI renders it in the right column behind
+  `ctrl+b` (`ExtensionPanel` + `ConfirmModal`; action keys only while the
+  panel has focus, destructive actions confirmed, mutating actions refused
+  while the agent runs) and re-renders the transcript after an action or
+  extension slash command that rewrote `Session.events`. The ACP stdio agent
+  exposes the same data through `_aar/panel_list`, `_aar/panel_snapshot`,
+  `_aar/panel_action` and pushes `_aar/panel_changed`. First consumer:
+  `aar-ext-shadow-branching` 0.3.0.
 
 ### Changed
+- Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while
+  an extension panel is still visible in it.
 
 ### Fixed
 

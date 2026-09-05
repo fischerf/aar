@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+from agent.extensions.api import UIPanel
 
 if TYPE_CHECKING:
     from agent.core.config import AgentConfig
@@ -61,6 +63,7 @@ from agent.core.events import (
     StreamChunk,
     ToolCall,
     ToolResult,
+    UserMessage,
 )
 from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
@@ -101,7 +104,26 @@ from agent.transports.tui_widgets.companion import CompanionPanel, KaomojiCompan
 from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
+from agent.transports.tui_widgets.extension_panel import ExtensionPanel  # noqa: F401
 from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
+
+
+def _sync_right_col(right_col: object) -> None:
+    """Collapse ``#right-col`` only when *every* child is hidden.
+
+    The right column has a fixed width (typ. 40 cols).  Hiding just one
+    child (thinking panel *or* an extension panel) would leave an empty
+    gutter, but hiding the column while another child is still visible would
+    take that child down with it — so the column's display follows the
+    union of its children.
+    """
+    try:
+        children = list(getattr(right_col, "children", []))
+        any_visible = any(child.styles.display != "none" for child in children)
+        right_col.styles.display = "block" if any_visible else "none"  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # FixedTUIRenderer — routes agent events to the appropriate widgets
@@ -143,6 +165,9 @@ class FixedTUIRenderer:
         self.theme = theme or DEFAULT_THEME
         self.layout = layout or LayoutConfig()
         self._extension_panels: dict[str, Callable] = {}
+        # Set by AarFixedApp: schedules an extension-panel refresh after a
+        # tool result lands (the plugin may have taken a checkpoint).
+        self._panel_refresh: Callable[[], None] | None = None
         self._thinking_visible = True
         self._config: AgentConfig | None = config
         self._streaming_active = False
@@ -219,14 +244,12 @@ class FixedTUIRenderer:
         if self._thinking_panel is not None:
             display = "block" if self._thinking_visible else "none"
             self._thinking_panel.styles.display = display
-            # Also hide the parent right-column container so its fixed width
-            # (typ. 40 cols) is released back to the ChatBody's ``1fr`` track
-            # when the panel is hidden. Hiding only the panel leaves an empty
-            # 40-column gutter because the Vertical parent still participates
-            # in the Horizontal split's layout.
+            # Also collapse the parent right-column container so its fixed
+            # width (typ. 40 cols) is released back to the ChatBody's ``1fr``
+            # track — but only if no extension panel is still showing in it.
             parent = getattr(self._thinking_panel, "parent", None)
             if parent is not None and getattr(parent, "id", None) == "right-col":
-                parent.styles.display = display
+                _sync_right_col(parent)
         label = "shown" if self._thinking_visible else "hidden"
         self._write(
             Text(f"Thinking panel {label}", style=self.theme.dim_text),
@@ -396,6 +419,8 @@ class FixedTUIRenderer:
             )
             if event.is_error and self._companion is not None:
                 self._companion.agent_error()
+            if self._panel_refresh is not None:
+                self._panel_refresh()
 
         # --- Reasoning block (non-streaming) ----------------------------------
         elif isinstance(event, ReasoningBlock) and event.content:
@@ -502,7 +527,11 @@ class FixedTUIRenderer:
             )
             self._header.refresh_info()
 
-    def render_welcome(self, extra_commands: list[str] | None = None) -> None:
+    def render_welcome(
+        self,
+        extra_commands: list[str] | None = None,
+        extra_panels: list[str] | None = None,
+    ) -> None:
         if not self.layout.welcome.visible:
             return
         t = self.theme
@@ -520,13 +549,18 @@ class FixedTUIRenderer:
         ]
         cmds = builtin + list(extra_commands or [])
         cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
+        panels_line = ""
+        if extra_panels:
+            panels_markup = " ".join(f"[bold]{p}[/]" for p in extra_panels)
+            panels_line = f"Panels: {panels_markup} — {_KB.toggle_panel.key}\n"
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
             "Type your message and press Ctrl+S to send.\n"
             "Send while the agent is running to queue prompts.\n"
             "Use Enter for new lines in multi-line messages.\n"
             "Attach files with @path (e.g. @photo.jpg @audio.wav)\n"
-            f"Commands: {cmds_markup}\n\n"
+            f"Commands: {cmds_markup}\n"
+            f"{panels_line}\n"
         )
         self._write(
             Panel(welcome_text, border_style=t.welcome.border_style, padding=t.welcome.padding),
@@ -565,6 +599,7 @@ class AarFixedApp(App):
         ),
         Binding(_KB.clear_screen.key, "clear_screen", "Clear screen", show=False),
         Binding(_KB.toggle_log_viewer.key, "toggle_log_viewer", "Logs", show=False),
+        Binding(_KB.toggle_panel.key, "toggle_panel", "Panel", show=False, priority=True),
     ]
 
     CSS = """
@@ -585,6 +620,9 @@ class AarFixedApp(App):
         width: 40;
     }
     ThinkingPanel {
+        height: 1fr;
+    }
+    ExtensionPanel {
         height: 1fr;
     }
     #input-sep {
@@ -640,8 +678,20 @@ class AarFixedApp(App):
         body = ChatBody(id="chat-body")
 
         # Companion now lives in the header bar as KaomojiCompanion.
-        # The right column only holds the ThinkingPanel.
-        right_col = Vertical(panel, id="right-col")
+        # The right column holds the ThinkingPanel plus one ExtensionPanel per
+        # registered extension UIPanel (hidden until ctrl+b).
+        ext_panels: list[ExtensionPanel] = []
+        for ui_panel in self._registered_panels().values():
+            widget = ExtensionPanel(
+                ui_panel,
+                ctx_getter=self._panel_ctx,
+                write_system=self._write_system_line,
+                is_busy=lambda: self._agent_running,
+                id=f"ext-panel-{ui_panel.name}",
+            )
+            widget.styles.display = "none"
+            ext_panels.append(widget)
+        right_col = Vertical(panel, *ext_panels, id="right-col")
 
         if tp_cfg.side == "left":
             return Horizontal(right_col, body, id="body-split")
@@ -825,7 +875,17 @@ class AarFixedApp(App):
                     )
                 )
 
-        self._renderer.render_welcome(extra_commands=self._ext_cmds or None)
+        self._renderer.render_welcome(
+            extra_commands=self._ext_cmds or None,
+            extra_panels=self._panel_titles() or None,
+        )
+
+        # Extension panels: refresh after tool results, and poll so changes
+        # made outside a tool result (slash commands, session saves) show up.
+        if self._extension_panels():
+            self._renderer._panel_refresh = lambda: self.call_later(self._refresh_panels)
+            self.run_worker(self._panel_poll(), exclusive=False, name="extension-panel-poll")
+            self.call_later(self._refresh_panels, True)
 
         # Start periodic git health polling for the companion
         if cp_cfg.enabled:
@@ -965,6 +1025,149 @@ class AarFixedApp(App):
         """Ctrl+K — toggle reasoning/thinking block visibility."""
         if self._renderer:
             self._renderer.toggle_thinking()
+
+    # ------------------------------------------------------------------
+    # Extension panels (ctrl+b)
+    # ------------------------------------------------------------------
+
+    def _registered_panels(self) -> dict[str, UIPanel]:
+        """UIPanels from the agent's extension manager (empty when none)."""
+        mgr = getattr(self._agent, "_extension_manager", None)
+        panels = getattr(mgr, "panels", None) if mgr is not None else None
+        return dict(panels) if isinstance(panels, dict) else {}
+
+    def _panel_titles(self) -> list[str]:
+        return [p.title for p in self._registered_panels().values()]
+
+    def _extension_panels(self) -> list[ExtensionPanel]:
+        try:
+            return list(self.query(ExtensionPanel))
+        except Exception:
+            return []
+
+    def _panel_ctx(self) -> Any:
+        """Extension context for panel actions — same sync as slash commands."""
+        mgr = getattr(self._agent, "_extension_manager", None)
+        if mgr is None:
+            return None
+        if self._session is not None:
+            mgr.update_session(self._session)
+        return mgr._context
+
+    async def _write_system_line(self, text: str) -> None:
+        """Print *text* into the chat body, one block per line (slash-command style)."""
+        chat_body = self.query_one("#chat-body", ChatBody)
+        for line in str(text).splitlines() or [str(text)]:
+            await chat_body._mount_block(RichBlock(Text(line), raw=line, kind="system"))
+
+    def action_toggle_panel(self) -> None:
+        """Ctrl+B — hidden → shown + focused; focused → back to input; shown → focus."""
+        panels = self._extension_panels()
+        if not panels:
+            if self._renderer is not None:
+                self._renderer._write(
+                    Text("No extension panels registered", style=self._theme.dim_text),
+                    raw="No extension panels registered",
+                    kind="system",
+                )
+            return
+        panel = panels[0]
+        right_col = self.query_one("#right-col")
+        if panel.styles.display == "none":
+            panel.styles.display = "block"
+            _sync_right_col(right_col)
+            panel.focus_tree()
+            self.call_later(self._refresh_panels, True)
+            return
+        if panel.has_focus_within:
+            self.query_one("#user-input", HistoryTextArea).focus()
+        else:
+            panel.focus_tree()
+
+    def _hide_panel(self, panel: ExtensionPanel) -> None:
+        panel.styles.display = "none"
+        _sync_right_col(self.query_one("#right-col"))
+        self.query_one("#user-input", HistoryTextArea).focus()
+
+    def on_extension_panel_close(self, event: ExtensionPanel.Close) -> None:
+        event.stop()
+        self._hide_panel(event.panel_widget)
+
+    async def on_extension_panel_mutated(self, event: ExtensionPanel.Mutated) -> None:
+        """A panel action ran — the plugin may have rewritten the session."""
+        event.stop()
+        await self._rerender_session()
+
+    async def _refresh_panels(self, force: bool = False) -> None:
+        """Refresh every extension panel whose ``changed`` flag is set (or all, if *force*).
+
+        Also updates the header chip from ``UIPanel.status``.
+        """
+        panels = self._extension_panels()
+        if not panels:
+            return
+        ctx = self._panel_ctx()
+        chips: list[str] = []
+        for widget in panels:
+            visible = widget.styles.display != "none"
+            if force or widget.panel.changed.is_set() or (visible and widget.root is None):
+                await widget.refresh_tree()
+            chip = widget.panel.status_text(ctx)
+            if chip:
+                chips.append(chip)
+        try:
+            header = self.query_one(HeaderBar)
+            status = " · ".join(chips)
+            if status != header.panel_status:
+                header.panel_status = status
+                header.refresh_info()
+        except Exception:
+            pass
+
+    async def _panel_poll(self, interval: float = 5.0) -> None:
+        """Pick up plugin-side changes that no TUI event announces."""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._refresh_panels()
+            except Exception:
+                pass
+
+    async def _rerender_session(self) -> None:
+        """Rebuild the chat body from ``self._session.events``.
+
+        Extensions reload ``Session.events`` in place (shadow-branching does
+        it after ``/undo`` and ``/switch``); the widgets don't follow by
+        themselves, so replay the events through the renderer.
+        """
+        if self._renderer is None or self._session is None:
+            return
+        chat_body = self.query_one("#chat-body", ChatBody)
+        await chat_body.remove_children()
+        chat_body.auto_scroll = True
+        r = self._renderer
+        r._step_count = 0
+        r._streaming_active = False
+        r._stream_in_reasoning = False
+        r._current_thinking = None
+        r._current_answer = None
+        r._panel_thinking_active = False
+        for ev in list(self._session.events):
+            try:
+                if isinstance(ev, UserMessage):
+                    # The renderer never sees user turns (the submit path
+                    # echoes them), so echo them here the same way.
+                    text = ev.content if isinstance(ev.content, str) else str(ev.content)
+                    r._write(
+                        Text(f"  > {text}", style=r.theme.prompt_style),
+                        raw=f"> {text}",
+                        kind="user",
+                    )
+                    continue
+                r.render_event(ev)
+            except Exception:
+                continue
+        await self._write_system_line(f"↻ transcript reloaded ({len(self._session.events)} events)")
 
     async def action_clear_screen(self) -> None:
         """Ctrl+L — clear the chat body and reset counters."""
@@ -1244,8 +1447,11 @@ class AarFixedApp(App):
                         ext_mgr.update_session(self._session)
                     _, handler = cmds[cmd_name]
                     ctx = ext_mgr._context
+                    events_before = list(self._session.events) if self._session else []
                     try:
                         result = handler(args_str, ctx)
+                        if asyncio.iscoroutine(result):
+                            result = await result
                         if result is not None:
                             for line in str(result).splitlines() or [str(result)]:
                                 await _write(Text(line), raw=line, kind="system")
@@ -1253,6 +1459,12 @@ class AarFixedApp(App):
                         await _write(
                             Text(f"Extension command error: {exc}", style=t.error.border_style)
                         )
+                    # The command may have rewritten the session (shadow-
+                    # branching reloads events on /undo, /switch, /branch) —
+                    # keep the transcript and the panels in step.
+                    if self._session is not None and list(self._session.events) != events_before:
+                        await self._rerender_session()
+                    await self._refresh_panels(force=True)
                     return
             await _write(Text(f"Unknown command: {stripped}", style=t.dim_text))
             return
@@ -1363,6 +1575,7 @@ class AarFixedApp(App):
         if self._renderer and self._renderer._companion is not None:
             self._renderer._companion.agent_idle()
         self._restore_input()
+        self.call_later(self._refresh_panels, True)
 
     def _restore_input(self) -> None:
         """Mark the agent as idle and refocus the input widget."""
