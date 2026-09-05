@@ -1,14 +1,14 @@
 {
   "provider": {
     "name": "ollama",
-    "model": "gemma4:e4b",
+    "model": "qwen3.8:latest",
     "base_url": "http://localhost:11434",
     "temperature": 0.6,
-    "max_tokens": 8192,
+    "max_tokens": 16384,
     "extra": {
-      "num_ctx": 32768,
+      "num_ctx": 65536,
       "top_p": 0.95,
-      "top_k": 64,
+      "top_k": 40,
       "min_p": 0.0,
       "supports_reasoning": true,
       "supports_tools": true,
@@ -134,7 +134,7 @@
   "timeout": 0.0,
   "max_retries": 3,
   "streaming": true,
-  "context_window": 32768,
+  "context_window": 65536,
   "context_strategy": "sliding_window",
   "token_budget": 0,
   "cost_limit": 0.0,
