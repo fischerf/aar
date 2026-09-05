@@ -119,6 +119,11 @@ class _HeaderInfoStatic(Static):
         parts.append((state_label, h.state_style))
         parts.append(("  |  ", h.separator_style))
         parts.append((thinking_label, h.tokens_style))
+        # Extension panel chip (e.g. "⎇ session-a1b2 · 7 cp") — empty when no
+        # panel is registered or the panel reports nothing.
+        if bar.panel_status:
+            parts.append(("  |  ", h.separator_style))
+            parts.append((bar.panel_status, h.session_style))
         # Context-window fill bar (only when a window is configured)
         if bar.ctx_window > 0:
             ctx_parts = _ctx_fill_bar(bar.ctx_tokens, bar.ctx_window, bar.msgs_dropped, h)
@@ -166,6 +171,7 @@ class HeaderBar(Horizontal):
         self.warning_active: bool = False
         self.streaming: bool = False
         self.queue_depth: int = 0
+        self.panel_status: str = ""  # header chip from an extension UIPanel.status()
         # --- context-window fill (updated by ContextWindowEvent) ---
         self.ctx_tokens: int = 0
         self.ctx_window: int = 0
@@ -240,6 +246,8 @@ class FooterBar(Static):
             (lbl(kb.toggle_log_viewer.label, "logs"), f.separator_style),
             (fmt_key(kb.toggle_thinking.key), f.step_style),
             (lbl(kb.toggle_thinking.label, "think"), f.separator_style),
+            (fmt_key(kb.toggle_panel.key), f.step_style),
+            (lbl(kb.toggle_panel.label, "panel"), f.separator_style),
             (fmt_key(kb.cycle_theme.key), f.step_style),
             (lbl(kb.cycle_theme.label, "theme"), f.separator_style),
             (fmt_key(kb.clear_screen.key), f.step_style),

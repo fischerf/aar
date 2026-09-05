@@ -1049,6 +1049,7 @@ class AarAcpAgent:
                     if update_tasks:
                         await asyncio.gather(*update_tasks, return_exceptions=True)
                     self._cancel_events.pop(session_id, None)
+                    self._push_panel_changes(session_id)
                     return PromptResponse(stop_reason="end_turn", **_resp_extra)
 
         # Build the approval callback: use ACP request_permission when a client
@@ -1095,8 +1096,151 @@ class AarAcpAgent:
         self._cancel_events.pop(session_id, None)
         self._sessions[session_id] = finished
         self._store.save(finished)
+        self._push_panel_changes(session_id)
 
         return PromptResponse(stop_reason=_map_stop_reason(finished.state), **_resp_extra)
+
+    # ------------------------------------------------------------------
+    # Extension UI panels — custom ``_aar/panel_*`` methods
+    # ------------------------------------------------------------------
+    #
+    # The SDK routes any request whose method starts with ``_`` to
+    # ``ext_method(name, params)`` with the underscore stripped, so a client
+    # calls ``_aar/panel_list`` and we see ``aar/panel_list``.  Notifications
+    # go the other way through ``conn.ext_notification`` (``_aar/panel_changed``).
+    # Same data the fixed TUI draws; see docs/acp.md.
+
+    _PANEL_METHODS = ("aar/panel_list", "aar/panel_snapshot", "aar/panel_action")
+
+    @staticmethod
+    def _param(params: dict[str, Any], *names: str, default: Any = None) -> Any:
+        """First present key among *names* (camelCase on the wire, snake in tests)."""
+        for name in names:
+            value = params.get(name)
+            if value is not None:
+                return value
+        return default
+
+    def _panel_context(self, params: dict[str, Any]) -> tuple[str, Any]:
+        """Resolve ``(session_id, ExtensionManager)`` for a panel request."""
+        from acp.exceptions import RequestError
+
+        session_id = self._param(params, "sessionId", "session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise RequestError.invalid_params({"sessionId": "required"})
+        ext_mgr = self._extension_managers.get(session_id)
+        if ext_mgr is None:
+            raise RequestError.invalid_params({"sessionId": f"unknown session {session_id!r}"})
+        session = self._sessions.get(session_id)
+        if session is not None:
+            ext_mgr.update_session(session)
+        return session_id, ext_mgr
+
+    def _resolve_panel(self, ext_mgr: Any, params: dict[str, Any]) -> Any:
+        from acp.exceptions import RequestError
+
+        name = self._param(params, "panel")
+        panels = ext_mgr.panels
+        if not isinstance(name, str) or name not in panels:
+            raise RequestError.invalid_params(
+                {"panel": f"unknown panel {name!r}", "available": sorted(panels)}
+            )
+        return panels[name]
+
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle custom ``_aar/*`` requests (see :attr:`_PANEL_METHODS`)."""
+        from acp.exceptions import RequestError
+        from agent.extensions.api import UIInvocation, run_ui_action, run_ui_snapshot
+
+        if method not in self._PANEL_METHODS:
+            raise RequestError.method_not_found(f"_{method}")
+        params = params if isinstance(params, dict) else {}
+        session_id, ext_mgr = self._panel_context(params)
+        ctx = ext_mgr._context
+
+        if method == "aar/panel_list":
+            return {
+                "panels": [
+                    {
+                        "name": p.name,
+                        "title": p.title,
+                        "status": p.status_text(ctx),
+                        "actions": [a.to_dict() for a in p.actions],
+                    }
+                    for p in ext_mgr.panels.values()
+                ]
+            }
+
+        panel = self._resolve_panel(ext_mgr, params)
+
+        if method == "aar/panel_snapshot":
+            root = await run_ui_snapshot(panel, ctx)
+            panel.changed.clear()
+            return {"panel": panel.name, "root": root.to_dict(), "status": panel.status_text(ctx)}
+
+        # aar/panel_action
+        action_id = self._param(params, "action")
+        action = panel.action(action_id) if isinstance(action_id, str) else None
+        if action is None:
+            raise RequestError.invalid_params(
+                {
+                    "action": f"unknown action {action_id!r}",
+                    "available": [a.id for a in panel.actions],
+                }
+            )
+        node_id = self._param(params, "nodeId", "node_id")
+        root = await run_ui_snapshot(panel, ctx)
+        node = root.find(node_id) if isinstance(node_id, str) else None
+        if node is None:
+            raise RequestError.invalid_params({"nodeId": f"unknown node {node_id!r}"})
+        if not action.applies_to(node):
+            raise RequestError.invalid_params(
+                {"action": f"{action.id!r} does not apply to node kind {node.kind!r}"}
+            )
+        running = self._run_tasks.get(session_id)
+        if action.mutates and running is not None and not running.done():
+            raise RequestError.invalid_params(
+                {"action": "a prompt is in flight for this session — cancel it first"}
+            )
+        args = self._param(params, "args", default={})
+        args = dict(args) if isinstance(args, dict) else {}
+        try:
+            message = await run_ui_action(action, UIInvocation(node=node, ctx=ctx, args=args))
+        except Exception as exc:
+            logger.error("ACP: panel action %s/%s failed: %s", panel.name, action.id, exc)
+            message = f"✗ {action.id}: {exc}"
+        root = await run_ui_snapshot(panel, ctx)
+        panel.changed.clear()
+        if action.mutates:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                self._store.save(session)
+        return {
+            "panel": panel.name,
+            "action": action.id,
+            "message": message,
+            "root": root.to_dict(),
+            "status": panel.status_text(ctx),
+        }
+
+    def _push_panel_changes(self, session_id: str) -> None:
+        """Notify the client (``_aar/panel_changed``) for every panel whose
+        ``changed`` flag is set.  Fire-and-forget; the flag is cleared when the
+        client fetches a fresh snapshot."""
+        if self._conn is None:
+            return
+        ext_mgr = self._extension_managers.get(session_id)
+        if ext_mgr is None:
+            return
+        for panel in ext_mgr.panels.values():
+            if not panel.changed.is_set():
+                continue
+            self._spawn(
+                self._conn.ext_notification(
+                    "aar/panel_changed", {"sessionId": session_id, "panel": panel.name}
+                ),
+                name=f"panel-changed-{session_id}-{panel.name}",
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers

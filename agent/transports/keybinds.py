@@ -45,6 +45,7 @@ class KeyBinds:
     # View toggles
     cycle_theme: KeyBind = KeyBind("ctrl+t", "theme")
     toggle_thinking: KeyBind = KeyBind("ctrl+k", "think")
+    toggle_panel: KeyBind = KeyBind("ctrl+b", "panel")
     clear_screen: KeyBind = KeyBind("ctrl+l", "clear")
 
     # Modals
