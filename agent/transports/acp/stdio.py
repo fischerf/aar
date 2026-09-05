@@ -492,8 +492,19 @@ class AarAcpAgent:
         session_id: str,
         **kwargs: Any,
     ) -> Any:
-        """Switch the model for an existing session (unstable protocol)."""
-        from acp.schema import SetSessionModelResponse
+        """Switch the model for an existing session (unstable protocol).
+
+        ``session/set_model`` was an *unstable* ACP method and the SDK dropped
+        it in 0.12 (``SetSessionModelResponse`` no longer exists, and
+        ``acp.Agent`` no longer declares the method). We keep the behaviour for
+        older SDKs — and for direct programmatic callers — and simply return
+        ``None`` when the response type is gone, since no 0.12+ client can
+        route to it anyway.
+        """
+        try:
+            from acp.schema import SetSessionModelResponse  # type: ignore[attr-defined]
+        except ImportError:  # acp >= 0.12 removed the unstable set_model API
+            SetSessionModelResponse = None  # type: ignore[assignment]
 
         validate_session_id(session_id)
         base_cfg = self._session_configs.get(session_id, self._config)
@@ -521,7 +532,7 @@ class AarAcpAgent:
             new_provider.name,
             new_provider.model,
         )
-        return SetSessionModelResponse()
+        return SetSessionModelResponse() if SetSessionModelResponse is not None else None
 
     async def authenticate(self, method_id: str, **kwargs: Any) -> Any:
         """Handle ``authenticate`` — Aar has no auth methods, so this is a no-op.
@@ -1191,7 +1202,11 @@ class AarAcpAgent:
                 if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
                     register_filesystem_tools(tmp_reg)
                 if "bash" in enabled:
-                    register_shell_tools(tmp_reg)
+                    register_shell_tools(
+                        tmp_reg,
+                        default_timeout=cfg.tools.bash_default_timeout,
+                        hard_cap=cfg.tools.command_timeout,
+                    )
                 if enabled & {"grep", "find_files"}:
                     register_search_tools(tmp_reg)
                 for name in list(tmp_reg.names()):

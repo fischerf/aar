@@ -105,20 +105,29 @@ class PolicyConfig(BaseModel):
             # Blanket permission change
             "chmod 777",
             "chmod -R 777",
-            # Piped remote-code-execution patterns
-            "curl|sh",
-            "curl | sh",
-            "curl|bash",
-            "curl | bash",
-            "wget|sh",
-            "wget | sh",
-            "wget|bash",
-            "wget | bash",
+            # Piped remote-code-execution is covered by
+            # ``denied_command_patterns`` below — the literal forms
+            # ("curl | sh", …) never appeared in a real one-liner.
             # Netcat reverse shell
             "nc -e",
             "ncat -e",
             # Shell history wipe
             "history -c",
+        ]
+    )
+
+    # H1 — Regex deny-list, evaluated against the raw command string.
+    # Shell metacharacters can't be modelled structurally by ``shlex``, so
+    # download-and-execute and fork-bomb shapes are matched with regexes
+    # instead of the literal substrings that never fired in practice.
+    # Set to ``[]`` to disable.
+    denied_command_patterns: list[str] = Field(
+        default_factory=lambda: [
+            # curl/wget … | [sudo] sh|bash|zsh|dash|ksh
+            r"\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+|doas\s+)?"
+            r"(?:/usr/bin/|/bin/|/usr/local/bin/)?(?:ba|z|da|k|a)?sh\b",
+            # classic fork bomb, with or without whitespace
+            r":\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;\s*:",
         ]
     )
 
@@ -237,6 +246,164 @@ def _iter_path_args(spec: ToolSpec, arguments: dict[str, Any]):
 _SHELL_METACHARS = frozenset("|<>;&`$()")
 
 
+# H1 — Wrappers that delegate to another program. The deny-list has to look
+# *through* them: ``sudo shutdown`` is exactly as final as ``shutdown``.
+_WRAPPERS = frozenset(
+    {
+        "sudo",
+        "doas",
+        "env",
+        "nohup",
+        "time",
+        "nice",
+        "ionice",
+        "xargs",
+        "command",
+        "exec",
+        "busybox",
+        "stdbuf",
+        "setsid",
+        "timeout",
+    }
+)
+
+# Shells whose ``-c <string>`` argument is itself a command line to inspect.
+_INNER_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+
+# Token characters that separate one simple command from the next.
+_SEPARATOR_CHARS = ";&|"
+
+# ``rm`` long options worth normalising into their short equivalents.
+_RM_LONG_FLAGS = {"--recursive": "r", "--force": "f", "--dir": "d", "--no-preserve-root": "R"}
+
+# Wrapper options that consume the following token as their value, so the
+# value isn't mistaken for the wrapped command (``nice -n 10 halt``).
+_WRAPPER_VALUE_FLAGS = frozenset(
+    {"-n", "-c", "-u", "-i", "-I", "-P", "-L", "-s", "-k", "-p", "-g", "-a"}
+)
+
+# Wrappers whose first positional argument is not the command (``timeout 5 cmd``).
+_WRAPPER_POSITIONAL_ARGS = {"timeout": 1}
+
+_MAX_UNWRAP_DEPTH = 4
+
+
+def _basename(token: str) -> str:
+    return posixpath.basename(token.replace("\\", "/"))
+
+
+def _simple_commands(command: str) -> list[list[str]] | None:
+    """Split *command* into simple commands on ``; && || | &`` and newlines.
+
+    H1 — The old check only ever looked at the first token sequence, so
+    ``true; shutdown -h now`` and ``echo x && rm -rf /`` sailed past the
+    deny-list. Returns ``None`` when the command cannot be tokenised, which
+    the caller treats as "fall back to substring matching".
+    """
+    commands: list[list[str]] = []
+    for line in command.splitlines():
+        if not line.strip():
+            continue
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=_SEPARATOR_CHARS)
+            lexer.whitespace_split = True
+            lexer.commenters = ""  # '#' is data here, not a comment
+            tokens = list(lexer)
+        except ValueError:
+            return None
+        current: list[str] = []
+        for token in tokens:
+            if token and all(ch in _SEPARATOR_CHARS for ch in token):
+                if current:
+                    commands.append(current)
+                    current = []
+            else:
+                current.append(token)
+        if current:
+            commands.append(current)
+    return commands
+
+
+def _unwrap(tokens: list[str], depth: int = 0) -> list[list[str]]:
+    """Return *tokens* plus every command it delegates to.
+
+    Strips wrapper programs (``sudo``, ``env FOO=bar``, ``xargs``, …) and
+    expands ``sh -c '<command>'`` so the deny-list sees the real verb.
+    """
+    if not tokens:
+        return []
+    variants: list[list[str]] = [tokens]
+
+    stripped = tokens
+    while stripped and _basename(stripped[0]) in _WRAPPERS:
+        wrapper = _basename(stripped[0])
+        rest = stripped[1:]
+        while rest:
+            head = rest[0]
+            if head.startswith("-"):
+                takes_value = head in _WRAPPER_VALUE_FLAGS and len(rest) > 1
+                rest = rest[2:] if takes_value else rest[1:]
+                continue
+            if "=" in head:  # ``env FOO=bar cmd``
+                rest = rest[1:]
+                continue
+            break
+        for _ in range(_WRAPPER_POSITIONAL_ARGS.get(wrapper, 0)):
+            if rest:
+                rest = rest[1:]
+        if not rest:
+            break
+        stripped = rest
+        variants.append(stripped)
+
+    if depth >= _MAX_UNWRAP_DEPTH:
+        return variants
+
+    target = stripped
+    if target and _basename(target[0]) in _INNER_SHELLS and "-c" in target[1:]:
+        index = target.index("-c", 1)
+        if index + 1 < len(target):
+            for inner in _simple_commands(target[index + 1]) or []:
+                variants.extend(_unwrap(inner, depth + 1))
+    return variants
+
+
+def _candidate_commands(command: str) -> list[list[str]] | None:
+    """Every token list the deny-list should be evaluated against."""
+    simple = _simple_commands(command)
+    if simple is None:
+        return None
+    candidates: list[list[str]] = []
+    for tokens in simple:
+        candidates.extend(_unwrap(tokens))
+    return candidates
+
+
+def _normalize_rm(tokens: list[str]) -> list[str]:
+    """Canonicalise ``rm`` flags so ``rm -fr /`` matches the ``rm -rf /`` rule."""
+    if not tokens or _basename(tokens[0]) != "rm":
+        return tokens
+    flags: set[str] = set()
+    operands: list[str] = []
+    for token in tokens[1:]:
+        if token == "--":
+            continue
+        if token.startswith("--"):
+            mapped = _RM_LONG_FLAGS.get(token)
+            if mapped:
+                flags.add(mapped)
+            continue
+        if token.startswith("-") and len(token) > 1:
+            flags.update(token[1:].replace("R", "r"))
+            continue
+        operands.append(token)
+    normalized = ["rm"]
+    if flags:
+        normalized.append("-" + "".join(sorted(flags)))
+    normalized.extend(operands)
+    return normalized
+
+
 def _denied_matches(
     denied: str,
     raw_command: str,
@@ -268,12 +435,20 @@ def _denied_matches(
     if not denied_tokens or not cmd_tokens:
         return False
 
+    # H1 — ``rm -fr /`` and ``rm -r -f /`` are the same command as ``rm -rf /``;
+    # normalise both sides so flag order and spelling don't matter.
+    denied_tokens = _normalize_rm(denied_tokens)
+    cmd_tokens = _normalize_rm(cmd_tokens)
+
     # Compare leading executable: exact OR basename match. This catches
     # ``/sbin/shutdown`` matching the denied ``shutdown`` pattern.
     cmd_head = cmd_tokens[0]
-    cmd_head_base = posixpath.basename(cmd_head.replace("\\", "/"))
+    cmd_head_base = _basename(cmd_head)
     denied_head = denied_tokens[0]
-    if cmd_head != denied_head and cmd_head_base != denied_head:
+    # H1 — also match the dotted tool family (``mkfs`` -> ``mkfs.ext4``), which
+    # otherwise evaded a single-token denial by adding a filesystem suffix.
+    family_match = len(denied_tokens) == 1 and cmd_head_base.startswith(denied_head + ".")
+    if cmd_head != denied_head and cmd_head_base != denied_head and not family_match:
         return False
 
     # Single-token denial: head match is enough.
@@ -379,6 +554,13 @@ class SafetyPolicy:
                 self._compiled_command_rules.append((re.compile(rule.pattern), rule.decision))
             else:
                 self._compiled_command_rules.append((rule.pattern, rule.decision))
+
+        self._compiled_denied_patterns: list[re.Pattern] = []
+        for pattern in self.config.denied_command_patterns:
+            try:
+                self._compiled_denied_patterns.append(re.compile(pattern, re.IGNORECASE))
+            except re.error as exc:
+                logger.warning("Ignoring invalid denied_command_pattern %r: %s", pattern, exc)
 
     def check_tool(self, spec: ToolSpec, arguments: dict[str, Any]) -> PolicyDecision:
         """Check whether a tool call is allowed.
@@ -603,11 +785,14 @@ class SafetyPolicy:
             fall back to the legacy substring match so the existing
             ``curl|sh`` / ``> /dev/sda`` style rules still fire when the
             literal substring appears.
-          - A command that hides a destructive verb inside ``sh -c '…'`` or
-            ``python -c '…'`` will pass token-based checks because the verb
-            isn't the leading executable. The deny-list has always been a
-            soft guardrail; users wanting true isolation should run under the
-            WSL sandbox.
+          - H1: every simple command is now checked (``;``, ``&&``, ``||``,
+            ``|``, ``&`` and newlines split them), known wrappers (``sudo``,
+            ``env FOO=bar``, ``xargs``, …) are stripped, and ``sh -c '…'`` is
+            expanded one level. A verb hidden inside a *non-shell* interpreter
+            (``python -c '…'``, ``perl -e '…'``) still passes, as does anything
+            built at runtime from string fragments. The deny-list remains a
+            best-effort guardrail: keep ``require_approval_for_execute`` on, or
+            run under the WSL sandbox, if you need a real boundary.
         """
         if self.config.log_all_commands:
             logger.info("Command audit: %s", _redact_secrets(command))
@@ -628,21 +813,41 @@ class SafetyPolicy:
                     )
                     return decision
 
-        # Tokenise the command once. If shlex barfs (unterminated quote,
-        # invalid syntax), fall back entirely to substring matching so a
-        # malformed command can't bypass the deny-list.
-        try:
-            cmd_tokens = shlex.split(command)
-        except ValueError:
-            cmd_tokens = None  # signal: substring fallback for everything below
-
-        for denied in self.config.denied_commands:
-            if _denied_matches(denied, command, cmd_tokens):
+        # H1 — Regex deny-list, matched against the raw string. Shell
+        # metacharacters can't be modelled structurally, so download-and-execute
+        # and fork-bomb shapes are matched here rather than by token.
+        for compiled in self._compiled_denied_patterns:
+            if compiled.search(command):
                 logger.warning(
-                    "Policy DENY (denied command): %s matches %s",
+                    "Policy DENY (denied command pattern): %s matches %s",
                     _redact_secrets(command),
-                    denied,
+                    compiled.pattern,
                 )
                 return PolicyDecision.DENY
+
+        # H1 — Evaluate *every* simple command, not just the first, and look
+        # through wrappers (``sudo``) and inner shells (``sh -c '…'``).
+        # ``None`` means the command didn't tokenise; fall back to substring
+        # matching so a malformed command can't bypass the deny-list.
+        candidates = _candidate_commands(command)
+
+        for denied in self.config.denied_commands:
+            if candidates is None:
+                if _denied_matches(denied, command, None):
+                    logger.warning(
+                        "Policy DENY (denied command): %s matches %s",
+                        _redact_secrets(command),
+                        denied,
+                    )
+                    return PolicyDecision.DENY
+                continue
+            for cmd_tokens in candidates:
+                if _denied_matches(denied, command, cmd_tokens):
+                    logger.warning(
+                        "Policy DENY (denied command): %s matches %s",
+                        _redact_secrets(command),
+                        denied,
+                    )
+                    return PolicyDecision.DENY
 
         return PolicyDecision.ALLOW

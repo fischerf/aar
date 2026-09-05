@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import os
 import re
 import shlex
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,81 @@ logger = logging.getLogger(__name__)
 # reject keys that would otherwise break out of the ``KEY=value`` shell
 # prefix and inject arbitrary shell.
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# H2 — Shared environment allow-list used by every sandbox backend when
+# ``restricted_env`` is on.  Entries are case-insensitive ``fnmatch`` globs.
+DEFAULT_ALLOWED_ENV_VARS: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "TERM",
+    "LANG",
+    "LC_*",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "USER",
+    "SHELL",
+    # Windows essentials — a Windows process launched without these can fail to
+    # start at all (DLL search, temp dir, WSL interop).  Absent on POSIX.
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "USERNAME",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "WSLENV",
+)
+
+# H2 — Names stripped from the child environment *even when* the caller opted
+# into inheriting the full parent environment.  Without this, a prompt-injected
+# model can run ``env`` (or ``curl -d @-``) and exfiltrate every provider key
+# the user exported.  Set ``safety.sandbox.env_denylist_patterns`` to ``[]`` to
+# deliberately hand the credentials over.
+DEFAULT_ENV_DENYLIST_PATTERNS: tuple[str, ...] = (
+    "*_API_KEY",
+    "*_TOKEN",
+    "*SECRET*",
+    "*PASSWORD*",
+    "AWS_*",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+)
+
+
+def _env_name_matches(name: str, patterns: Sequence[str]) -> bool:
+    """Case-insensitive glob match of an environment variable name."""
+    upper = name.upper()
+    return any(fnmatch.fnmatchcase(upper, p.upper()) for p in patterns)
+
+
+def _strip_denied_env(env: Mapping[str, str], denylist: Sequence[str] | None) -> dict[str, str]:
+    """Drop variables whose name matches any deny pattern."""
+    if not denylist:
+        return dict(env)
+    return {k: v for k, v in env.items() if not _env_name_matches(k, denylist)}
+
+
+def _select_env(
+    allowed: Sequence[str] | None,
+    denylist: Sequence[str] | None,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a child environment from ``os.environ``.
+
+    *allowed* is a glob allow-list (``None`` → inherit everything).  *denylist*
+    is applied afterwards in both cases.  *extra* is merged last and is **not**
+    filtered — it is supplied by the host application, not by the model.
+    """
+    if allowed is None:
+        base = dict(os.environ)
+    else:
+        base = {k: v for k, v in os.environ.items() if _env_name_matches(k, allowed)}
+    base = _strip_denied_env(base, denylist)
+    if extra:
+        base.update(extra)
+    return base
 
 
 def _collapse_posix(p) -> str:
@@ -150,7 +229,15 @@ async def _create_subprocess(
     env: dict[str, str] | None,
     **kwargs: Any,
 ) -> asyncio.subprocess.Process:
-    """Create a subprocess using bash on Windows or the system shell on Unix."""
+    """Create a subprocess using bash on Windows or the system shell on Unix.
+
+    C2 — On POSIX the child is placed in a **new session** so ``proc.pid`` is
+    also a process-group id.  ``_kill_tree`` can then signal the whole group,
+    which is the only way to reap grandchildren that a timed-out command left
+    behind (``sleep 30 &``, ``npm run dev &``, a forking test runner, …).
+    ``start_new_session`` is compatible with the Landlock ``preexec_fn``: the
+    ``setsid()`` happens first, then ``preexec_fn`` runs, then ``exec``.
+    """
     if os.name == "nt":
         return await asyncio.create_subprocess_exec(
             "bash",
@@ -162,6 +249,7 @@ async def _create_subprocess(
             env=env,
             **kwargs,
         )
+    kwargs.setdefault("start_new_session", True)
     return await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
@@ -170,6 +258,95 @@ async def _create_subprocess(
         env=env,
         **kwargs,
     )
+
+
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill *proc* and every process it spawned.
+
+    POSIX: signal the process group (``proc.pid`` is a group leader thanks to
+    ``start_new_session=True``).  Windows: ``taskkill /T`` walks the tree.
+    Both are best-effort; the direct ``proc.kill()`` is always attempted too.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("taskkill for pid %s failed: %s", proc.pid, exc)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            logger.debug("killpg for pid %s failed: %s", proc.pid, exc)
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
+async def _run_with_timeout(
+    proc: asyncio.subprocess.Process,
+    timeout: int | float | None,
+    kill_grace: float = 3.0,
+    on_timeout: Any = None,
+) -> tuple[bytes, bytes, bool]:
+    """Await ``proc.communicate()`` with a hard upper bound.
+
+    C2 — The naive ``proc.kill(); await proc.communicate()`` recovery hangs
+    forever whenever the command backgrounded a child: ``kill()`` only signals
+    the shell, and the surviving grandchild still holds the stdout/stderr pipe
+    that ``communicate()`` waits on.  Here the whole process *group* is killed
+    and the follow-up ``communicate()`` is itself bounded by *kill_grace*; if
+    something still holds the pipe we force EOF on the readers and give up on
+    the output rather than blocking the agent.
+
+    Returns ``(stdout, stderr, timed_out)``.
+    """
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return out, err, False
+    except asyncio.TimeoutError:
+        _kill_tree(proc)
+        if on_timeout is not None:
+            try:
+                on_timeout()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("on_timeout hook failed: %s", exc)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=kill_grace)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Command timed out and a surviving child still holds the output pipe "
+                "(pid %s); abandoning its output.",
+                proc.pid,
+            )
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.feed_eof()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+            out, err = b"", b""
+        return out, err, True
+
+
+class _OnceCloser:
+    """Call a zero-arg cleanup exactly once, however many times it is invoked."""
+
+    __slots__ = ("_fn", "_done")
+
+    def __init__(self, fn: Any) -> None:
+        self._fn = fn
+        self._done = False
+
+    def __call__(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._fn()
 
 
 class Sandbox(ABC):
@@ -190,15 +367,30 @@ class Sandbox(ABC):
 
 
 class LocalSandbox(Sandbox):
-    """Direct local subprocess execution (trusted dev environments)."""
+    """Direct local subprocess execution (trusted dev environments).
+
+    H2 — ``restricted_env`` now defaults to **True** so the model's shell sees
+    only the allow-listed variables, matching ``LinuxSandbox`` and
+    ``WindowsSubprocessSandbox``.  Previously the default mode handed the full
+    parent environment (every ``*_API_KEY``, ``AWS_*``, ``GITHUB_TOKEN``, …) to
+    a process the model controls.
+    """
 
     def __init__(
         self,
         default_cwd: str | None = None,
-        restricted_env: bool = False,
+        restricted_env: bool = True,
+        allowed_env_vars: list[str] | None = None,
+        env_denylist_patterns: list[str] | None = None,
     ) -> None:
         self.default_cwd = default_cwd or os.getcwd()
         self.restricted_env = restricted_env
+        self.allowed_env_vars = allowed_env_vars or list(DEFAULT_ALLOWED_ENV_VARS)
+        self.env_denylist_patterns = (
+            list(DEFAULT_ENV_DENYLIST_PATTERNS)
+            if env_denylist_patterns is None
+            else list(env_denylist_patterns)
+        )
 
     async def execute(
         self,
@@ -211,12 +403,8 @@ class LocalSandbox(Sandbox):
         proc_env = self._build_env(env)
 
         proc = await _create_subprocess(command, work_dir, proc_env)
-
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+        stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(proc, timeout)
+        if timed_out:
             return SandboxResult(timed_out=True, exit_code=-1)
 
         return SandboxResult(
@@ -226,19 +414,12 @@ class LocalSandbox(Sandbox):
         )
 
     def _build_env(self, extra: dict[str, str] | None) -> dict[str, str] | None:
-        if not self.restricted_env and not extra:
-            return None  # inherit parent env
-        base = (
-            dict(os.environ)
-            if not self.restricted_env
-            else {
-                "PATH": os.environ.get("PATH", ""),
-                "HOME": os.environ.get("HOME", os.environ.get("USERPROFILE", "")),
-                "TERM": os.environ.get("TERM", "xterm"),
-            }
-        )
-        if extra:
-            base.update(extra)
+        allowed = self.allowed_env_vars if self.restricted_env else None
+        base = _select_env(allowed, self.env_denylist_patterns, extra)
+        if self.restricted_env:
+            # HOME is named differently on Windows; keep the POSIX name populated.
+            base.setdefault("HOME", os.environ.get("USERPROFILE", ""))
+            base.setdefault("TERM", "xterm")
         return base
 
 
@@ -256,10 +437,18 @@ class LinuxSandbox(Sandbox):
         workspace: str | None = None,
         max_memory_mb: int = 512,
         allowed_env_vars: list[str] | None = None,
+        env_denylist_patterns: list[str] | None = None,
     ) -> None:
         self.workspace = workspace or os.getcwd()
         self.max_memory_mb = max_memory_mb
-        self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
+        self.allowed_env_vars = allowed_env_vars or list(DEFAULT_ALLOWED_ENV_VARS)
+        # H2 — applied on top of the allow-list, so an operator who widens
+        # ``allowed_env_vars`` still doesn't leak credentials by accident.
+        self.env_denylist_patterns = (
+            list(DEFAULT_ENV_DENYLIST_PATTERNS)
+            if env_denylist_patterns is None
+            else list(env_denylist_patterns)
+        )
         self._landlock_available: bool | None = None
 
     # ------------------------------------------------------------------
@@ -404,9 +593,7 @@ class LinuxSandbox(Sandbox):
         env: dict[str, str] | None = None,
     ) -> SandboxResult:
         work_dir = cwd or self.workspace
-        proc_env = {k: os.environ[k] for k in self.allowed_env_vars if k in os.environ}
-        if env:
-            proc_env.update(env)
+        proc_env = _select_env(self.allowed_env_vars, self.env_denylist_patterns, env)
 
         if sys.platform.startswith("linux"):
             wrapped = f"ulimit -v {self.max_memory_mb * 1024} 2>/dev/null; {command}"
@@ -424,11 +611,8 @@ class LinuxSandbox(Sandbox):
                 )
 
         proc = await _create_subprocess(wrapped, work_dir, proc_env, **kwargs)
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+        stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(proc, timeout)
+        if timed_out:
             return SandboxResult(timed_out=True, exit_code=-1)
 
         return SandboxResult(
@@ -463,22 +647,17 @@ class WindowsSubprocessSandbox(Sandbox):
         max_processes: int = 10,
         allowed_env_vars: list[str] | None = None,
         use_low_integrity: bool = True,
+        env_denylist_patterns: list[str] | None = None,
     ) -> None:
         self.workspace = workspace or os.getcwd()
         self.max_memory_mb = max_memory_mb
         self.max_processes = max_processes
-        self.allowed_env_vars = allowed_env_vars or [
-            "PATH",
-            "HOME",
-            "TERM",
-            "LANG",
-            "SYSTEMROOT",
-            "SYSTEMDRIVE",
-            "TEMP",
-            "TMP",
-            "USERPROFILE",
-            "USERNAME",
-        ]
+        self.allowed_env_vars = allowed_env_vars or list(DEFAULT_ALLOWED_ENV_VARS)
+        self.env_denylist_patterns = (
+            list(DEFAULT_ENV_DENYLIST_PATTERNS)
+            if env_denylist_patterns is None
+            else list(env_denylist_patterns)
+        )
         self.use_low_integrity = use_low_integrity
         self._workspace_stamped = False
         # S5 — Helper path is per-instance, not class-level. Previously
@@ -535,10 +714,7 @@ class WindowsSubprocessSandbox(Sandbox):
     # ------------------------------------------------------------------
 
     def _build_env(self, extra: dict[str, str] | None) -> dict[str, str]:
-        env = {k: os.environ[k] for k in self.allowed_env_vars if k in os.environ}
-        if extra:
-            env.update(extra)
-        return env
+        return _select_env(self.allowed_env_vars, self.env_denylist_patterns, extra)
 
     # ------------------------------------------------------------------
     # Job Object helpers (ctypes kernel32)
@@ -683,17 +859,18 @@ class WindowsSubprocessSandbox(Sandbox):
     ) -> SandboxResult:
         proc = await _create_subprocess(command, work_dir, proc_env)
         job = self._assign_job_object(proc.pid)
+        # C2 — Close the Job Object *before* the post-kill ``communicate()``:
+        # ``KILL_ON_JOB_CLOSE`` tears down the whole tree, releasing the output
+        # pipe that a surviving grandchild would otherwise hold open forever.
+        closer = _OnceCloser(lambda: self._close_job(job) if job is not None else None)
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            if job is not None:
-                self._close_job(job)
-            await proc.communicate()
-            return SandboxResult(timed_out=True, exit_code=-1)
+            stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(
+                proc, timeout, on_timeout=closer
+            )
+            if timed_out:
+                return SandboxResult(timed_out=True, exit_code=-1)
         finally:
-            if job is not None:
-                self._close_job(job)
+            closer()
 
         return SandboxResult(
             stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
@@ -722,19 +899,15 @@ class WindowsSubprocessSandbox(Sandbox):
                 env=proc_env,
             )
             job = self._assign_job_object(proc.pid)
+            closer = _OnceCloser(lambda: self._close_job(job) if job is not None else None)
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
+                stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(
+                    proc, timeout, on_timeout=closer
                 )
-            except asyncio.TimeoutError:
-                proc.kill()
-                if job is not None:
-                    self._close_job(job)
-                await proc.communicate()
-                return SandboxResult(timed_out=True, exit_code=-1)
+                if timed_out:
+                    return SandboxResult(timed_out=True, exit_code=-1)
             finally:
-                if job is not None:
-                    self._close_job(job)
+                closer()
 
             return SandboxResult(
                 stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
@@ -806,13 +979,19 @@ class WslDistroSandbox(Sandbox):
         wsl_user: str | None = None,
         restrict_to_workspace: bool = True,
         allowed_env_vars: list[str] | None = None,
+        env_denylist_patterns: list[str] | None = None,
     ) -> None:
         self.distro_name = distro_name
         self.workspace = workspace or os.getcwd()
         self.shell = shell
         self.wsl_user = wsl_user
         self.restrict_to_workspace = restrict_to_workspace
-        self.allowed_env_vars = allowed_env_vars or ["PATH", "HOME", "TERM", "LANG"]
+        self.allowed_env_vars = allowed_env_vars or list(DEFAULT_ALLOWED_ENV_VARS)
+        self.env_denylist_patterns = (
+            list(DEFAULT_ENV_DENYLIST_PATTERNS)
+            if env_denylist_patterns is None
+            else list(env_denylist_patterns)
+        )
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -907,7 +1086,9 @@ class WslDistroSandbox(Sandbox):
                         ),
                         exit_code=1,
                     )
-            env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " "
+            safe_env = _strip_denied_env(env, self.env_denylist_patterns)
+            if safe_env:
+                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in safe_env.items()) + " "
 
         # Build command: env prefix + raw command (no cd prefix when using --cd)
         if self.restrict_to_workspace:
@@ -933,11 +1114,8 @@ class WslDistroSandbox(Sandbox):
                 exit_code=1,
             )
 
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+        stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(proc, timeout)
+        if timed_out:
             return SandboxResult(timed_out=True, exit_code=-1)
 
         return SandboxResult(

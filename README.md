@@ -49,7 +49,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Typed event model** — every message, tool call, and result is a typed, serializable event
 - **Provider-agnostic** — swap between Anthropic, OpenAI, Ollama, Gemini, or any OpenAI-compatible endpoint without changing agent code
 - **Runtime provider switching** — switch between configured providers mid-session with `/model`; conversation history is preserved
-- **Safe by default** — path restrictions, command deny-lists, and approval gates built in
+- **Safe by default** — path restrictions, a best-effort command deny-list (keep `require_approval_for_execute` on), and approval gates built in
 - **Modular transports** — the same agent runs from CLI, TUI, web API, or embedded in your code
 - **Persistent sessions** — every run is saved as JSONL and resumable
 - **Observable** — every provider call and tool execution is timed; sessions carry a `trace_id`

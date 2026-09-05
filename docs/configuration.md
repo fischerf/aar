@@ -36,12 +36,15 @@ config = AgentConfig(
         require_approval_for_writes=True,          # ask before every write
         require_approval_for_execute=True,         # ask before every shell command
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
+        denied_commands=None,                      # None = policy defaults; a list replaces them (see docs/safety.md#command-deny-list)
+        denied_command_patterns=None,              # None = policy defaults (curl|sh, fork bomb); [] disables the regex deny-list
         allowed_paths=["<cwd>/**"],                # hard path boundary; <cwd> expands to Path.cwd() at startup
                                                    # empty list = allow all non-denied paths
                                                    # discovered skill dirs are auto-added as read-only
                                                    # (see docs/safety.md#read_only_paths-and-skills)
         sandbox=SandboxConfig(                     # see docs/safety.md for all modes and per-mode options
             mode="local",                          # "local" | "linux" | "windows" | "wsl" | "auto"
+            env_denylist_patterns=None,            # None = strip *_API_KEY / *_TOKEN / *SECRET* / AWS_* etc. in every mode
         ),
         acp_approval_timeout=0.0,                  # seconds the ACP client has to respond to a permission request; 0.0 = wait indefinitely
     ),
@@ -62,6 +65,7 @@ config = AgentConfig(
         truncate_keep_recent=6,                    # number of recent tool results never truncated
         truncate_max_chars=500,                    # cap on truncated output length
     ),
+    trust_project_extensions=False,                # True executes .agent/extensions/*.py from the CWD without prompting
     skills_dirs=[],                                # extra directories searched for skill bundles
     skills_enabled=True,                           # set False to disable skill auto-discovery (see docs/development.md)
     max_steps=50,
@@ -122,7 +126,7 @@ Aar has several independent timeouts that operate at different layers. They inte
 | `provider.extra.read_timeout` | HTTP read | Ollama | `null` (unlimited) | Max seconds to wait for the next byte while streaming; `null` = no cap |
 | `provider.extra.timeout` | HTTP request | Anthropic, OpenAI, Generic | SDK default / `60` s | Whole-request timeout passed to the provider SDK or httpx client |
 | `tools.bash_default_timeout` | Tool executor | bash | `120` s | Default seconds used when the model invokes `bash` without an explicit `timeout` argument. `command_timeout` is the hard outer cap regardless. |
-| `tools.command_timeout` | Tool executor | all | `300` s | Max wall-clock seconds a single shell/bash tool call may run; `0` = unlimited |
+| `tools.command_timeout` | Tool executor | all | `300` s | Max wall-clock seconds a single shell/bash tool call may run; `0` = no outer guard. Also the hard cap clamped onto the model-supplied `bash(timeout=…)` argument, and published as `maximum` in the tool schema. |
 | `safety.acp_approval_timeout` | ACP transport | all | `0.0` (unlimited) | Seconds the ACP client has to respond to a permission approval request |
 | `timeout` | Agent loop | all | `0.0` (unlimited) | Total wall-clock limit for a whole `Agent.run()` call |
 
@@ -150,7 +154,7 @@ Agent.run() wall-clock limit  (timeout)
 Key rules:
 
 - **Provider timeout must be ≥ the longest single model response you expect.** Large local models on slow hardware can need 3–10 minutes per step. `null` (unlimited) is the safe default for Ollama and for Anthropic/OpenAI (they have their own 600 s SDK default which is usually sufficient).
-- **`command_timeout` must be ≥ the longest shell command the agent may run.** Build steps, test suites, or long compilations need a generous value (120–300 s). `0` disables it entirely.
+- **`command_timeout` must be ≥ the longest shell command the agent may run.** Build steps, test suites, or long compilations need a generous value (120–300 s). `0` disables the executor's outer guard; the `bash` tool still clamps the model's own `timeout` argument to 3600 s so a run can't hang forever.
 - **`timeout` (agent loop) is the outer bound** — set it larger than the provider timeout × expected number of steps. If it fires mid-stream the run is cancelled cleanly.
 - **`acp_approval_timeout`** only matters in ACP mode (`aar acp`). `0.0` waits indefinitely for the editor to respond, which is usually correct.
 
@@ -471,6 +475,35 @@ If no rules files exist, only the base prompt is used. When present, the layers 
 **Project drop-ins** — place `.md` files in `<project_rules_dir>/rules.d/` for per-contributor or per-machine additions. Add `rules.d/` to `.gitignore` if you don't want them committed, or commit them for shared team overrides.
 
 Run `aar init` to create the skeleton files and directories. The init command pre-installs default agent rules at `~/.aar/rules.md` and a multi-provider reference config at `~/.aar/config.example.json`. Edit the rules file to add your own global preferences, or use the example config as a starting point for new provider profiles.
+
+### Upgrading an existing `~/.aar`
+
+`aar init` **skips files that already exist** unless you pass `--force`, so an
+`~/.aar` created by an older release keeps its original contents. After
+upgrading Aar, two things are worth refreshing by hand:
+
+- **Distro profiles** (`~/.aar/distros/*.json`) — profiles written before
+  checksum verification was added have no `rootfs_sha256`, so `aar sandbox
+  setup` downloads the rootfs unverified and only logs a warning. Copy the
+  current ones over:
+
+  ```bash
+  aar init --force        # refreshes everything, including config.json
+  # or, to refresh only the profiles:
+  cp config/distros/*.json ~/.aar/distros/
+  ```
+
+- **`~/.aar/config.json`** — new settings are additive and every one has a
+  default, so an old config keeps working; you simply don't see the new keys.
+  Compare against `~/.aar/config.example.json` (rewritten by `aar init`) and
+  copy across anything you want to set explicitly. Fields added recently:
+  `safety.denied_commands`, `safety.denied_command_patterns`,
+  `safety.sandbox.env_denylist_patterns`,
+  `safety.sandbox.local.restricted_env`, per-mode `allowed_env_vars`, and
+  `trust_project_extensions`.
+
+`aar init --force` overwrites `~/.aar/config.json`, so back it up first if you
+have local edits.
 
 **Override** — if you pass `system_prompt` explicitly to `AgentConfig`, the auto-assembly is skipped entirely and your string is used as-is.
 

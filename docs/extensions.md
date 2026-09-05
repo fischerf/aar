@@ -270,20 +270,52 @@ passes `"happy"`).
 
 ## Auto-Discovery
 
-Extensions are discovered from three tiers. Higher tiers shadow lower ones by name.
+Extensions are discovered from three tiers.
 
-| Priority | Location | Scope |
-|---|---|---|
-| 1 — Installed packages | `aar_extensions` entry-point group | Global (pip-installed) |
-| 2 — User directory | `~/.aar/extensions/*.py` or `~/.aar/extensions/*/` | Per-user |
-| 3 — Project directory | `.agent/extensions/*.py` or `.agent/extensions/*/` | Per-project |
+| Priority | Location | Scope | Trust |
+|---|---|---|---|
+| 1 — Installed packages | `aar_extensions` entry-point group | Global (pip-installed) | You installed it |
+| 2 — User directory | `~/.aar/extensions/*.py` or `~/.aar/extensions/*/` | Per-user | You wrote it |
+| 3 — Project directory | `.agent/extensions/*.py` or `.agent/extensions/*/` | Per-project | **Prompted — see below** |
 
-**Shadowing:** if a project extension has the same name as an installed package
-extension, the project version wins. This lets you override or develop locally.
+**Shadowing:** a user extension shadows an installed one of the same name (you
+installed both, so you get to choose). A **project** extension never shadows
+anything — a name collision with an entry-point or user extension is skipped
+with a WARNING, so a cloned repository cannot replace a safety extension with a
+no-op.
 
 Files and directories starting with `_` or `.` are ignored.
 
 A package directory must contain an `__init__.py` with a `register` function.
+
+### Project extension trust
+
+`.agent/extensions/*.py` arrives with `git clone` and runs as you, unsandboxed,
+before any safety policy applies. Aar therefore asks before executing it:
+
+- **Interactive transports** (`aar chat`, `aar tui`) list the discovered files
+  and prompt once: *yes* (this run), *always* (remember), or *no*. "Always"
+  records a SHA-256 of the extension tree in `~/.aar/trusted_projects.json`, so
+  any later edit or added file re-prompts.
+- **Every other transport** (`aar run`, `aar serve`, `aar acp`, `aar acp --http`)
+  never loads project extensions — there is no prompt channel wired up. They log
+  a warning naming the files that were skipped.
+
+Opt in explicitly with any of:
+
+```bash
+aar run "…" --trust-project-extensions      # this invocation
+AAR_TRUST_PROJECT_EXTENSIONS=1 aar run "…"  # CI
+```
+
+```json
+// ~/.aar/config.json — always trust, for every project
+{ "trust_project_extensions": true }
+```
+
+Loaded extensions and their source tier are logged at INFO
+(`Extension active: <name> (<tier>)`); `aar extensions list` shows the same
+information as a table.
 
 ---
 

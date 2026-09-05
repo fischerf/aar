@@ -1,15 +1,38 @@
 # Web API
 
 ```bash
-pip install uvicorn
+pip install "aar-agent[serve]"   # or: pip install uvicorn
 aar serve --port 8080
+# Starting web server on 127.0.0.1:8080
+# Auth token (generated): xnT9_…            <- copy this
 ```
+
+Every request except `GET /health` must carry that token:
+
+```bash
+curl -H "Authorization: Bearer $AAR_HTTP_TOKEN" http://127.0.0.1:8080/sessions
+```
+
+## Security model
+
+`aar serve` exposes an agent that can read files and run shell commands. Binding
+to `127.0.0.1` is **not** a security boundary: the browser of anyone using the
+machine is also on `127.0.0.1`, so without authentication any web page they visit
+could `fetch()` this API. Hence:
+
+| Control | Default | Opt out |
+|---|---|---|
+| Bearer token on every route but `/health` | generated at startup, printed once | `--token <t>`, `$AAR_HTTP_TOKEN`, or `--no-auth` (loopback only) |
+| CORS | no headers emitted at all | `--cors-origin https://app.example` (repeatable, exact match) |
+| Tool approval | `--approval deny` — anything the policy wants confirmed is refused | `--approval auto` |
+| Client `safety` override | may only *tighten* the server policy | `--allow-safety-override` |
+| Public bind (`--host 0.0.0.0`) | refused unless a token is supplied explicitly | `--token <t>` |
 
 ## Endpoints
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Health check |
+| `/health` | GET | Health check (the only unauthenticated route) |
 | `/chat` | POST | Run a prompt, return full response |
 | `/chat/stream` | POST | Run a prompt, stream events via SSE |
 | `/sessions` | GET | List session IDs |
@@ -27,6 +50,10 @@ aar serve --port 8080
 | `--log-level` | yes | yes |
 | `--log-file` | yes | yes |
 | `--host`, `--port` | — | yes |
+| `--token`, `--no-auth`, `--cors-origin` | — | yes |
+| `--approval deny\|auto` | — | yes |
+| `--allow-safety-override` | — | yes |
+| `--trust-project-extensions` | `run` only | yes |
 | `--require-approval / --no-require-approval` | yes | — |
 | `--restrict-to-cwd / --no-restrict-to-cwd` | yes | — |
 | `--denied-paths`, `--allowed-paths` | yes | — |
@@ -38,37 +65,65 @@ Config not expressible via `aar serve` flags can be set in `~/.aar/config.json` 
 
 ## Approval in the web transport
 
-There is no terminal to prompt in a server process, so the web transport **auto-approves** all tool calls by default. The HTTP request itself is treated as implicit approval. This means `require_approval_for_writes` / `require_approval_for_execute` in `SafetyConfig` have no blocking effect — use `read_only` or path restrictions instead if you need hard limits.
+There is no terminal to prompt in a server process, so the web transport
+**denies** anything the policy wants a human to confirm. `bash`, `write_file`
+and `edit_file` therefore fail with `Error [denied]` under the default
+`require_approval_for_*` settings — read-only work still flows.
 
 ```bash
-# Harden the server: block all writes
-aar serve --read-only
+# Unattended execution: approve every tool call automatically.
+# Only do this when you control every client that holds the token.
+aar serve --approval auto
 
-# Or restrict to a specific directory tree via config file
-# ~/.aar/config.json
-# { "safety": { "allowed_paths": ["/my/project/**"] } }
+# Harden further: block all writes outright
+aar serve --read-only
 ```
+
+To keep approval gates *and* allow writes, either turn the specific gate off in
+`~/.aar/config.json` (`"require_approval_for_writes": false`) or supply your own
+`approval_callback` when embedding `create_asgi_app()`.
 
 ## Per-request safety override
 
-Clients can tighten or loosen safety settings for a single request by including a `"safety"` key in the JSON body. Only the fields you specify are overridden; everything else uses the server's config.
+Clients may include a `"safety"` key in the JSON body, but it can only make the
+policy **stricter** — a request cannot delete the server's `allowed_paths`,
+`denied_paths` or sandbox and then ask for a shell.
+
+| Field | Effect |
+|---|---|
+| `read_only`, `require_approval_for_writes`, `require_approval_for_execute` | applied when set to `true`; `false` is ignored |
+| `denied_paths`, `denied_commands` | **appended** to the server's lists |
+| anything else (`allowed_paths`, `sandbox`, …) | ignored and logged at WARNING |
 
 ```bash
 # Force read-only for this one request
 curl -X POST http://localhost:8080/chat \
+  -H "Authorization: Bearer $AAR_HTTP_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Summarise README.md", "safety": {"read_only": true}}'
+```
 
-# Allow writes but restrict to a specific path
-curl -X POST http://localhost:8080/chat \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Write hello.py", "safety": {"allowed_paths": ["/tmp/**"]}}'
+Pass `--allow-safety-override` to restore unrestricted overrides for a
+deployment where every client is trusted.
+
+## Embedding the app
+
+```python
+from agent.transports._http_auth import BearerAuth
+from agent.transports.web import create_asgi_app
+
+app = create_asgi_app(
+    config=my_config,
+    auth=BearerAuth("my-shared-secret"),   # or BearerAuth.disabled() behind your own auth
+    cors_origins=["https://app.example"],
+)
 ```
 
 ## `/chat` — request and response
 
 ```bash
 curl -X POST http://localhost:8080/chat \
+  -H "Authorization: Bearer $AAR_HTTP_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Write hello.py", "session_id": null}'
 ```
@@ -104,7 +159,8 @@ Response JSON shape:
 
 ```bash
 curl -N http://localhost:8080/chat/stream \
-  -X POST -H "Content-Type: application/json" \
+  -X POST -H "Authorization: Bearer $AAR_HTTP_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{"prompt": "Write hello.py"}'
 ```
 

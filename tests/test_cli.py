@@ -597,7 +597,11 @@ class TestServeCommand:
             patch("agent.core.agent._create_provider", return_value=MockProvider()),
             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
         ):
-            result = runner.invoke(app, ["serve", "--host", "0.0.0.0", "--port", "9090"])
+            # C1 — a public bind requires an explicit token.
+            result = runner.invoke(
+                app,
+                ["serve", "--host", "0.0.0.0", "--port", "9090", "--token", "s3cret"],
+            )
 
         assert result.exit_code == 0
         assert captured.get("host") == "0.0.0.0"
