@@ -26,12 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while the agent runs) and re-renders the transcript after an action or
   extension slash command that rewrote `Session.events`. The ACP stdio agent
   exposes the same data through `_aar/panel_list`, `_aar/panel_snapshot`,
-  `_aar/panel_action` and pushes `_aar/panel_changed`. First consumer:
-  `aar-ext-shadow-branching` 0.3.0.
+  `_aar/panel_action` and pushes `_aar/panel_changed`; the HTTP/SSE transport
+  serves them as `GET /sessions/{id}/panels`, `GET /sessions/{id}/panels/{name}`,
+  `POST /sessions/{id}/panels/{name}/actions/{action}` plus a `panel_changed`
+  SSE event. First consumer: `aar-ext-shadow-branching` 0.3.0.
+- **ACP HTTP keeps one `Agent` per session** — extensions (hooks, tools,
+  prompt additions, panels) now load once per `session_id` and keep their
+  state across runs instead of being rebuilt and discarded on every run.
 
 ### Changed
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while
   an extension panel is still visible in it.
+
+### Fixed
+- ACP HTTP `GET /runs/{run_id}/events` returned 404 for every run — the
+  generic `GET /runs/{run_id}` branch matched first and rejected the path.
 
 ### Fixed
 

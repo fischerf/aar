@@ -20,9 +20,13 @@ For Zed and other editors that launch the agent as a child process, use
      so tools exposed via ``initialize.mcp_servers`` are unavailable.
    * **Slash commands** — ``/model``, ``/help``, ``/clear`` etc. are
      not parsed; user input is forwarded verbatim to the model.
-   * **Extensions** — the auto-discovered extension manager is not
-     activated; ``register(api)`` hooks, custom tools, and prompt
-     contributions registered by extensions do not apply.
+   * **Extensions** — loaded per *session* (one cached ``Agent`` per
+     ``session_id``), so ``register(api)`` hooks, custom tools, prompt
+     contributions and UI panels apply and keep their state across runs.
+     Extension slash commands are still **not** parsed on this transport.
+     Panels: ``GET /sessions/{id}/panels``, ``GET /sessions/{id}/panels/{name}``,
+     ``POST /sessions/{id}/panels/{name}/actions/{action}`` and the
+     ``panel_changed`` SSE event.
    * **ACP permission bridging** — approval requests fall back to
      the auto-approve callback; there is no ``session/request_permission``
      round-trip to the client.
@@ -199,6 +203,18 @@ class ContextWindowUpdatedEvent(BaseModel):
     strategy: str = ""
 
 
+class PanelChangedEvent(BaseModel):
+    """An extension UI panel flagged its state as stale during the run.
+
+    Fetch ``GET /sessions/{session_id}/panels/{panel}`` for a fresh tree.
+    """
+
+    type: Literal["panel_changed"] = "panel_changed"
+    run_id: str
+    session_id: str
+    panel: str
+
+
 AcpSseEvent = (
     RunCreatedEvent
     | MessageCreatedEvent
@@ -207,7 +223,17 @@ AcpSseEvent = (
     | RunFailedEvent
     | RunCancelledEvent
     | ContextWindowUpdatedEvent
+    | PanelChangedEvent
 )
+
+
+class HttpError(Exception):
+    """Raised by transport methods; the ASGI layer maps it to a JSON reply."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
 
 
 # ---------------------------------------------------------------------------
@@ -267,12 +293,15 @@ class AcpTransport:
         self.agent_description = agent_description
         self.store = SessionStore(self.config.session_dir)
         self._runs: dict[str, _RunRecord] = {}
+        # One Agent per session so extension state (hooks, UI panels) survives
+        # across runs instead of being rebuilt — and discarded — every run.
+        self._agents: dict[str, AarAgent] = {}
         # #3b — Surface the feature gap vs the stdio transport on every
         # construction so operators see it in their logs. See module
         # docstring above for the full list.
         logger.warning(
             "ACP HTTP transport is feature-incomplete vs stdio: no MCP "
-            "bridge, slash commands, extensions, ACP permission requests, "
+            "bridge, slash commands, ACP permission requests, "
             "session_update replay, set_session_model, or session "
             "fork/resume/list. See agent.transports.acp.http module "
             "docstring for the full list."
@@ -339,8 +368,10 @@ class AcpTransport:
         if queue:
             await queue.put(in_progress_evt)
 
+        aar_agent: AarAgent | None = None
+        on_event: Any = None
         try:
-            aar_agent = self._make_agent()
+            aar_agent = self._agent_for(session_id) if session_id else self._make_agent()
             _stream_buf: list[str] = []
 
             def _flush_buf() -> None:
@@ -395,12 +426,20 @@ class AcpTransport:
             finished = await aar_agent.run(prompt, session, cancel_event=record.cancel_event)
             self.store.save(finished)
             run.session_id = finished.session_id
+            # A run without session_id created the session — keep its agent so
+            # follow-up runs and panel requests see the same extension state.
+            self._agents.setdefault(finished.session_id, aar_agent)
 
             if queue and _stream_buf:
                 _flush_buf()
 
             if not queue:
                 run.output = _collect_output(finished)
+
+            for panel_evt in self._drain_panel_changes(run.run_id, aar_agent, finished.session_id):
+                record.acp_events.append(panel_evt)
+                if queue:
+                    queue.put_nowait(panel_evt)
 
             if finished.state == AgentState.CANCELLED:
                 run.finish(RunStatus.CANCELLED)
@@ -430,8 +469,148 @@ class AcpTransport:
                 await queue.put(evt)
 
         finally:
+            # The agent is reused across runs — drop this run's listener.
+            if aar_agent is not None and on_event is not None:
+                aar_agent.off_event(on_event)
             if queue:
                 await queue.put(None)
+
+    # ------------------------------------------------------------------
+    # Extension UI panels (see agent.extensions.api.UIPanel)
+    # ------------------------------------------------------------------
+
+    def _agent_for(self, session_id: str) -> AarAgent:
+        """The cached Agent for *session_id*, created on first use."""
+        agent = self._agents.get(session_id)
+        if agent is None:
+            agent = self._make_agent()
+            self._agents[session_id] = agent
+        return agent
+
+    async def _extension_manager_for(self, session_id: str) -> Any:
+        """Extension manager for *session_id*, initialising it if the session
+        has not run on this transport yet (e.g. resumed from disk)."""
+        try:
+            session = self.store.load(session_id)
+        except (FileNotFoundError, ValueError):
+            if session_id not in self._agents:
+                raise HttpError(404, f"Session '{session_id}' not found") from None
+            session = Session(session_id=session_id)
+        agent = self._agent_for(session_id)
+        if agent._extension_manager is None:
+            await agent._init_extensions(session)
+        mgr = agent._extension_manager
+        if mgr is None:
+            raise HttpError(503, "extensions unavailable")
+        mgr.update_session(session)
+        return mgr
+
+    def session_busy(self, session_id: str) -> bool:
+        """True while a run for *session_id* is in progress."""
+        return any(
+            rec.run.session_id == session_id and rec.run.status == RunStatus.IN_PROGRESS
+            for rec in self._runs.values()
+        )
+
+    @staticmethod
+    def _drain_panel_changes(
+        run_id: str, agent: AarAgent, session_id: str
+    ) -> list[PanelChangedEvent]:
+        mgr = getattr(agent, "_extension_manager", None)
+        panels = getattr(mgr, "panels", None) if mgr is not None else None
+        if not isinstance(panels, dict):
+            return []
+        out: list[PanelChangedEvent] = []
+        for panel in panels.values():
+            if panel.changed.is_set():
+                panel.changed.clear()
+                out.append(
+                    PanelChangedEvent(run_id=run_id, session_id=session_id, panel=panel.name)
+                )
+        return out
+
+    async def panel_list(self, session_id: str) -> dict[str, Any]:
+        mgr = await self._extension_manager_for(session_id)
+        ctx = mgr._context
+        return {
+            "session_id": session_id,
+            "panels": [
+                {
+                    "name": p.name,
+                    "title": p.title,
+                    "status": p.status_text(ctx),
+                    "actions": [a.to_dict() for a in p.actions],
+                }
+                for p in mgr.panels.values()
+            ],
+        }
+
+    async def _panel(self, session_id: str, name: str) -> tuple[Any, Any]:
+        mgr = await self._extension_manager_for(session_id)
+        panel = mgr.panels.get(name)
+        if panel is None:
+            raise HttpError(404, f"Panel '{name}' not found")
+        return mgr, panel
+
+    async def panel_snapshot(self, session_id: str, name: str) -> dict[str, Any]:
+        from agent.extensions.api import run_ui_snapshot
+
+        mgr, panel = await self._panel(session_id, name)
+        root = await run_ui_snapshot(panel, mgr._context)
+        panel.changed.clear()
+        return {
+            "session_id": session_id,
+            "panel": panel.name,
+            "root": root.to_dict(),
+            "status": panel.status_text(mgr._context),
+        }
+
+    async def panel_action(
+        self,
+        session_id: str,
+        name: str,
+        action_id: str,
+        node_id: str | None,
+        args: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        from agent.extensions.api import UIInvocation, run_ui_action, run_ui_snapshot
+
+        mgr, panel = await self._panel(session_id, name)
+        action = panel.action(action_id)
+        if action is None:
+            raise HttpError(404, f"Action '{action_id}' not found on panel '{name}'")
+        if not node_id:
+            raise HttpError(400, "node_id is required")
+        ctx = mgr._context
+        root = await run_ui_snapshot(panel, ctx)
+        node = root.find(node_id)
+        if node is None:
+            raise HttpError(404, f"Node '{node_id}' not found")
+        if not action.applies_to(node):
+            raise HttpError(422, f"Action '{action_id}' does not apply to node kind '{node.kind}'")
+        if action.mutates and self.session_busy(session_id):
+            raise HttpError(409, "A run is in progress for this session — cancel it first")
+        try:
+            message = await run_ui_action(
+                action, UIInvocation(node=node, ctx=ctx, args=dict(args or {}))
+            )
+        except Exception as exc:
+            logger.error("ACP HTTP: panel action %s/%s failed: %s", name, action_id, exc)
+            message = f"✗ {action_id}: {exc}"
+        root = await run_ui_snapshot(panel, ctx)
+        panel.changed.clear()
+        if action.mutates:
+            session = getattr(ctx, "session", None)
+            if isinstance(session, Session):
+                self.store.save(session)
+        return {
+            "session_id": session_id,
+            "panel": panel.name,
+            "action": action.id,
+            "message": message,
+            "root": root.to_dict(),
+            "status": panel.status_text(ctx),
+        }
 
     def get_run(self, run_id: str) -> AcpRun | None:
         record = self._runs.get(run_id)
@@ -513,6 +692,10 @@ def create_acp_asgi_app(
     POST /runs/{run_id}/cancel    — cancel run
     GET  /runs/{run_id}/events    — ACP event log
     GET  /sessions/{session_id}   — session metadata
+    GET  /sessions/{id}/panels                  — extension UI panels + actions
+    GET  /sessions/{id}/panels/{name}           — panel snapshot (UINode tree)
+    POST /sessions/{id}/panels/{name}/actions/{action}
+                                  — run an action; body {node_id, args?}
     GET  /ping                    — health check (the only unauthenticated route)
 
     C1 — Every other route requires ``Authorization: Bearer <token>``.  With
@@ -597,6 +780,16 @@ def create_acp_asgi_app(
             else:
                 await _reply(run.model_dump())
 
+        # ``/runs/{id}/events`` must be matched before the generic
+        # ``/runs/{id}`` branch below, which rejects any id containing ``/``.
+        elif method == "GET" and path.endswith("/events") and "/runs/" in path:
+            run_id = path[len("/runs/") :].removesuffix("/events")
+            events = transport.get_run_events(run_id)
+            if events is not None:
+                await _reply({"events": [e.model_dump() for e in events]})
+            else:
+                await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
+
         elif method == "GET" and _matches(path, "/runs/", 1):
             run_id = _path_tail(path, "/runs/")
             if "/" in run_id:
@@ -616,14 +809,6 @@ def create_acp_asgi_app(
             else:
                 await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
 
-        elif method == "GET" and path.endswith("/events") and "/runs/" in path:
-            run_id = path[len("/runs/") :].removesuffix("/events")
-            events = transport.get_run_events(run_id)
-            if events is not None:
-                await _reply({"events": [e.model_dump() for e in events]})
-            else:
-                await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
-
         elif method == "POST" and _matches(path, "/runs/", 1):
             run_id = _path_tail(path, "/runs/")
             run = transport.get_run(run_id)
@@ -631,6 +816,48 @@ def create_acp_asgi_app(
                 await _reply({"detail": "Resume not supported; run is not awaiting"}, status=422)
             else:
                 await _reply({"detail": f"Run '{run_id}' not found"}, status=404)
+
+        elif "/panels" in path and path.startswith("/sessions/"):
+            # /sessions/{sid}/panels
+            # /sessions/{sid}/panels/{name}
+            # /sessions/{sid}/panels/{name}/actions/{action}
+            parts = path[len("/sessions/") :].split("/")
+            sid = parts[0]
+            try:
+                if method == "GET" and parts[1:] == ["panels"]:
+                    await _reply(await transport.panel_list(sid))
+                elif method == "GET" and len(parts) == 3 and parts[1] == "panels":
+                    await _reply(await transport.panel_snapshot(sid, parts[2]))
+                elif (
+                    method == "POST"
+                    and len(parts) == 5
+                    and parts[1] == "panels"
+                    and parts[3] == "actions"
+                ):
+                    body = await _read_body(receive)
+                    try:
+                        data = json.loads(body) if body else {}
+                    except json.JSONDecodeError:
+                        await _reply({"detail": "Invalid JSON"}, status=400)
+                        return
+                    if not isinstance(data, dict):
+                        await _reply({"detail": "Body must be a JSON object"}, status=400)
+                        return
+                    node_id = data.get("node_id") or data.get("nodeId")
+                    args = data.get("args")
+                    await _reply(
+                        await transport.panel_action(
+                            sid,
+                            parts[2],
+                            parts[4],
+                            node_id if isinstance(node_id, str) else None,
+                            args if isinstance(args, dict) else None,
+                        )
+                    )
+                else:
+                    await _reply({"detail": "Not found"}, status=404)
+            except HttpError as exc:
+                await _reply({"detail": exc.detail}, status=exc.status)
 
         elif method == "GET" and path.startswith("/sessions/"):
             sid = path[len("/sessions/") :]
