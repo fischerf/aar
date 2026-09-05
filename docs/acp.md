@@ -486,6 +486,39 @@ pip install agent-client-protocol
 The package is listed as an optional dependency so the rest of Aar works without
 it. Only `aar acp` (stdio) and `create_acp_asgi_app` need it at runtime.
 
+### Supported SDK versions
+
+Aar declares `agent-client-protocol>=0.10.0` and is tested against both ends of
+that range (0.10.0 and 0.12.1). Every version so far speaks **wire protocol
+version 1**, so the SDK releases are additive within one protocol — an Aar
+agent built on an older SDK still interoperates with a newer client, it just
+doesn't advertise the newer capabilities.
+
+One behavioural note for 0.12+: the *unstable* `session/set_model` method was
+removed (`SetSessionModelResponse`, `SetSessionModelRequest`, `ModelInfo` and
+`SessionModelState` are gone from `acp.schema`, and `set_session_model` is no
+longer on the `acp.Agent` protocol). `AarAcpAgent.set_session_model` keeps
+working on older SDKs and on direct programmatic calls, and returns `None`
+where the response type no longer exists. No 0.12+ client can route to it, so
+model switching over ACP is currently unavailable there. The replacement types
+(`SetProviderRequest` / `SetProviderResponse`, plus an `AgentCapabilities.providers`
+field) exist in 0.12.1 but are not yet wired to a `session/*` method by the
+SDK, so there is nothing stable to migrate to yet.
+
+### Capabilities added in 0.11 / 0.12 that Aar does not implement yet
+
+These are opportunities, not gaps against the protocol version we target:
+
+| Capability | What it enables | What adopting it needs |
+|---|---|---|
+| **Elicitation** (`ClientCapabilities.elicitation`, `Client.create_elicitation`) | The agent asks the editor for structured input — a form or a URL prompt — instead of guessing or failing | Call `create_elicitation(message, mode, ...)` behind a capability check; decide where in the loop a structured ask beats a plain question |
+| **Plan updates** (`ClientCapabilities.plan`, `PlanUpdate` / `PlanItems` / `PlanMarkdown`) | A live plan/todo panel in the editor, updated as the agent works | Aar has no plan/todo model in the loop today; that would come first |
+| **Runtime MCP attach** (`ConnectMcpRequest` / `DisconnectMcpRequest`) | Add or remove MCP servers mid-session instead of only at `session/new` | Extend the existing per-session MCP bridge to add/remove servers while a session is live |
+| **Session delete** (`session/delete`, `SessionDeleteCapabilities`) | Client-driven deletion of a stored session | Map to `SessionStore` deletion |
+
+Raising the floor to `>=0.12.1` is only worthwhile once one of these is
+actually implemented — until then it would drop 0.10/0.11 users for no gain.
+
 ---
 
 ## 7. Module layout
