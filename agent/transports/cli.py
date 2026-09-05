@@ -1499,7 +1499,7 @@ def extensions_inspect(
     user_dir: Optional[str] = typer.Option(None, "--user-dir"),
     project_dir: Optional[str] = typer.Option(None, "--project-dir"),
 ) -> None:
-    """Show what events, tools, and commands an extension registers."""
+    """Show what events, tools, commands, and UI panels an extension registers."""
     from agent.extensions.loader import discover_extensions, load_extension
 
     infos = discover_extensions(
@@ -1537,10 +1537,30 @@ def extensions_inspect(
         for cmd_name, (desc, _) in api._commands.items():
             console.print(f"  • /{cmd_name}" + (f" — {desc}" if desc else ""))
 
+    if api._panels:
+        console.print("\n[bold]UI panels:[/] [dim](ctrl+b in `aar tui --fixed`)[/]")
+        for panel in api._panels:
+            console.print(f"  • {panel.name} — {panel.title}")
+            for action in panel.actions:
+                flags = []
+                if action.destructive:
+                    flags.append("destructive")
+                if not action.mutates:
+                    flags.append("read-only")
+                suffix = f" [dim]({', '.join(flags)})[/]" if flags else ""
+                kinds = "/".join(action.kinds)
+                # Escape the key bracket — Rich would read "[u]"/"[b]" as markup.
+                console.print(rf"      \[{action.key}] {action.label} — on {kinds}{suffix}")
+
     if api._system_prompt_parts:
         console.print(
             f"\n[bold]System prompt additions:[/] {len(api._system_prompt_parts)} part(s)"
         )
+
+    if not any(
+        (api._event_handlers, api._tools, api._commands, api._panels, api._system_prompt_parts)
+    ):
+        console.print("\n[yellow]This extension registers nothing.[/]")
 
 
 @app.command()
