@@ -8,6 +8,7 @@ so it can be reused or tested in isolation.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from agent.core.config import AgentConfig
 from agent.core.events import ErrorEvent, StopReason, ToolCall
@@ -111,6 +112,22 @@ def parse_stop(reason: str) -> StopReason:
         return StopReason(reason)
     except ValueError:
         return StopReason.END_TURN
+
+
+def format_refusal(stop_details: dict[str, Any] | None) -> str:
+    """Render a provider refusal into one human-readable line.
+
+    ``stop_details`` is the provider's structured reason (Anthropic supplies
+    ``category`` and often ``explanation``); it may be absent entirely, in
+    which case the caller still gets a usable message.
+    """
+    if not stop_details:
+        return "no reason supplied by the provider"
+    category = str(stop_details.get("category") or "").strip()
+    explanation = str(stop_details.get("explanation") or "").strip()
+    if category and explanation:
+        return f"{category} — {explanation}"
+    return category or explanation or "no reason supplied by the provider"
 
 
 def detect_truncated_tool_call(

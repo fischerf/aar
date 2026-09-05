@@ -411,11 +411,19 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _map_stop_reason(reason: str | None) -> str:
+    """Translate an OpenAI ``finish_reason`` to an internal :class:`StopReason`.
+
+    Unknown values fall back to ``end_turn`` rather than being passed through —
+    a raw provider string is not a valid ``StopReason``.
+    """
     mapping = {
         "stop": StopReason.END_TURN,
         "tool_calls": StopReason.TOOL_USE,
         "length": StopReason.MAX_TOKENS,
+        # The moderation layer blocked the completion — terminal, like a
+        # Claude refusal. Retrying the same prompt cannot succeed.
+        "content_filter": StopReason.REFUSAL,
     }
     if reason and reason in mapping:
         return mapping[reason].value
-    return reason or StopReason.END_TURN.value
+    return StopReason.END_TURN.value
