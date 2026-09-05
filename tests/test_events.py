@@ -254,6 +254,7 @@ class TestStopReason:
             "end_turn",
             "tool_use",
             "max_tokens",
+            "refusal",
             "timeout",
             "max_steps",
             "budget_exceeded",

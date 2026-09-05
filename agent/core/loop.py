@@ -29,6 +29,7 @@ from agent.core.loop_helpers import (
     detect_truncated_tool_call,
     emit,
     emit_provider_observation,
+    format_refusal,
     parse_stop,
 )
 from agent.core.provider_runner import ProviderRequestFailed, provider_request
@@ -410,10 +411,30 @@ async def run_loop(
                 continue
 
             stop = parse_stop(response.stop_reason)
-            emit(session, on_event, AssistantMessage(content=response.content, stop_reason=stop))
+            assistant_msg = AssistantMessage(content=response.content, stop_reason=stop)
+            if response.stop_details:
+                assistant_msg.data["stop_details"] = dict(response.stop_details)
+            emit(session, on_event, assistant_msg)
 
             if extension_manager is not None:
                 await extension_manager.fire_event("assistant_message", session.events[-1])
+
+            if stop == StopReason.REFUSAL:
+                # A provider safety classifier declined the request. Surface it
+                # and stop: the response is empty, so without this the
+                # premature-end guardrail below would mistake it for the model
+                # giving up and burn its recovery turns re-asking a question
+                # that cannot be answered.
+                _refusal = format_refusal(response.stop_details)
+                log.warning("Provider refused the request: %s", _refusal, extra=log_extra)
+                emit(
+                    session,
+                    on_event,
+                    ErrorEvent(
+                        message=f"Request declined by the provider ({_refusal})",
+                        recoverable=False,
+                    ),
+                )
 
             if stop == StopReason.MAX_TOKENS and guardrails.should_continue_after_max_tokens(
                 session
@@ -442,7 +463,7 @@ async def run_loop(
                 )
                 continue
 
-            if stop in {StopReason.END_TURN, StopReason.MAX_TOKENS}:
+            if stop in {StopReason.END_TURN, StopReason.MAX_TOKENS, StopReason.REFUSAL}:
                 done = True
 
         if session.step_count >= config.max_steps and not done:

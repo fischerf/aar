@@ -174,6 +174,7 @@ class AnthropicProvider(Provider):
             stop_reason=stop_reason,
             reasoning=reasoning_blocks,
             meta=meta,
+            stop_details=_extract_stop_details(response),
         )
 
     @translate_provider_errors
@@ -262,6 +263,8 @@ class AnthropicProvider(Provider):
                         yield delta
                     # Build usage metadata from the final message
                     stream_meta: ProviderMeta | None = None
+                    stream_stop: str = ""
+                    stream_stop_details: dict[str, Any] | None = None
                     try:
                         final_msg = await stream.get_final_message()
                         usage: dict[str, int] = {
@@ -282,10 +285,20 @@ class AnthropicProvider(Provider):
                             usage=usage,
                             request_id=final_msg.id,
                         )
+                        # Carry the real stop reason through the stream —
+                        # otherwise a refusal is indistinguishable from a
+                        # normal end_turn once the deltas are assembled.
+                        stream_stop = _map_stop_reason(final_msg.stop_reason)
+                        stream_stop_details = _extract_stop_details(final_msg)
                     except Exception:
                         # Don't silently swallow — surfaces SDK breakage in logs. (#6)
                         logger.debug("Failed to build Anthropic stream meta", exc_info=True)
-                    yield StreamDelta(done=True, meta=stream_meta)
+                    yield StreamDelta(
+                        done=True,
+                        meta=stream_meta,
+                        stop_reason=stream_stop,
+                        stop_details=stream_stop_details,
+                    )
                     emitted_done = True
                     return
 
@@ -360,11 +373,43 @@ def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict
 
 
 def _map_stop_reason(reason: str | None) -> str:
+    """Translate an Anthropic ``stop_reason`` to an internal :class:`StopReason`.
+
+    Unknown values fall back to ``end_turn`` rather than being passed through:
+    a raw provider string is not a valid ``StopReason`` and would be coerced
+    to ``end_turn`` downstream anyway, silently and one layer further away.
+    """
     mapping = {
         "end_turn": StopReason.END_TURN,
         "tool_use": StopReason.TOOL_USE,
         "max_tokens": StopReason.MAX_TOKENS,
+        # A safety classifier declined the request (Claude Opus 4.7+).
+        "refusal": StopReason.REFUSAL,
+        # A custom stop sequence fired — a normal, complete turn.
+        "stop_sequence": StopReason.END_TURN,
+        # Server-tool pause. Aar does not resume these, so treat the turn as
+        # finished rather than letting the loop spin.
+        "pause_turn": StopReason.END_TURN,
     }
     if reason and reason in mapping:
         return mapping[reason].value
-    return reason or StopReason.END_TURN.value
+    if reason:
+        logger.debug("Unrecognised Anthropic stop_reason %r — treating as end_turn", reason)
+    return StopReason.END_TURN.value
+
+
+def _extract_stop_details(message: Any) -> dict[str, Any] | None:
+    """Pull ``stop_details`` off a response, if the SDK and model provide it.
+
+    Populated only when ``stop_reason == "refusal"``; ``None`` otherwise. Kept
+    defensive so an older SDK without the attribute simply yields ``None``.
+    """
+    details = getattr(message, "stop_details", None)
+    if details is None:
+        return None
+    out: dict[str, Any] = {}
+    for field_name in ("type", "category", "explanation"):
+        value = getattr(details, field_name, None)
+        if value is not None:
+            out[field_name] = value
+    return out or None

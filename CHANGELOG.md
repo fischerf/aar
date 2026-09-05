@@ -41,6 +41,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - ACP HTTP `GET /runs/{run_id}/events` returned 404 for every run — the
   generic `GET /runs/{run_id}` branch matched first and rejected the path.
+- **Provider refusals are no longer mistaken for the model giving up.** A
+  safety classifier declining a request (Anthropic `stop_reason="refusal"` on
+  Claude Opus 4.7+, OpenAI `finish_reason="content_filter"`) mapped to
+  `end_turn` with empty content, so the premature-end guardrail retried it
+  twice before stopping — three calls, and the refusal category was
+  discarded. New `StopReason.REFUSAL` terminates the loop immediately and
+  emits a non-recoverable `ErrorEvent` naming the category and explanation
+  from the provider's `stop_details`. Unknown stop reasons now fall back to
+  `end_turn` inside each provider instead of leaking a raw provider string,
+  and `stop_sequence` / `pause_turn` are mapped explicitly.
+- **Streaming no longer discards the provider's stop reason.** The stream
+  consumer inferred it purely from whether tool calls arrived, which cannot
+  distinguish a refusal (or a `max_tokens` cut-off) from a normal `end_turn`.
+  `StreamDelta` gained `stop_reason` / `stop_details`, set by the Anthropic
+  provider on the terminal delta; providers that leave them unset keep the
+  previous inference.
+- Pricing entries added for Claude Opus 5, Sonnet 5, Fable 5 and 5.1. Opus 4.7
+  and 4.8 had no entry and fell through to the `claude-opus-4` prefix, which
+  over-reported their cost threefold.
 
 ### Fixed
 
