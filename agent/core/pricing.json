@@ -5,6 +5,34 @@
 
   "_section_anthropic": "── Anthropic Claude 4.x — current models only ─────────────────────────────",
 
+  "claude-fable-5-1": {
+    "_note": "Claude Fable 5.1 — $10 input / $50 output. Cache reads are a flat $0.25/M on 5.1 (not the usual 0.1x).",
+    "input_per_million": 10.0,
+    "output_per_million": 50.0,
+    "cache_read_per_million": 0.25,
+    "cache_write_per_million": 12.5
+  },
+  "claude-fable-5": {
+    "_note": "Claude Fable 5 — same $10/$50 as 5.1, standard 0.1x cache read. Longer key above wins for 5.1.",
+    "input_per_million": 10.0,
+    "output_per_million": 50.0,
+    "cache_read_per_million": 1.0,
+    "cache_write_per_million": 12.5
+  },
+  "claude-opus-5": {
+    "_note": "Claude Opus 5 — $5 input / $25 output",
+    "input_per_million": 5.0,
+    "output_per_million": 25.0,
+    "cache_read_per_million": 0.5,
+    "cache_write_per_million": 6.25
+  },
+  "claude-sonnet-5": {
+    "_note": "Claude Sonnet 5 — $2 input / $10 output (cheaper than Sonnet 4.x).",
+    "input_per_million": 2.0,
+    "output_per_million": 10.0,
+    "cache_read_per_million": 0.2,
+    "cache_write_per_million": 2.5
+  },
   "claude-opus-4-6": {
     "_note": "Claude Opus 4.6 — $5 input / $25 output",
     "input_per_million": 5.0,
