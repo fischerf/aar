@@ -40,6 +40,10 @@ class ProviderResponse:
     stop_reason: str = ""
     reasoning: list[ReasoningBlock] = field(default_factory=list)
     meta: ProviderMeta | None = None
+    # Structured detail for a terminal stop the caller may want to explain to
+    # the user — currently only populated for ``stop_reason="refusal"``
+    # (keys: ``category``, ``explanation``).
+    stop_details: dict[str, Any] | None = None
 
 
 @dataclass
@@ -51,6 +55,11 @@ class StreamDelta:
     reasoning_delta: str = ""
     done: bool = False
     meta: ProviderMeta | None = None
+    # Set by providers on the terminal (``done=True``) delta so the real stop
+    # reason survives streaming. When empty the runner falls back to inferring
+    # it from whether tool calls arrived.
+    stop_reason: str = ""
+    stop_details: dict[str, Any] | None = None
 
 
 @dataclass

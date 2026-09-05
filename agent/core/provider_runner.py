@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from typing import Any
 
 from agent.core.config import AgentConfig
 from agent.core.events import (
@@ -160,6 +161,7 @@ async def _consume_stream(
     reasoning_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     stop_reason = ""
+    stop_details: dict[str, Any] | None = None
     meta: ProviderMeta | None = None
     saw_done = False
 
@@ -191,7 +193,16 @@ async def _consume_stream(
             if delta.done:
                 saw_done = True
                 meta = delta.meta
-                stop_reason = StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
+                # Prefer the provider's own stop reason when it reported one —
+                # inferring from tool calls alone cannot distinguish a refusal
+                # or a max_tokens cut-off from a normal end_turn.
+                if delta.stop_reason:
+                    stop_reason = delta.stop_reason
+                    stop_details = delta.stop_details
+                else:
+                    stop_reason = (
+                        StopReason.TOOL_USE.value if tool_calls else StopReason.END_TURN.value
+                    )
                 break
     finally:
         # Unconditional stream-end marker. Safe to emit on exception paths too —
@@ -220,6 +231,7 @@ async def _consume_stream(
         stop_reason=stop_reason,
         reasoning=reasoning_blocks,
         meta=meta,
+        stop_details=stop_details,
     )
 
 

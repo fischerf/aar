@@ -99,6 +99,10 @@ class StopReason(str, Enum):
     END_TURN = "end_turn"
     TOOL_USE = "tool_use"
     MAX_TOKENS = "max_tokens"
+    # A provider safety classifier declined the request (Anthropic returns
+    # ``stop_reason="refusal"`` on Claude Opus 4.7+; OpenAI ``content_filter``).
+    # Terminal: retrying the same prompt cannot succeed.
+    REFUSAL = "refusal"
     TIMEOUT = "timeout"
     MAX_STEPS = "max_steps"
     BUDGET_EXCEEDED = "budget_exceeded"
