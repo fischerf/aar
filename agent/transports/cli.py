@@ -1741,7 +1741,16 @@ def register(api: ExtensionAPI) -> None:
         console.print(f"[green]Created:[/] {_USER_EXTENSION_HELLO}")
 
     # Global rules.md (plain Markdown, not JSON)
-    if _rules_text is not None:
+    if _rules_text is None:
+        # The template ships via the `config/rules` -> `agent/data/rules`
+        # force-include in pyproject.toml. If it is missing the install is
+        # broken; say so instead of silently producing no rules.md.
+        console.print(
+            f"[red]Error:[/] built-in rules template not found at {_builtin_rules_path} — "
+            "~/.aar/rules.md was NOT created. This usually means an incomplete install; "
+            "reinstall aar-agent or copy config/rules/rules.md manually."
+        )
+    else:
         if _USER_RULES_FILE.is_file() and not force:
             console.print(
                 f"[yellow]Warning:[/] {_USER_RULES_FILE} already exists"

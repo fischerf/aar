@@ -6,6 +6,25 @@ Aar can act as an **MCP host** — connecting to one or more external MCP server
 pip install "aar-agent[mcp]"
 ```
 
+### Supported SDK versions
+
+Aar requires **`mcp>=1.28.1,<2.0`**.
+
+- The **lower** bound skips 1.27.0/1.27.1, which carry three published
+  advisories (PYSEC-2026-3481/3482/3483). All three affect MCP *servers*, and
+  Aar is a client, but the floor should not permit them.
+- The **upper** bound is a hard incompatibility, not caution. The 2.x SDK
+  renamed the wire model to snake_case (`Tool.inputSchema` → `input_schema`,
+  `CallToolResult.isError` → `is_error`), renamed
+  `streamablehttp_client` → `streamable_http_client`, dropped that function's
+  `headers=` argument in favour of a caller-supplied client, and moved from
+  `httpx` to `httpx2`. Tool discovery fails on 2.x for *every* transport, so
+  the cap is required until the bridge grows a compatibility layer. The SDK
+  itself recommends pinning `mcp<2` to keep v1 client code running.
+
+Note that Aar's MCP tests mock the SDK, so they pass on any version — the
+constraint above comes from round-trip testing against a real server.
+
 The MCP bridge keeps the server connections **alive for the full lifetime of the session** — across every turn in an interactive chat, across every tool call in a multi-step task. Connections are cleanly closed when the bridge context exits.
 
 ## Quick start — CLI with a config file
