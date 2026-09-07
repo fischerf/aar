@@ -27,3 +27,4 @@ docs/tool-optimization-plan.md
 release.md
 docs/ideas/
 docs/issues/
+*.pyc
