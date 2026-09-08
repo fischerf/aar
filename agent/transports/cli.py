@@ -337,7 +337,7 @@ def _terminal_extension_trust_prompt(directory: Path, infos: list[Any]) -> str:
         )
     )
     try:
-        answer = console.input("Load them? [y]es once / [a]lways / [N]o: ").strip().lower()
+        answer = console.input("Load them? \\[y]es once / \\[a]lways / \\[N]o: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return "no"
     if answer in ("a", "always"):
