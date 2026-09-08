@@ -59,6 +59,34 @@ def tmp_session_dir():
 
 
 # ---------------------------------------------------------------------------
+# Interactive prompts
+# ---------------------------------------------------------------------------
+
+
+class TestExtensionTrustPrompt:
+    def test_renders_all_choice_shortcuts(self, tmp_path):
+        from io import StringIO
+        from types import SimpleNamespace
+
+        from rich.console import Console
+
+        from agent.transports.cli import _terminal_extension_trust_prompt
+
+        output = StringIO()
+        test_console = Console(file=output, force_terminal=False, width=120)
+        info = SimpleNamespace(name="example", path=tmp_path / "example.py")
+
+        with (
+            patch("agent.transports.cli.console", test_console),
+            patch("builtins.input", return_value="n"),
+        ):
+            answer = _terminal_extension_trust_prompt(tmp_path, [info])
+
+        assert answer == "no"
+        assert "Load them? [y]es once / [a]lways / [N]o:" in output.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # `agent tools`
 # ---------------------------------------------------------------------------
 

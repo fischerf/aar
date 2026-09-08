@@ -28,3 +28,4 @@ release.md
 docs/ideas/
 docs/issues/
 *.pyc
+docs/ignore/
