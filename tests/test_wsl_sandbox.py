@@ -9,6 +9,8 @@ import pytest
 
 from agent.safety.sandbox import WslDistroSandbox
 
+_LIVE_WSL_DISTRO = os.environ.get("AAR_TEST_WSL_DISTRO", "aar-sandbox")
+
 # ---------------------------------------------------------------------------
 # WslDistroSandbox — path translation (pure, no subprocess)
 # ---------------------------------------------------------------------------
@@ -395,10 +397,8 @@ class TestS6RootfsSha256:
         assert _sha256_of_file(p, chunk_size=4096) == sha256(payload).hexdigest()
 
 
-class TestS6WslSandboxConfigSha256:
-    """S6: the ``rootfs_sha256`` field exists on ``WslSandboxConfig`` and
-    bundled distro profiles ship a checksum.
-    """
+class TestBundledWslProfiles:
+    """Bundled distro profiles preserve integrity and runtime dependencies."""
 
     def test_config_field_defaults_to_none(self):
         from agent.core.config import WslSandboxConfig
@@ -411,21 +411,50 @@ class TestS6WslSandboxConfigSha256:
         cfg = WslSandboxConfig(rootfs_sha256="de" * 32)
         assert cfg.rootfs_sha256 == "de" * 32
 
-    def test_bundled_profiles_have_sha256(self):
+    @staticmethod
+    def _profiles():
         import json
         from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parent.parent
-        for name in ("alpine-base.json", "alpine-r.json", "ubuntu.json"):
-            p = repo_root / "config" / "distros" / name
-            data = json.loads(p.read_text(encoding="utf-8"))
+        profiles_dir = Path(__file__).resolve().parent.parent / "config" / "distros"
+        for path in sorted(profiles_dir.glob("*.json")):
+            yield path.name, json.loads(path.read_text(encoding="utf-8"))
+
+    def test_bundled_profiles_have_sha256(self):
+        for name, data in self._profiles():
             assert data.get("rootfs_sha256"), f"{name} must ship a rootfs_sha256"
             assert len(data["rootfs_sha256"]) == 64, name
+
+    def test_bundled_profiles_include_linux_sandbox_dependencies(self):
+        for name, data in self._profiles():
+            packages = set(data.get("packages", []))
+            assert {"bubblewrap", "socat"} <= packages, name
 
 
 # ---------------------------------------------------------------------------
 # Config — new SafetyConfig fields
 # ---------------------------------------------------------------------------
+
+
+class TestWslSetupPackages:
+    def test_required_dependencies_are_added_to_overrides(self):
+        from agent.transports.cli import _resolve_wsl_packages
+
+        assert _resolve_wsl_packages("python3,nodejs") == [
+            "python3",
+            "nodejs",
+            "bubblewrap",
+            "socat",
+        ]
+
+    def test_packages_are_trimmed_and_deduplicated(self):
+        from agent.transports.cli import _resolve_wsl_packages
+
+        assert _resolve_wsl_packages(" python3, socat,python3,bubblewrap ") == [
+            "python3",
+            "socat",
+            "bubblewrap",
+        ]
 
 
 class TestSafetyConfigWslFields:
@@ -438,6 +467,8 @@ class TestSafetyConfigWslFields:
         assert sc.sandbox.wsl.install_path is None
         assert "alpine" in sc.sandbox.wsl.rootfs_url.lower()
         assert "python3" in sc.sandbox.wsl.packages
+        assert "bubblewrap" in sc.sandbox.wsl.packages
+        assert "socat" in sc.sandbox.wsl.packages
 
     def test_sandbox_mode_default_is_local(self):
         from agent.core.config import SafetyConfig
@@ -546,29 +577,44 @@ class TestEnvKeyValidation:
 @pytest.mark.live
 @pytest.mark.skipif(os.name != "nt", reason="WSL2 sandbox only on Windows")
 class TestWslDistroSandboxLive:
-    """These tests require WSL2 and a distro named 'aar-sandbox'.
-    Run after: aar sandbox setup
+    """These tests require WSL2 and the configured live-test distro.
+
+    Defaults to ``aar-sandbox``; override with ``AAR_TEST_WSL_DISTRO``.
     """
 
     @pytest.mark.asyncio
     async def test_execute_simple(self):
         from agent.safety import wsl_manager as wm
 
-        if not wm.distro_exists("aar-sandbox"):
-            pytest.skip("aar-sandbox distro not installed — run: aar sandbox setup")
-        sb = WslDistroSandbox(distro_name="aar-sandbox")
+        if not wm.distro_exists(_LIVE_WSL_DISTRO):
+            pytest.skip(f"{_LIVE_WSL_DISTRO} distro not installed — run: aar sandbox setup")
+        sb = WslDistroSandbox(distro_name=_LIVE_WSL_DISTRO)
         result = await sb.execute("echo hello")
         assert "hello" in result.stdout
         assert result.exit_code == 0
 
     @pytest.mark.asyncio
+    async def test_linux_sandbox_dependencies_work(self):
+        from agent.safety import wsl_manager as wm
+
+        if not wm.distro_exists(_LIVE_WSL_DISTRO):
+            pytest.skip(f"{_LIVE_WSL_DISTRO} distro not installed — run: aar sandbox setup")
+        sb = WslDistroSandbox(distro_name=_LIVE_WSL_DISTRO)
+        result = await sb.execute(
+            "bwrap --ro-bind / / --proc /proc --dev /dev sh -c 'echo bubblewrap-ok' "
+            "&& socat -V"
+        )
+        assert result.exit_code == 0, result.stderr
+        assert "bubblewrap-ok" in result.stdout
+        assert "socat version" in result.stdout.lower()
+
+    @pytest.mark.asyncio
     async def test_isolated_from_main_distro(self):
         from agent.safety import wsl_manager as wm
 
-        if not wm.distro_exists("aar-sandbox"):
-            pytest.skip("aar-sandbox distro not installed — run: aar sandbox setup")
-        # aar-sandbox is Alpine; uname should show its kernel
-        sb = WslDistroSandbox(distro_name="aar-sandbox")
+        if not wm.distro_exists(_LIVE_WSL_DISTRO):
+            pytest.skip(f"{_LIVE_WSL_DISTRO} distro not installed — run: aar sandbox setup")
+        sb = WslDistroSandbox(distro_name=_LIVE_WSL_DISTRO)
         result = await sb.execute("uname -r")
         assert result.exit_code == 0
         assert result.stdout.strip() != ""

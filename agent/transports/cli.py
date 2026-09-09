@@ -1852,7 +1852,8 @@ _sandbox_app = typer.Typer(
 app.add_typer(_sandbox_app, name="sandbox")
 
 _DEFAULT_DISTRO = "aar-sandbox"
-_DEFAULT_PACKAGES = "python3,py3-pip"
+_WSL_SANDBOX_DEPENDENCIES = ("bubblewrap", "socat")
+_DEFAULT_PACKAGES = "python3,py3-pip,bubblewrap,socat"
 
 # ---------------------------------------------------------------------------
 # Built-in distro profiles — sourced from config/distros/ in the repo,
@@ -1900,6 +1901,13 @@ def _resolve_rootfs_url(rootfs_url: Optional[str]) -> str:
     return rootfs_url or default_rootfs_url()
 
 
+def _resolve_wsl_packages(packages: str) -> list[str]:
+    """Return requested packages plus dependencies required by Linux sandbox runtimes."""
+    resolved = list(dict.fromkeys(p.strip() for p in packages.split(",") if p.strip()))
+    resolved.extend(package for package in _WSL_SANDBOX_DEPENDENCIES if package not in resolved)
+    return resolved
+
+
 @_sandbox_app.command("setup")
 def sandbox_setup(
     distro: str = typer.Option(_DEFAULT_DISTRO, "--distro", "-d", help="Name for the WSL2 distro"),
@@ -1916,7 +1924,10 @@ def sandbox_setup(
     packages: str = typer.Option(
         _DEFAULT_PACKAGES,
         "--packages",
-        help="Comma-separated packages to install via apk add (Alpine) or the distro's package manager",
+        help=(
+            "Comma-separated packages to install via apk add (Alpine) or the distro's package "
+            "manager; bubblewrap and socat are always included"
+        ),
     ),
     force: bool = typer.Option(False, "--force", help="Unregister existing distro and recreate"),
 ) -> None:
@@ -2026,19 +2037,33 @@ def sandbox_setup(
             console.print("  [green]OK[/]")
 
     # Install packages
-    pkg_list = [p.strip() for p in packages.split(",") if p.strip()]
-    if pkg_list:
-        console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
-        install_cmd = wsl_cfg.package_install_command.format(packages=" ".join(pkg_list))
-        stdout, stderr, rc = wm.run_in_distro(distro, f"{install_cmd} 2>&1", timeout=600)
-        if stdout.strip():
-            console.print(f"[dim]{stdout.strip()[:1200]}[/]")
-        if rc != 0:
-            console.print(f"[yellow]Warning:[/] Package install returned exit code {rc}.")
-            if stderr.strip():
-                console.print(f"[red]{stderr.strip()[:600]}[/]")
-        else:
-            console.print("  [green]Packages installed[/]")
+    pkg_list = _resolve_wsl_packages(packages)
+    console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
+    install_cmd = wsl_cfg.package_install_command.format(packages=" ".join(pkg_list))
+    stdout, stderr, rc = wm.run_in_distro(distro, f"{install_cmd} 2>&1", timeout=600)
+    if stdout.strip():
+        console.print(f"[dim]{stdout.strip()[:1200]}[/]")
+    if rc != 0:
+        console.print(f"[red]Error:[/] Package install returned exit code {rc}.")
+        if stderr.strip():
+            console.print(f"[red]{stderr.strip()[:600]}[/]")
+        console.print("Re-run with [bold]--force[/] after fixing the package repository error.")
+        raise typer.Exit(1)
+
+    _, stderr, rc = wm.run_in_distro(
+        distro,
+        "command -v bwrap >/dev/null 2>&1 && command -v socat >/dev/null 2>&1",
+    )
+    if rc != 0:
+        console.print(
+            "[red]Error:[/] Sandbox dependencies were not installed: "
+            "both [bold]bwrap[/] and [bold]socat[/] must be available."
+        )
+        if stderr.strip():
+            console.print(f"[red]{stderr.strip()[:600]}[/]")
+        console.print("Re-run with [bold]--force[/] after fixing the package configuration.")
+        raise typer.Exit(1)
+    console.print("  [green]Packages installed and sandbox dependencies verified[/]")
 
     # Success — print config snippet
     console.print(
@@ -2110,9 +2135,14 @@ def sandbox_status(
     )
 
     if exists:
-        stdout, _, rc = wm.run_in_distro(
-            distro, "uname -r && python3 --version 2>/dev/null || echo 'python3: not installed'"
+        status_command = (
+            "uname -r; "
+            "python3 --version 2>/dev/null || echo 'python3: not installed'; "
+            "bwrap --version 2>/dev/null || echo 'bubblewrap: not installed'; "
+            "if command -v socat >/dev/null 2>&1; then socat -V 2>&1 | sed -n '2p'; "
+            "else echo 'socat: not installed'; fi"
         )
+        stdout, _, _ = wm.run_in_distro(distro, status_command)
         for line in stdout.strip().splitlines():
             console.print(f"  [dim]{line}[/]")
 
