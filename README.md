@@ -283,7 +283,7 @@ aar sandbox status  # verify Python, Bubblewrap, and socat
 
 Point `safety.sandbox.wsl.profile` in `~/.aar/config.json` at one of the profiles in `~/.aar/distros/`
 to pre-configure the rootfs URL, packages, repo setup commands, and the system-prompt hint the model sees.
-The built-in profiles include `bubblewrap` and `socat` for tools that run nested Linux/WSL2 sandboxes.
+The built-in profiles include `bubblewrap` and `socat` for tools that run nested Linux/WSL2 sandboxes. Packages are installed normally inside WSL by default. If company policy blocks WSL network access, set `host_package_download` to `true` to stage Alpine packages through Windows instead.
 Switch distros by changing the `profile` path and running `aar sandbox reset`.
 
 See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) for full details.

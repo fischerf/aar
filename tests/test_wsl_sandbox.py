@@ -293,6 +293,83 @@ class TestWslManager:
         assert "alpine" in url.lower()
         assert url.endswith(".tar.gz")
 
+    def test_prepare_import_path_accepts_empty_directory(self, tmp_path):
+        from agent.safety import wsl_manager as wm
+
+        assert wm.prepare_import_path(tmp_path) is False
+        assert tmp_path.exists()
+
+    def test_prepare_import_path_rejects_stale_contents_without_force(self, tmp_path):
+        from agent.safety import wsl_manager as wm
+
+        disk = tmp_path / "ext4.vhdx"
+        disk.write_bytes(b"stale")
+
+        with pytest.raises(FileExistsError, match="not empty"):
+            wm.prepare_import_path(tmp_path)
+
+        assert disk.exists()
+
+    def test_prepare_import_path_removes_stale_contents_with_force(self, tmp_path):
+        from agent.safety import wsl_manager as wm
+
+        (tmp_path / "ext4.vhdx").write_bytes(b"stale")
+
+        assert wm.prepare_import_path(tmp_path, force=True) is True
+        assert not tmp_path.exists()
+
+
+class TestHostAlpinePackageInstall:
+    def test_parse_repositories_ignores_comments_and_local_paths(self):
+        from agent.safety.wsl_manager import _parse_alpine_repositories
+
+        assert _parse_alpine_repositories(
+            "# comment\nhttps://example.test/main/\n@edge https://example.test/community\n/cdrom\n"
+        ) == ["https://example.test/main", "https://example.test/community"]
+
+    def test_downloads_indexes_and_resolved_packages_on_host(self, tmp_path):
+        from agent.safety import wsl_manager as wm
+
+        downloads: list[str] = []
+
+        def fake_download(url, dest, reporthook=None):
+            downloads.append(url)
+            dest.write_bytes(b"package-data")
+
+        run_results = [
+            ("https://mirror.test/main\nhttps://mirror.test/community\n", "", 0),
+            ("x86_64\n", "", 0),
+            (
+                "file:///mnt/c/cache%20dir/repo-0/x86_64/bubblewrap-1.0-r0.apk\n"
+                + "file:///mnt/c/cache%20dir/repo-1/x86_64/socat-1.0-r0.apk\n",
+                "",
+                0,
+            ),
+            ("installed\n", "", 0),
+        ]
+        temp_context = MagicMock()
+        temp_context.__enter__.return_value = str(tmp_path)
+        temp_context.__exit__.return_value = False
+
+        with (
+            patch.object(wm, "run_in_distro", side_effect=run_results) as run,
+            patch.object(wm, "_download_host_file", side_effect=fake_download),
+            patch.object(wm, "_to_wsl_mount_path", return_value="/mnt/c/cache dir"),
+            patch.object(wm.tempfile, "TemporaryDirectory", return_value=temp_context),
+        ):
+            result = wm.install_alpine_packages_from_host("test-distro", ["bubblewrap", "socat"])
+
+        assert result == ("installed\n", "", 0)
+        assert downloads == [
+            "https://mirror.test/main/x86_64/APKINDEX.tar.gz",
+            "https://mirror.test/community/x86_64/APKINDEX.tar.gz",
+            "https://mirror.test/main/x86_64/bubblewrap-1.0-r0.apk",
+            "https://mirror.test/community/x86_64/socat-1.0-r0.apk",
+        ]
+        assert (tmp_path / "repositories").read_bytes().startswith(b"file:///mnt/c/cache%20dir")
+        assert "apk fetch --simulate --recursive --url --no-network" in run.call_args_list[2].args[1]
+        assert "apk add --no-network" in run.call_args_list[3].args[1]
+
 
 # ---------------------------------------------------------------------------
 # S6 — rootfs sha256 verification
@@ -368,6 +445,30 @@ class TestS6RootfsSha256:
         msgs = [r.getMessage() for r in caplog.records]
         assert any("without sha256 verification" in m for m in msgs), msgs
 
+    def test_windows_curl_fallback_preserves_verification(self, tmp_path):
+        import urllib.error
+        from hashlib import sha256
+
+        from agent.safety import wsl_manager as wm
+
+        payload = b"curl-rootfs"
+        expected = sha256(payload).hexdigest()
+        dest = tmp_path / "rootfs.tar.gz"
+
+        def fake_curl(args, **kwargs):
+            dest.write_bytes(payload)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("urllib.request.urlretrieve", side_effect=urllib.error.URLError("CA")),
+            patch.object(wm.os, "name", "nt"),
+            patch("subprocess.run", side_effect=fake_curl) as run,
+        ):
+            wm.download_rootfs("https://example.test/rootfs.tgz", dest, expected_sha256=expected)
+
+        assert run.call_args.args[0][0] == "curl.exe"
+        assert dest.read_bytes() == payload
+
     def test_sha256_comparison_case_insensitive(self, tmp_path):
         from hashlib import sha256
         from unittest.mock import patch
@@ -430,6 +531,10 @@ class TestBundledWslProfiles:
             packages = set(data.get("packages", []))
             assert {"bubblewrap", "socat"} <= packages, name
 
+    def test_host_package_download_is_opt_in_for_bundled_profiles(self):
+        for name, data in self._profiles():
+            assert data["host_package_download"] is False, name
+
 
 # ---------------------------------------------------------------------------
 # Config — new SafetyConfig fields
@@ -469,6 +574,7 @@ class TestSafetyConfigWslFields:
         assert "python3" in sc.sandbox.wsl.packages
         assert "bubblewrap" in sc.sandbox.wsl.packages
         assert "socat" in sc.sandbox.wsl.packages
+        assert sc.sandbox.wsl.host_package_download is False
 
     def test_sandbox_mode_default_is_local(self):
         from agent.core.config import SafetyConfig

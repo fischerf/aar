@@ -298,6 +298,8 @@ class WslSandboxConfig(BaseModel):
     packages: list[str] = Field(
         default_factory=lambda: ["python3", "py3-pip", "bubblewrap", "socat"]
     )
+    # Download Alpine indexes/APKs on Windows, then install from a /mnt/<drive> cache.
+    host_package_download: bool = False
     # Template for the package install command; {packages} is replaced with a space-joined list.
     package_install_command: str = "apk add --no-cache {packages}"
     # Overrides auto-detected sandbox description in the system prompt.
