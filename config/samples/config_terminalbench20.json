@@ -85,7 +85,8 @@
         "restrict_to_workspace": true,
         "workspace": null,
         "install_path": null,
-        "profile": "~/.aar/distros/ubuntu.json"
+        "profile": "~/.aar/distros/ubuntu.json",
+        "host_package_download": false
       }
     },
     "log_all_commands": true,

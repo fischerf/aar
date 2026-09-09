@@ -1945,6 +1945,7 @@ def sandbox_setup(
         }
     """
     import os
+    import subprocess
     import tempfile
 
     from agent.safety import wsl_manager as wm
@@ -1985,6 +1986,18 @@ def sandbox_setup(
         console.print(f"[yellow]Unregistering existing distro '{distro}'…[/]")
         wm.unregister_distro(distro)
 
+    try:
+        removed_stale_path = wm.prepare_import_path(resolved_install, force=force)
+    except (FileExistsError, ValueError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        console.print(
+            "The path may contain a stale WSL virtual disk. Re-run with [bold]--force[/] "
+            "to remove it before import."
+        )
+        raise typer.Exit(1) from exc
+    if removed_stale_path:
+        console.print(f"[yellow]Removed stale WSL install path:[/] {resolved_install}")
+
     # Download rootfs
     console.print(f"Downloading rootfs from:\n  [dim]{resolved_url}[/]")
     with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -2017,7 +2030,18 @@ def sandbox_setup(
 
         # Import distro
         console.print(f"Importing distro '[bold]{distro}[/]' to {resolved_install} …")
-        wm.import_distro(distro, resolved_install, tmp_path)
+        try:
+            wm.import_distro(distro, resolved_install, tmp_path)
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+            console.print(f"[red]Error:[/] WSL failed to import distro '{distro}'.")
+            if stderr:
+                console.print(f"[red]{stderr[:1200]}[/]")
+            console.print(
+                f"If {resolved_install} now contains a stale virtual disk, re-run setup "
+                "with [bold]--force[/]."
+            )
+            raise typer.Exit(1) from exc
         console.print("  [green]Imported[/]")
 
     finally:
@@ -2040,7 +2064,21 @@ def sandbox_setup(
     pkg_list = _resolve_wsl_packages(packages)
     console.print(f"Installing packages: [bold]{', '.join(pkg_list)}[/]")
     install_cmd = wsl_cfg.package_install_command.format(packages=" ".join(pkg_list))
-    stdout, stderr, rc = wm.run_in_distro(distro, f"{install_cmd} 2>&1", timeout=600)
+    if wsl_cfg.host_package_download:
+        if not install_cmd.lstrip().startswith("apk add"):
+            console.print(
+                "[red]Error:[/] Host package downloads currently support Alpine/apk only. "
+                "Set [bold]host_package_download[/] to false for this distro."
+            )
+            raise typer.Exit(1)
+        console.print("  [dim]Downloading signed Alpine packages on the Windows host…[/]")
+        stdout, stderr, rc = wm.install_alpine_packages_from_host(
+            distro,
+            pkg_list,
+            timeout=600,
+        )
+    else:
+        stdout, stderr, rc = wm.run_in_distro(distro, f"{install_cmd} 2>&1", timeout=600)
     if stdout.strip():
         console.print(f"[dim]{stdout.strip()[:1200]}[/]")
     if rc != 0:
@@ -2114,6 +2152,7 @@ def sandbox_status(
         console.print("  Pre-install cmds:  [dim]none[/]")
     pkg_display = ", ".join(wsl_cfg.packages) if wsl_cfg.packages else "[dim]none[/]"
     console.print(f"  Packages:          {pkg_display}")
+    console.print(f"  Host downloads:    {'yes' if wsl_cfg.host_package_download else 'no'}")
     console.print(f"  Install command:   [dim]{wsl_cfg.package_install_command}[/]")
     hint = wsl_cfg.system_prompt_hint
     if hint:

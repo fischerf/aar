@@ -3,10 +3,9 @@
   "shell": "sh",
   "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
   "rootfs_sha256": "ce8f782f1628d046fb6360eff880b898e5205ed91106d9d14ff4fcb97431bbde",
-  "pre_install_commands": [
-    "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
-  ],
+  "pre_install_commands": [],
   "packages": ["python3", "py3-pip", "bubblewrap", "socat", "R"],
+  "host_package_download": false,
   "package_install_command": "apk add --no-cache {packages}",
   "system_prompt_hint": "Alpine Linux with R pre-installed. Package manager: apk (NOT apt). Community repository enabled. Bubblewrap and socat are installed. You CAN run 'apk add <pkg>' to install packages. R is available — use 'Rscript <file>' to run R scripts."
 }

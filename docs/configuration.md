@@ -483,9 +483,10 @@ Run `aar init` to create the skeleton files and directories. The init command pr
 upgrading Aar, two things are worth refreshing by hand:
 
 - **Distro profiles** (`~/.aar/distros/*.json`) — current profiles include
-  rootfs checksums plus `bubblewrap` and `socat`. Older copies do not gain
-  these changes automatically, so refresh them before rebuilding a WSL
-  sandbox:
+  rootfs checksums, `bubblewrap` and `socat`, plus the optional
+  `host_package_download` setting for networks that block WSL egress. Older
+  copies do not gain these changes automatically, so refresh them before
+  rebuilding a WSL sandbox:
 
   ```bash
   aar init --force        # refreshes everything, including config.json

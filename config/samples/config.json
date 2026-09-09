@@ -340,6 +340,7 @@
         "rootfs_sha256": "ce8f782f1628d046fb6360eff880b898e5205ed91106d9d14ff4fcb97431bbde",
         "pre_install_commands": [],
         "packages": ["python3", "py3-pip", "bubblewrap", "socat"],
+        "host_package_download": true,
         "package_install_command": "apk add --no-cache {packages}",
         "system_prompt_hint": ""
       }
