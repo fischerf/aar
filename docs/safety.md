@@ -418,6 +418,7 @@ A dedicated, disposable WSL2 distro is used as the execution environment. Comman
 - Distro filesystem (`/etc`, `/usr`, `/home`, installed packages) is separate from host Windows and any other WSL2 distros
 - `apk add` / `apt-get install` / `pip install` stays inside the distro — host is untouched
 - State is resettable via `aar sandbox reset`
+- Built-in profiles install `bubblewrap` and `socat`, so tools that provide a nested Linux/WSL2 sandbox can enforce filesystem isolation and proxy network traffic
 
 **What it does NOT isolate (important):**
 - The entire Windows filesystem is auto-mounted at `/mnt/<drive>/` by WSL2. `rm -rf /mnt/c/Users/you` is just as effective as running it natively.
@@ -430,6 +431,8 @@ workspace before spawning the shell. A caller that passes a `cwd` which
 resolves outside — via absolute path, mixed-case drive letters, or `..`
 traversal — gets an immediate error result; the command never runs. This is a
 cheap last-line check, not a replacement for a real FS sandbox.
+
+Installing `bubblewrap` and `socat` does not make Aar's WSL backend use them automatically; the limitations above still apply to commands Aar launches directly. They are available for nested sandbox runtimes that explicitly invoke them.
 
 **Use this mode for:** a clean, wipeable multi-language execution environment (install Node, Go, Rust, etc. without polluting your host). **Not suitable for:** protecting against a malicious command — use `windows` mode (or `linux` on Linux) for write isolation.
 
@@ -452,7 +455,7 @@ cheap last-line check, not a replacement for a real FS sandbox.
 
 > **Only `null` defers to the profile.** Every other inline `wsl` value overrides
 > it — including `""` and `[]`. A config that keeps the sample's Alpine defaults
-> (`"rootfs_url": "…alpine…"`, `"packages": ["python3", "py3-pip"]`,
+> (`"rootfs_url": "…alpine…"`, `"packages": ["python3", "py3-pip", "bubblewrap", "socat"]`,
 > `"package_install_command": "apk add …"`, `"system_prompt_hint": ""`) while
 > pointing `profile` at `ubuntu.json` will download an Alpine rootfs, try to
 > install with `apk`, and tell the model nothing about the distro — and because
@@ -476,7 +479,7 @@ You can also configure the distro inline without a profile:
         "pre_install_commands": [
           "grep -q community /etc/apk/repositories || echo 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/community' >> /etc/apk/repositories && apk update -q"
         ],
-        "packages": ["python3", "py3-pip", "nodejs", "npm"],
+        "packages": ["python3", "py3-pip", "bubblewrap", "socat", "nodejs", "npm"],
         "package_install_command": "apk add --no-cache {packages}",
         "system_prompt_hint": "Alpine Linux. Package manager: apk (NOT apt). Community repo enabled. You CAN run 'apk add <pkg>' to install packages."
       }
@@ -492,18 +495,20 @@ The `aar sandbox` sub-app owns the WSL2 distro lifecycle:
 ```bash
 aar sandbox setup                          # downloads rootfs, imports distro, installs packages
 aar sandbox setup --force                  # unregister existing + recreate
-aar sandbox setup --packages "python3,py3-pip,nodejs,npm"  # override packages
+aar sandbox setup --packages "python3,py3-pip,nodejs,npm"  # add desired packages; bwrap/socat are mandatory
 aar sandbox setup --distro my-sandbox      # custom distro name
 
-aar sandbox status                         # show distro state (exists, kernel, Python version)
+aar sandbox status                         # show distro, Python, bubblewrap, and socat status
 
 aar sandbox reset                          # unregister + recreate, prompts for confirmation
 aar sandbox reset --yes                    # skip confirmation
 ```
 
-All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`), including any loaded profile.
+All flags on `setup` and `reset` are optional overrides — primary values come from `~/.aar/config.json` (`safety.sandbox.wsl.*`), including any loaded profile. `bubblewrap` and `socat` are appended to the package list even when `--packages` is supplied, because WSL sandbox runtimes require both.
 
-`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, runs any `pre_install_commands`, then installs the configured packages. Run `aar sandbox status` afterwards to verify the configuration and distro state.
+`setup` downloads the rootfs (~3 MB for Alpine), imports it as a dedicated WSL2 distro, runs any `pre_install_commands`, then installs the configured packages. Package-manager errors or missing `bwrap`/`socat` executables fail setup instead of marking a partially provisioned distro ready. Run `aar sandbox status` afterwards to verify the configuration and the installed Python, Bubblewrap, and socat versions.
+
+Existing distros are not changed when a profile file is updated. After upgrading Aar, run `aar init --force` to refresh `~/.aar/distros/`, then `aar sandbox reset --yes` to rebuild the selected distro with the new packages. Back up any distro-internal state first; reset deletes it.
 
 **Reset behavior:** unregisters the distro, re-downloads rootfs, re-runs pre-install commands, reinstalls packages. Workspace files on the Windows filesystem (`/mnt/<drive>/...`) are **not affected** — only the distro's own filesystem is wiped.
 
@@ -517,7 +522,7 @@ Create a profile file (e.g. `~/.aar/distros/ubuntu.json`) and point `profile` at
   "shell": "bash",
   "rootfs_url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
   "pre_install_commands": ["apt-get update -q"],
-  "packages": ["python3", "python3-pip", "nodejs", "npm"],
+  "packages": ["python3", "python3-pip", "bubblewrap", "socat", "nodejs", "npm"],
   "package_install_command": "apt-get install -y {packages}",
   "system_prompt_hint": "Ubuntu 24.04. Package manager: apt. You CAN run 'apt-get install -y <pkg>' to install packages."
 }
@@ -699,7 +704,7 @@ an isolating sandbox mode, if you need a real limit.
 | `install_path` | `str \| None` | `None` | Where to store distro data (default: `%LOCALAPPDATA%\aar\wsl-distros\<distro>`) |
 | `rootfs_url` | `str` | Alpine latest-stable | Rootfs tarball URL used by `aar sandbox setup` |
 | `pre_install_commands` | `list[str]` | `[]` | Shell commands run inside the distro before package installation (e.g. enabling extra repos) |
-| `packages` | `list[str]` | `["python3", "py3-pip"]` | Packages installed during `aar sandbox setup` |
+| `packages` | `list[str]` | `["python3", "py3-pip", "bubblewrap", "socat"]` | Packages installed during `aar sandbox setup`; Bubblewrap and socat support nested Linux/WSL2 sandbox runtimes |
 | `package_install_command` | `str` | `"apk add --no-cache {packages}"` | Command template used to install packages. `{packages}` is replaced with a space-joined package list. Override in your profile for non-Alpine distros (e.g. `"apt-get install -y {packages}"`). |
 | `system_prompt_hint` | `str` | `""` | Distro description injected into the model's system prompt (package manager, available tools, etc.). Set in your profile so the model knows which package manager to use. |
 

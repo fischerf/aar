@@ -339,7 +339,7 @@
         "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz",
         "rootfs_sha256": "ce8f782f1628d046fb6360eff880b898e5205ed91106d9d14ff4fcb97431bbde",
         "pre_install_commands": [],
-        "packages": ["python3", "py3-pip"],
+        "packages": ["python3", "py3-pip", "bubblewrap", "socat"],
         "package_install_command": "apk add --no-cache {packages}",
         "system_prompt_hint": ""
       }

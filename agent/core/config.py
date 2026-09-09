@@ -295,7 +295,9 @@ class WslSandboxConfig(BaseModel):
     rootfs_sha256: str | None = None
     # Commands run inside the distro before package installation (e.g. enabling extra repos).
     pre_install_commands: list[str] = Field(default_factory=list)
-    packages: list[str] = Field(default_factory=lambda: ["python3", "py3-pip"])
+    packages: list[str] = Field(
+        default_factory=lambda: ["python3", "py3-pip", "bubblewrap", "socat"]
+    )
     # Template for the package install command; {packages} is replaced with a space-joined list.
     package_install_command: str = "apk add --no-cache {packages}"
     # Overrides auto-detected sandbox description in the system prompt.
