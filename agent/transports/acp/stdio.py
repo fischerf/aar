@@ -42,6 +42,8 @@ from .common import (
     _extract_text,
     _load_default_config,
     _map_stop_reason,
+    _OLLAMA_REASONING_EFFORTS,
+    _supports_reasoning_effort,
     _model_id_to_provider,
     _side_effects_to_tool_kind,
 )
@@ -647,6 +649,7 @@ class AarAcpAgent:
         Supported options:
 
         * ``model`` (select) — switch the active model
+        * ``reasoning_effort`` (select) — Qwen3.8 reasoning depth
         * ``mode``  (select) — ``auto`` / ``review`` / ``read-only``
 
         Always returns the **complete** updated ``configOptions`` list as
@@ -679,6 +682,21 @@ class AarAcpAgent:
                 new_provider.name,
                 new_provider.model,
             )
+        elif config_id == "reasoning_effort":
+            effort = str(value)
+            if not _supports_reasoning_effort(provider):
+                raise ValueError("reasoning_effort is only supported for Ollama Qwen3.8 providers")
+            if effort not in _OLLAMA_REASONING_EFFORTS:
+                allowed = ", ".join(_OLLAMA_REASONING_EFFORTS)
+                raise ValueError(f"Unknown reasoning effort: {effort!r}; expected {allowed}")
+            new_provider = provider.model_copy(
+                update={"extra": {**provider.extra, "reasoning_effort": effort}}
+            )
+            self._session_configs[session_id] = base_cfg.model_copy(
+                update={"provider": new_provider}
+            )
+            provider = new_provider
+            logger.info("ACP: session %s reasoning effort → %s", session_id, effort)
         elif config_id == "mode":
             mode_id = str(value)
             if mode_id == "auto":

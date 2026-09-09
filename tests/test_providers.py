@@ -476,6 +476,30 @@ class TestOllamaNormalization:
         assert "reason about this" in result.reasoning[0].content
 
     @pytest.mark.asyncio
+    async def test_reasoning_effort_is_sent_as_model_option(self):
+        provider = self._make_provider(
+            supports_reasoning=True,
+            reasoning_effort="medium",
+        )
+        provider._client.post = AsyncMock(
+            return_value=MagicMock(
+                json=lambda: {
+                    "model": "qwen3.8",
+                    "message": {"role": "assistant", "content": "done"},
+                    "done_reason": "stop",
+                },
+                raise_for_status=lambda: None,
+            )
+        )
+
+        await provider.complete([{"role": "user", "content": "Think"}])
+
+        payload = provider._client.post.await_args.kwargs["json"]
+        assert payload["think"] is True
+        assert payload["options"]["reasoning_effort"] == "medium"
+        assert "reasoning_effort" not in payload
+
+    @pytest.mark.asyncio
     async def test_think_mode_disabled(self):
         """Think tags are always stripped from content (prevents token leakage).
         supports_reasoning only controls whether think=true is sent in the payload."""
@@ -837,6 +861,29 @@ class TestOllamaStreamFlushOnTruncation:
         from agent.providers.ollama import OllamaProvider
 
         return OllamaProvider(ProviderConfig(name="ollama", model="llama3"))
+
+    @pytest.mark.asyncio
+    async def test_stream_sends_reasoning_effort_as_model_option(self):
+        import json as _json
+
+        from agent.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(
+                name="ollama",
+                model="qwen3.8:latest",
+                extra={"supports_reasoning": True, "reasoning_effort": "low"},
+            )
+        )
+        chunks = [_json.dumps({"model": "qwen3.8:latest", "message": {}, "done": True})]
+        provider._client.stream = MagicMock(return_value=_FakeStreamCM(_FakeStreamResp(chunks)))
+
+        _ = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+
+        payload = provider._client.stream.call_args.kwargs["json"]
+        assert payload["think"] is True
+        assert payload["options"]["reasoning_effort"] == "low"
+        assert "reasoning_effort" not in payload
 
     @pytest.mark.asyncio
     async def test_flushes_tool_calls_when_no_done_frame(self):

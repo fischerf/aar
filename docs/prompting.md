@@ -278,8 +278,13 @@ Some providers surface a chain-of-thought before the final answer. Aar stores th
 | Provider | Reasoning | How to enable |
 |---|---|---|
 | Anthropic (claude-3-7+) | Extended thinking | `extra={"thinking": {"type": "enabled", "budget_tokens": 5000}}` |
-| Ollama deepseek-r1 / qwen3 | `<think>` tags | `extra={"supports_reasoning": True}` |
+| Ollama deepseek-r1 / qwen3 | Native thinking field / `<think>` tags | `extra={"supports_reasoning": True}` |
 | OpenAI o1 / o3 | Built-in | Automatic — no config needed |
+
+For Ollama Qwen3.8, tune reasoning depth with
+`extra={"supports_reasoning": True, "reasoning_effort": "medium"}`. Supported values are
+`"xhigh"` (the model default), `"medium"`, and `"low"`. ACP sessions also advertise this as a
+`thought_level` selector.
 
 ### Tips for reasoning models
 
