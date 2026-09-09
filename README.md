@@ -139,9 +139,38 @@ Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or point `base_url`
 > /model ollama/llama3
 ```
 
+### Ollama Qwen3.8 reasoning effort
+
+Qwen3.8 supports configurable reasoning depth. Add `reasoning_effort` to the Ollama provider's
+`extra` settings:
+
+```json
+{
+  "provider": {
+    "name": "ollama",
+    "model": "qwen3.8:latest",
+    "extra": {
+      "supports_reasoning": true,
+      "reasoning_effort": "medium"
+    }
+  }
+}
+```
+
+Supported values are `xhigh` (the model default), `medium`, and `low`. Aar forwards the value as
+Ollama's `options.reasoning_effort` for streaming and non-streaming requests while emitting the
+separate thinking trace as typed reasoning events.
+
+When Qwen3.8 is active through `aar acp`, compatible editors also show a per-session **Reasoning
+effort** selector. Changes apply to the next prompt without modifying the configuration file.
+
+See [Providers — Ollama](docs/providers.md#ollama) for additional Ollama options.
+
 ## ACP — IDE integration
 
-`aar acp` starts an [Agent Client Protocol](https://agentclientprotocol.com/) agent that editors like [Zed](https://zed.dev) connect to over stdio.
+`aar acp` starts an [Agent Client Protocol](https://agentclientprotocol.com/) agent that editors
+like [Zed](https://zed.dev) connect to over stdio. It advertises session-level model, mode, and
+supported reasoning-effort selectors through ACP `configOptions`.
 
 ```bash
 aar acp              # stdio — for Zed and other ACP-compatible editors
@@ -241,7 +270,7 @@ agent/
 ├── extensions/     # Extension API, loader, manager, MCP bridge, observability
 │   └── contrib/    # Built-in example extensions (companion)
 └── transports/     # CLI, TUI, web, event stream
-    ├── acp/        # Agent Client Protocol — stdio (full) + HTTP/SSE (subset)
+    ├── acp/        # ACP stdio + HTTP/SSE; per-session model, mode, and reasoning config
     ├── themes/     # Theme models, built-in themes, registry
     ├── tui_utils/  # Shared formatting helpers for TUI transports
     └── tui_widgets/  # Textual widget classes (bars, blocks, input, chat body)

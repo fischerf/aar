@@ -6,7 +6,7 @@ Aar is a lean, provider-agnostic agent framework. This document explains how the
 
 1. **Thin core loop** — the main execution path (`loop.py`) is a single coroutine focused on control flow only. Helpers for provider requests, retries, event emission, and budget accounting live in sibling modules (`provider_runner.py`, `loop_helpers.py`). The loop does exactly three things: call the provider, execute tool calls, and append events to the session.
 2. **Typed event model** — every interaction (messages, tool calls, results, metadata) is a Pydantic model. Events are serializable, inspectable, and carry timing data.
-3. **Provider-agnostic** — the agent loop works with any provider that implements the `Provider` ABC. Swapping between Anthropic, OpenAI, Ollama, or a generic endpoint requires changing one config field.
+3. **Provider-agnostic** — the agent loop works with any provider that implements the `Provider` ABC. Swapping between Anthropic, OpenAI, Ollama, Gemini, or a generic endpoint requires changing one config field.
 4. **Safe by default** — path restrictions, a best-effort command deny-list, and approval gates are built in and always active. Interactive modes enable a workspace sandbox by default.
 5. **Modular transports** — the same `Agent` class runs from CLI, TUI, web API, or embedded in your code. Transports only handle I/O; they never contain business logic.
 
@@ -32,7 +32,7 @@ agent/
 │   ├── base.py               # Provider ABC + ProviderResponse
 │   ├── anthropic.py          # tools, streaming, extended thinking
 │   ├── openai.py             # tools, streaming, Azure / Together via base_url
-│   ├── ollama.py             # tools, DeepSeek-r1 reasoning extraction
+│   ├── ollama.py             # tools, thinking extraction, Qwen3.8 reasoning effort
 │   ├── gemini.py             # tools, streaming, thinking; SDK + HTTP modes
 │   └── generic.py            # any OpenAI-compatible endpoint
 │
@@ -72,7 +72,7 @@ agent/
     ├── prompt_queue.py       # transport-agnostic prompt queue
     ├── acp_permissions.py    # ACP approval callback
     ├── acp/                  # ACP transport package
-    │   ├── common.py         # shared types + helpers
+    │   ├── common.py         # shared helpers + ACP session config options
     │   ├── http.py           # HTTP / SSE server (REST clients)
     │   └── stdio.py          # SDK stdio transport (Zed)
     ├── themes/
@@ -167,17 +167,20 @@ All providers implement the `Provider` ABC (`agent/providers/base.py`):
 
 ```python
 class Provider(ABC):
-    async def complete(self, messages, tools, system_prompt) -> ProviderResponse
+    async def complete(self, messages, tools, system) -> ProviderResponse
+    async def stream(self, messages, tools, system) -> AsyncIterator[StreamDelta]
     def capabilities(self) -> ProviderCapabilities
 ```
 
-`ProviderResponse` is a normalized container with: `text`, `tool_calls`, `stop_reason`, `meta` (timing + usage), and optional `reasoning_blocks`.
+`ProviderResponse` normalizes `content`, `tool_calls`, `stop_reason`, `reasoning`, provider `meta`,
+and optional `stop_details`. `StreamDelta` carries text, reasoning, tool-call deltas, and the final
+provider metadata without exposing provider-specific response types to the core loop.
 
 | Provider | Module | SDK | Features |
 |----------|--------|-----|----------|
 | Anthropic | `anthropic.py` | `anthropic` | Tools, streaming, extended thinking |
 | OpenAI | `openai.py` | `openai` | Tools, streaming, Azure/Together via `base_url` |
-| Ollama | `ollama.py` | `httpx` | Tools, reasoning extraction (`deepseek-r1`) |
+| Ollama | `ollama.py` | `httpx` | Tools, streaming, native thinking extraction, Qwen3.8 reasoning effort |
 | Gemini | `gemini.py` | `google-genai` / `httpx` | Tools, streaming, thinking; SDK mode (standard API) + HTTP mode (custom endpoints) |
 | Generic | `generic.py` | `httpx` | Tools, streaming, any OpenAI-compatible endpoint |
 
@@ -188,6 +191,39 @@ ProviderConfig(name="anthropic", model="claude-sonnet-4-6")
 ```
 
 The `PROVIDER_REGISTRY` in `agent.py` maps names to classes via lazy import.
+
+### Ollama reasoning configuration
+
+The Ollama adapter uses the native `/api/chat` endpoint. Provider-neutral fields such as
+`temperature` and `max_tokens` are translated into Ollama `options`; additional generation
+settings in `ProviderConfig.extra` are forwarded into the same object after framework-only keys
+have been removed.
+
+For Qwen3.8, this makes reasoning depth a model option:
+
+```python
+ProviderConfig(
+    name="ollama",
+    model="qwen3.8:latest",
+    extra={"supports_reasoning": True, "reasoning_effort": "medium"},
+)
+```
+
+Both `complete()` and `stream()` produce the following relevant request shape:
+
+```json
+{
+  "think": true,
+  "options": {
+    "reasoning_effort": "medium"
+  }
+}
+```
+
+`think` controls Ollama's top-level thinking capability. Qwen3.8's model-specific
+`reasoning_effort` controls reasoning depth and accepts `xhigh`, `medium`, or `low`. Response
+thinking is normalized into `ReasoningBlock` instances or streaming `reasoning_delta` values, so
+the core loop and transports do not depend on Ollama's response format.
 
 ## Tool system
 
@@ -337,6 +373,8 @@ Transports are thin I/O adapters. They create an `Agent`, wire up event handlers
 | TUI Fixed | `transports/tui_fixed.py` | `aar tui --fixed` | Textual full-screen TUI with fixed header/footer, prompt queue |
 | Web | `transports/web.py` | `aar serve` | ASGI app, SSE streaming, per-request safety override |
 | Stream | `transports/stream.py` | (internal) | `EventStream` for cross-request pub/sub |
+| ACP stdio | `transports/acp/stdio.py` | `aar acp` | SDK transport for editors; session lifecycle, config options, permissions, MCP |
+| ACP HTTP | `transports/acp/http.py` | `aar acp --http` | REST/SSE transport for remote and programmatic clients |
 
 Shared TUI sub-packages:
 
@@ -352,6 +390,29 @@ All transports share the same `AgentConfig` schema. Transport-specific behavior 
 - How user input is collected
 - How events are displayed
 - The approval callback implementation (terminal prompt vs. auto-deny vs. custom)
+- Protocol-level session configuration, such as ACP model, mode, and reasoning selectors
+
+### ACP session configuration
+
+The stdio ACP transport advertises ordered `configOptions` from
+`transports/acp/common.py`. The Qwen3.8 reasoning control uses ACP's standard
+`category="thought_level"` and offers `xhigh`, `medium`, and `low`.
+
+When the client calls `session/set_config_option`, `AarAcpAgent` creates a copied
+`ProviderConfig` with the selected value in `extra.reasoning_effort` and stores it in
+`_session_configs`. `_make_aar_agent()` reads that session-specific `AgentConfig` for the next
+prompt, so concurrent sessions remain independent and the global configuration is not mutated.
+Forked in-memory sessions inherit the source session's configuration.
+
+```mermaid
+flowchart TD
+    Client[ACP editor selector] --> SetOption[session/set_config_option]
+    SetOption --> SessionConfig[Per-session AgentConfig copy]
+    SessionConfig --> Provider[OllamaProvider]
+    Provider --> Request[api/chat options.reasoning_effort]
+    Request --> Events[ReasoningBlock or reasoning_delta]
+    Events --> Client
+```
 
 ### Prompt queue (TUI Fixed)
 
