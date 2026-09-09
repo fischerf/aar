@@ -482,10 +482,10 @@ Run `aar init` to create the skeleton files and directories. The init command pr
 `~/.aar` created by an older release keeps its original contents. After
 upgrading Aar, two things are worth refreshing by hand:
 
-- **Distro profiles** (`~/.aar/distros/*.json`) — profiles written before
-  checksum verification was added have no `rootfs_sha256`, so `aar sandbox
-  setup` downloads the rootfs unverified and only logs a warning. Copy the
-  current ones over:
+- **Distro profiles** (`~/.aar/distros/*.json`) — current profiles include
+  rootfs checksums plus `bubblewrap` and `socat`. Older copies do not gain
+  these changes automatically, so refresh them before rebuilding a WSL
+  sandbox:
 
   ```bash
   aar init --force        # refreshes everything, including config.json
