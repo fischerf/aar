@@ -671,6 +671,29 @@ class TestWireSessionDiscovery:
             assert "read_only" not in option_ids
 
     @pytest.mark.asyncio
+    async def test_qwen38_advertises_reasoning_effort(self, tmp_path):
+        config = _make_config(tmp_path).model_copy(
+            update={
+                "provider": ProviderConfig(
+                    name="ollama",
+                    model="qwen3.8:latest",
+                    extra={"supports_reasoning": True},
+                )
+            }
+        )
+        agent = _make_aar_sdk_agent(config, MockProvider())
+        client = _CaptureClient()
+
+        async with _AcpPair(agent, client) as (_, client_side):
+            await client_side.initialize(protocol_version=1)
+            resp = await client_side.new_session(cwd="/ws", mcp_servers=[])
+
+            effort = next(o for o in resp.config_options if o.id == "reasoning_effort")
+            assert effort.category == "thought_level"
+            assert effort.current_value == "xhigh"
+            assert [o.value for o in effort.options] == ["xhigh", "medium", "low"]
+
+    @pytest.mark.asyncio
     async def test_load_session_advertises_current_mode(self, tmp_path):
         from agent.core.events import UserMessage
         from agent.core.session import Session
@@ -787,6 +810,35 @@ class TestWireSetConfigOption:
             safety = agent._session_configs[sid].safety
             assert safety.read_only is True
             assert agent._session_modes[sid] == "read-only"
+
+    @pytest.mark.asyncio
+    async def test_set_reasoning_effort_via_config_option(self, tmp_path):
+        config = _make_config(tmp_path).model_copy(
+            update={
+                "provider": ProviderConfig(
+                    name="ollama",
+                    model="qwen3.8:latest",
+                    extra={"supports_reasoning": True},
+                )
+            }
+        )
+        agent = _make_aar_sdk_agent(config, MockProvider())
+        client = _CaptureClient()
+
+        async with _AcpPair(agent, client) as (_, client_side):
+            await client_side.initialize(protocol_version=1)
+            sess = await client_side.new_session(cwd="/ws", mcp_servers=[])
+
+            resp = await client_side.set_config_option(
+                config_id="reasoning_effort",
+                session_id=sess.session_id,
+                value="medium",
+            )
+
+            provider = agent._session_configs[sess.session_id].resolve_provider()
+            assert provider.extra["reasoning_effort"] == "medium"
+            effort = next(o for o in resp.config_options if o.id == "reasoning_effort")
+            assert effort.current_value == "medium"
 
     @pytest.mark.asyncio
     async def test_set_config_option_returns_full_options(self, tmp_path):
