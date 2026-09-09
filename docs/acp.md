@@ -18,7 +18,7 @@ On connection, Aar reports the following capabilities to the editor:
 | `session.list` | supported | Editor can show Aar session history in its sidebar |
 | `session.close` | supported | Editor notifies Aar when a session tab is closed |
 | `session.set_mode` | supported | Editor can switch between `auto` / `review` / `read-only` modes |
-| `session.set_config_option` | supported | Editor can toggle `auto_approve_writes` / `auto_approve_execute` / `read_only` at runtime |
+| `session.set_config_option` | supported | Editor can change the model, mode, and Qwen3.8 reasoning effort at runtime |
 | `prompt.embedded_context` | `true` | `@`-mentions embed file contents that Aar reads |
 | `mcp_capabilities.http` | `true` | Editor forwards HTTP MCP servers to Aar |
 | `mcp_capabilities.sse` | `false` | SSE transport not supported (servers skipped with warning) |
@@ -224,7 +224,7 @@ curl -s -N -X POST http://127.0.0.1:8000/runs \
 | `session/fork` | Branches a session at a given message index; returns a fresh `session_id` with the trimmed history |
 | `session/resume` | Re-attaches to an existing session by id (equivalent to `load` for saved sessions, but does not replay history) |
 | `session/set_mode` | Switches the session between `auto` / `review` / `read-only`; emits a `current_mode_update` notification |
-| `session/set_config_option` | Toggles a boolean safety config at runtime (`auto_approve_writes` / `auto_approve_execute` / `read_only`); emits a `config_option_update` notification |
+| `session/set_config_option` | Changes the session model, mode, or Qwen3.8 `reasoning_effort`; returns the complete updated option list |
 
 ### Streaming updates pushed during a prompt
 
@@ -435,6 +435,7 @@ global `self._config`:
 | `set_config_option("auto_approve_writes", v)` | `require_approval_for_writes = not v` — single flag |
 | `set_config_option("auto_approve_execute", v)` | `require_approval_for_execute = not v` — single flag |
 | `set_config_option("read_only", v)` | `read_only = v` — single flag |
+| `set_config_option("reasoning_effort", v)` | Sets Ollama Qwen3.8 `extra.reasoning_effort` to `xhigh`, `medium`, or `low` for the session |
 
 `set_mode` is coarse (rewrites all three flags together); `set_config_option` is fine-grained
 (one flag at a time). After `set_mode("auto")` followed by `set_config_option("read_only", true)`

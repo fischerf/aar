@@ -185,6 +185,25 @@ Enable reasoning extraction for models like `deepseek-r1`:
 ProviderConfig(name="ollama", model="deepseek-r1", extra={"supports_reasoning": True})
 ```
 
+Qwen3.8 also supports model-specific reasoning effort levels. Set `reasoning_effort` in
+`extra`; the Ollama adapter sends it as `options.reasoning_effort` on both regular and streaming
+`/api/chat` requests:
+
+```python
+ProviderConfig(
+    name="ollama",
+    model="qwen3.8:latest",
+    extra={
+        "supports_reasoning": True,
+        "reasoning_effort": "medium",  # "xhigh" (default), "medium", or "low"
+    },
+)
+```
+
+When using `aar acp`, Qwen3.8 profiles expose the same values as a per-session **Reasoning
+effort** selector in the editor. Changing it affects the next prompt and does not modify the
+configuration file.
+
 Enable vision for models with a vision encoder (see [Multimodal input](development.md#multimodal-input-images-audio-video)):
 
 ```python

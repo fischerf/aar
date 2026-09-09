@@ -368,6 +368,18 @@ def _build_mode_state(safety_cfg: Any, current_mode_id: str | None = None) -> An
     )
 
 
+_OLLAMA_REASONING_EFFORTS = ("xhigh", "medium", "low")
+
+
+def _supports_reasoning_effort(provider_cfg: Any) -> bool:
+    """Return whether *provider_cfg* supports Qwen3.8 reasoning effort levels."""
+    if provider_cfg is None or getattr(provider_cfg, "name", "") != "ollama":
+        return False
+    model = str(getattr(provider_cfg, "model", "")).lower()
+    extra = getattr(provider_cfg, "extra", {})
+    return model.startswith("qwen3.8") or "reasoning_effort" in extra
+
+
 def _build_config_options(
     safety_cfg: Any,
     provider_cfg: Any = None,
@@ -380,10 +392,8 @@ def _build_config_options(
 
     1. **Model** select  (``category="model"``) — all named providers from ``providers``
        dict, plus the active model.  Editors show these in the model picker.
-    2. **Mode** select   (``category="mode"``)  — ``auto`` / ``review`` / ``read-only``.
-    3. ``auto_approve_writes`` boolean toggle.
-    4. ``auto_approve_execute`` boolean toggle.
-    5. ``read_only`` boolean toggle.
+    2. **Reasoning effort** select (``category="thought_level"``) for Ollama Qwen3.8.
+    3. **Mode** select   (``category="mode"``)  — ``auto`` / ``review`` / ``read-only``.
 
     Clients that support ``configOptions`` SHOULD use these and ignore the
     separate ``modes`` field (which is kept only for older client compatibility).
@@ -456,7 +466,41 @@ def _build_config_options(
             )
         )
 
-    # 2. Mode picker (category="mode", type="select").
+    # 2. Qwen3.8 reasoning effort (ACP's standard thought-level category).
+    if _supports_reasoning_effort(provider_cfg):
+        extra = getattr(provider_cfg, "extra", {})
+        current_effort = str(extra.get("reasoning_effort", "xhigh"))
+        if current_effort not in _OLLAMA_REASONING_EFFORTS:
+            current_effort = "xhigh"
+        opts.append(
+            SessionConfigOptionSelect(
+                id="reasoning_effort",
+                name="Reasoning effort",
+                type="select",
+                category="thought_level",
+                description="Controls Qwen3.8 reasoning depth, speed, and cost.",
+                current_value=current_effort,
+                options=[
+                    SessionConfigSelectOption(
+                        value="xhigh",
+                        name="Extra high",
+                        description="Maximum reasoning depth for complex tasks.",
+                    ),
+                    SessionConfigSelectOption(
+                        value="medium",
+                        name="Medium",
+                        description="Balance reasoning accuracy and speed.",
+                    ),
+                    SessionConfigSelectOption(
+                        value="low",
+                        name="Low",
+                        description="Prefer speed and lower cost.",
+                    ),
+                ],
+            )
+        )
+
+    # 3. Mode picker (category="mode", type="select").
     current_mode = _derive_mode_id(safety_cfg, current_mode_id)
     opts.append(
         SessionConfigOptionSelect(
