@@ -271,6 +271,7 @@
       "grep",
       "find_files"
     ],
+    "enabled_extension_tools": null,
     "bash_default_timeout": 120,
     "command_timeout": 300,
     "max_output_chars": 50000
@@ -376,7 +377,8 @@
       "researcher": {
         "description": "Reads the codebase and answers a question about it, without touching anything",
         "tools": ["read_file", "list_directory", "grep", "find_files"],
-        "provider": "qwen3.5",
+        "extension_tools": [],
+        "provider": "gemma",
         "system_prompt": "You investigate a codebase and report what you found. Read only — never write, never run commands. Answer in at most 15 lines, citing file paths and line numbers.",
         "max_steps": 20,
         "timeout": 600
@@ -384,12 +386,15 @@
       "illustrator": {
         "description": "Generates one image from a description and returns the saved file path (needs the qwen-image extension)",
         "tools": [],
+        "extension_tools": ["image_generate", "image_edit"],
+        "provider": "gemma",
         "system_prompt": "You are an image generator. Call image_generate exactly once with the requested prompt, then reply with only the saved file path. Never explain.",
         "max_steps": 6,
         "timeout": 900
       }
     }
   },
+  "system_prompt_override": "",
   "trust_project_extensions": false,
   "skills_dirs": [],
   "skills_enabled": true,

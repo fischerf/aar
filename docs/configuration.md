@@ -475,6 +475,7 @@ Off by default. When `subagents.enabled` is true and at least one profile is dec
 | `agents.<name>.description` | `""` | Shown to the calling model — this is how it picks a profile |
 | `agents.<name>.tools` | `[]` | The child's `enabled_builtins`, intersected with the parent's |
 | `agents.<name>.provider` | `""` | Key into `providers`; empty inherits the parent's |
+| `agents.<name>.extension_tools` | `null` | Extension tools the child keeps; `null` inherits every installed extension's, `[]` keeps none. `enabled_builtins` does not cover these |
 | `agents.<name>.system_prompt` | `""` | Replaces the child's assembled prompt (see [below](#configurable-system-prompt)) |
 | `agents.<name>.max_steps` | `20` | Loop steps the child may take |
 | `agents.<name>.timeout` | `600` | Wall-clock seconds for the child run, applied as the tool's `timeout_s` so `command_timeout` does not clip it |

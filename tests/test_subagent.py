@@ -104,6 +104,31 @@ def test_child_extension_allowlist_is_passed_down():
     assert child.tools.enabled_extension_tools == ["image_generate"]
 
 
+def test_profile_has_no_settings_that_are_never_read():
+    """Every SubAgentProfile field must actually reach the child config.
+
+    A field that is accepted but ignored is worse than no field: it looks
+    configured and silently does nothing.
+    """
+    parent = _config()
+    profile = parent.subagents.agents["researcher"]
+    child = build_child_config(parent, profile, 0)
+    honoured = {
+        "description": True,  # shown to the calling model in the tool description
+        "provider": child.provider,
+        "tools": child.tools.enabled_builtins is not None,
+        "extension_tools": child.tools.enabled_extension_tools is None
+        or child.tools.enabled_extension_tools == profile.extension_tools,
+        "system_prompt": child.system_prompt_override == profile.system_prompt,
+        "max_steps": child.max_steps == profile.max_steps,
+        "timeout": child.timeout == float(profile.timeout),
+    }
+    assert set(SubAgentProfile.model_fields) == set(honoured), (
+        "a SubAgentProfile field is not covered here — either wire it into "
+        "build_child_config/register_subagent_tool, or remove it"
+    )
+
+
 def test_child_depth_budget_decrements():
     parent = _config(max_depth=2)
     child = build_child_config(parent, parent.subagents.agents["researcher"], 1)

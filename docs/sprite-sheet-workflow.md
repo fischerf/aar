@@ -402,12 +402,53 @@ carries on if you ask for them.
 3. Only try `offload: "none"` if you pin sizes to 1024x512 or smaller **and** you
    benchmark it more than once, on a freshly started server.
 
-The durable fix is to shrink what has to be resident. With Q4_K_M the transformer
-is only ~4.5 GB — the bulk of the 21.4 GB is the **unquantized text encoder**,
-which runs once per render and then sits idle for all 30 steps. Quantizing it, or
-offloading that component alone, would leave ~18 GB of headroom and make
-`offload: "none"` comfortable at any supported size. The server does not support
-per-component placement today.
+#### Per-component placement (`resident_components`)
+
+Components are not used equally. With Q4_K_M the transformer is ~4.5 GB and runs
+for every denoising step; the **unquantized text encoder is ~15 GB** and runs once
+per render, then sits idle. So it is worth being able to say which components stay
+on the card and which travel:
+
+```json
+{ "offload": "model", "resident_components": ["transformer", "vae"] }
+```
+
+Named components are pinned to the GPU; everything else keeps the usual offload
+hooks. `/health` reports `resident` (what you asked for) and `resident_applied`
+(what the pipeline actually had) — names differ between pipeline classes, and an
+unknown one is dropped with a warning rather than failing the start.
+
+This works: with `["transformer", "vae"]` the card holds a steady 5.03 GB between
+renders instead of 0.04 GB.
+
+**On a 24 GB card it still does not pay off.** Measured, 1024x512, 30 steps,
+Q4_K_M, same machine:
+
+| configuration | idle VRAM | render |
+|---|---|---|
+| `offload: "model"`, nothing pinned | 0.04 GB | **153 s** |
+| `resident: ["transformer", "vae"]` | 5.03 GB | 209 s / 199 s |
+| `resident: ["text_encoder"]` | 16.38 GB | 202 s / 206 s |
+| `offload: "none"` (everything) | 21.4 GB | 87 s, then 336 s/step — unstable |
+
+Every pinned configuration is *slower*, and the reason is the same one that makes
+`offload: "none"` unstable: whatever stays resident is headroom the activations no
+longer have, and the spill goes over the same slow bus. Pinning the transformer
+also collapses `model_cpu_offload_seq` to a single entry, and diffusers evicts a
+module when the *next* one in the chain runs — with nothing after it, the 15 GB
+text encoder stays on the card for the whole denoise.
+
+So on a 24 GB card the plain `offload: "model"` eviction, which keeps peak VRAM
+lowest, wins. `resident_components` is worth reaching for when the card has real
+headroom — roughly, when the pipeline's resident footprint is under about half the
+card.
+
+**The remaining lever is the text encoder's size**, not its placement. Quantizing
+it from bf16 (~15 GB) to 4-bit (~4 GB) would put the whole pipeline near 10 GB and
+leave ~14 GB for activations, at which point `offload: "none"` becomes comfortable
+and the bus stops mattering. That needs a quantization backend the server does not
+wire up yet (`bitsandbytes` / `optimum-quanto`), and support for those on
+ROCm + Windows is patchy.
 
 #### Activation-memory options
 
@@ -440,6 +481,7 @@ time, or you get a confusing cancellation minutes in:
 
 ## See also
 
-- [aar-ext-qwen-image README](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md) — tools, sizes, GGUF quantization, AMD/ROCm setup
+- [aar-ext-qwen-image README](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md) — tools, sizes, GGUF quantization, AMD/ROCm setup,
+  [Keeping the model in VRAM](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#keeping-the-model-in-vram)
 - [Configuration — Sub-agents](configuration.md#sub-agents-spawn_agent) — the full `subagents` key reference
 - [Tools — spawn_agent](tools.md#spawn_agent) — parameters and safety model

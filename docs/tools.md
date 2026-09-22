@@ -142,6 +142,10 @@ not exhausted — a leaf agent has no `spawn_agent` to call, which is the recurs
 **Timeout:** the profile's `timeout` is set as the tool's `timeout_s`, so a long child
 run is not clipped by `tools.command_timeout`.
 
+Extension tools are a separate list (`extension_tools`): an installed extension
+registers into every agent in the process, sub-agents included, so a single-purpose
+profile has to name the ones it wants.
+
 Everything else about the child — tools, provider, system prompt, step budget — comes
 from the profile in `config.json`, never from the model. The child inherits the parent's
 `safety` block and approval callback verbatim, and its built-ins are intersected with

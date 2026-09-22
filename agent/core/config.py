@@ -467,9 +467,6 @@ class SubAgentProfile(BaseModel):
     # Wall-clock seconds for the whole child run. Applied as the spawn_agent
     # tool's ``timeout_s``, so it is not clipped by ``tools.command_timeout``.
     timeout: int = 600
-    # Load extensions in the child (needed when the child's job *is* an
-    # extension tool, e.g. image generation).
-    extensions: bool = True
 
 
 class SubAgentConfig(BaseModel):
