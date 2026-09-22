@@ -21,6 +21,7 @@ class ToolRegistry:
         input_schema: dict[str, Any] | None = None,
         side_effects: list[SideEffect] | None = None,
         requires_approval: bool = False,
+        timeout_s: int | None = None,
     ) -> Callable:
         """Decorator to register a tool function.
 
@@ -40,6 +41,7 @@ class ToolRegistry:
                 input_schema=schema,
                 side_effects=side_effects or [SideEffect.NONE],
                 requires_approval=requires_approval,
+                timeout_s=timeout_s,
                 handler=fn,
             )
             self._tools[tool_name] = spec

@@ -63,6 +63,7 @@ class ExtensionAPIProtocol(Protocol):
         *,
         side_effects: list[Any] | None = ...,
         requires_approval: bool = ...,
+        timeout_s: int | None = ...,
     ) -> Callable: ...
 
     def register_tool(self, spec: Any) -> None: ...
@@ -360,8 +361,13 @@ class ExtensionAPI:
         *,
         side_effects: list[SideEffect] | None = None,
         requires_approval: bool = False,
+        timeout_s: int | None = None,
     ) -> Callable:
-        """Decorator to register a tool provided by this extension."""
+        """Decorator to register a tool provided by this extension.
+
+        *timeout_s* overrides the executor's shared ``command_timeout`` for this
+        tool alone — use it for work that legitimately runs for minutes.
+        """
 
         def decorator(fn: Callable) -> Callable:
             spec = ToolSpec(
@@ -370,6 +376,7 @@ class ExtensionAPI:
                 input_schema=input_schema,
                 side_effects=side_effects or [SideEffect.NONE],
                 requires_approval=requires_approval,
+                timeout_s=timeout_s,
                 handler=fn,
             )
             self._tools.append(spec)

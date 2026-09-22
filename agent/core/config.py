@@ -215,6 +215,7 @@ class ToolConfig(BaseModel):
     bash_default_timeout: int = 120
     # Hard outer timeout (seconds) applied by the executor regardless of what the model requests.
     # Should be >= bash_default_timeout; 0 disables the outer guard.
+    # Individual tools may override it with ``ToolSpec.timeout_s``.
     command_timeout: int = 300
     max_output_chars: int = 50_000
 
@@ -436,6 +437,42 @@ class CompactionConfig(BaseModel):
     truncate_max_chars: int = 500
 
 
+class SubAgentProfile(BaseModel):
+    """One named agent the model may spawn with the ``spawn_agent`` tool.
+
+    Profiles are declared here rather than chosen by the model: the calling
+    model supplies only a profile name and a task, never a tool list, provider
+    or path.
+    """
+
+    # Shown to the calling model in the tool description — this is how it picks.
+    description: str = ""
+    # Key into ``AgentConfig.providers``; empty inherits the parent's provider.
+    provider: str = ""
+    # The child's ``enabled_builtins``. Intersected with the parent's, so a
+    # child is never more capable than the agent that spawned it.
+    tools: list[str] = Field(default_factory=list)
+    # Replaces the child's assembled system prompt (see ``system_prompt_override``).
+    system_prompt: str = ""
+    max_steps: int = 20
+    # Wall-clock seconds for the whole child run. Applied as the spawn_agent
+    # tool's ``timeout_s``, so it is not clipped by ``tools.command_timeout``.
+    timeout: int = 600
+    # Load extensions in the child (needed when the child's job *is* an
+    # extension tool, e.g. image generation).
+    extensions: bool = True
+
+
+class SubAgentConfig(BaseModel):
+    """Settings for the built-in ``spawn_agent`` tool."""
+
+    enabled: bool = False
+    # How many levels of nesting are allowed. At depth 0 the tool is not
+    # registered at all, rather than registered and erroring.
+    max_depth: int = 1
+    agents: dict[str, SubAgentProfile] = Field(default_factory=dict)
+
+
 class AgentConfig(BaseModel):
     provider: str | ProviderConfig = Field(default_factory=ProviderConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
@@ -444,6 +481,7 @@ class AgentConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    subagents: SubAgentConfig = Field(default_factory=SubAgentConfig)
     # C3 — Execute ``.agent/extensions/*.py`` from the CWD without prompting.
     # Off by default: those files arrive with ``git clone`` and run as you.
     trust_project_extensions: bool = False
@@ -462,7 +500,14 @@ class AgentConfig(BaseModel):
     cost_warning_threshold: float = 0.8  # fraction of cost_limit to trigger warning style
     session_dir: Path = Field(default_factory=lambda: Path(".agent/sessions"))
     project_rules_dir: Path = Field(default_factory=lambda: Path(".agent"))
+    # The *assembled* prompt. ``Agent`` rebuilds this on every tool-set change
+    # (built-ins, extensions, skills), so anything written here by hand is
+    # overwritten. Use ``system_prompt_override`` to actually replace it.
     system_prompt: str = ""
+    # Replaces the assembled prompt verbatim. Extension prompt additions are
+    # still appended, because they describe the extension tools the model is
+    # being handed.
+    system_prompt_override: str = ""
     log_level: str = "WARNING"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
     log_file: Path | None = None  # opt-in file logging (append mode)
 

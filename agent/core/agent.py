@@ -77,6 +77,11 @@ class Agent:
         # C3 — Only interactive transports pass a prompt; without one,
         # untrusted ``.agent/extensions`` code from the CWD is never executed.
         self._extension_trust_prompt = extension_trust_prompt
+        # Kept so a sub-agent can be handed the same human approver as its parent.
+        self.approval_callback = approval_callback
+        # The session of the most recent (or in-flight) run — how a nested run's
+        # transcript is reached after :meth:`chat` returns only the final text.
+        self.last_session: Session | None = None
         self.provider = provider or _create_provider(self.config.resolve_provider())
         self.registry = registry or ToolRegistry()
         self.executor = ToolExecutor(
@@ -130,6 +135,31 @@ class Agent:
         for name in newly_added - enabled:
             self.registry.unregister(name)
 
+        # Registered last, and only when configured: it is the one built-in
+        # whose capability is defined by config rather than by its own code.
+        from agent.tools.builtin.subagent import register_subagent_tool
+
+        register_subagent_tool(self.registry, parent=self)
+
+    def emit(self, event: Event) -> None:
+        """Record *event* on the live session and dispatch it to callbacks.
+
+        Used by tools that produce events of their own (``spawn_agent``), which
+        run outside the loop's own event plumbing.
+        """
+        if self.last_session is not None:
+            self.last_session.append(event)
+        for cb in self._on_event:
+            try:
+                if inspect.iscoroutinefunction(cb):
+                    task = asyncio.ensure_future(_safe_async_callback(cb, event))
+                    self._on_event_tasks.add(task)
+                    task.add_done_callback(self._on_event_tasks.discard)
+                else:
+                    cb(event)
+            except Exception:
+                logger.exception("Event callback %r failed on %s", cb, event.type)
+
     def _rebuild_system_prompt(self) -> None:
         """Rebuild the system prompt with current tool snippets, guidelines, and skills."""
         from agent.core.config import build_system_prompt
@@ -157,6 +187,10 @@ class Agent:
         # to the workspace. Reassigned (not appended) each rebuild to stay
         # idempotent across repeated calls (e.g. after extensions register).
         self.executor.policy.config.read_only_paths = skill_read_globs
+
+        if self.config.system_prompt_override:
+            self.config.system_prompt = self.config.system_prompt_override
+            return
 
         sb = self.config.safety.sandbox
         self.config.system_prompt = build_system_prompt(
@@ -315,6 +349,7 @@ class Agent:
 
         session.add_user_message(prompt)
         session.state = AgentState.RUNNING
+        self.last_session = session
 
         def _dispatch(event: Event) -> None:
             for cb in self._on_event:

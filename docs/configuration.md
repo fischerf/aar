@@ -126,7 +126,8 @@ Aar has several independent timeouts that operate at different layers. They inte
 | `provider.extra.read_timeout` | HTTP read | Ollama | `null` (unlimited) | Max seconds to wait for the next byte while streaming; `null` = no cap |
 | `provider.extra.timeout` | HTTP request | Anthropic, OpenAI, Generic | SDK default / `60` s | Whole-request timeout passed to the provider SDK or httpx client |
 | `tools.bash_default_timeout` | Tool executor | bash | `120` s | Default seconds used when the model invokes `bash` without an explicit `timeout` argument. `command_timeout` is the hard outer cap regardless. |
-| `tools.command_timeout` | Tool executor | all | `300` s | Max wall-clock seconds a single shell/bash tool call may run; `0` = no outer guard. Also the hard cap clamped onto the model-supplied `bash(timeout=…)` argument, and published as `maximum` in the tool schema. |
+| `tools.command_timeout` | Tool executor | all | `300` s | Max wall-clock seconds **any** single tool call may run; `0` = no outer guard. Also the hard cap clamped onto the model-supplied `bash(timeout=…)` argument, and published as `maximum` in the tool schema. |
+| `ToolSpec.timeout_s` | Tool executor | all | `None` | Per-tool override of `command_timeout`, set in code by the tool's author. For work that legitimately runs for minutes (an image render, a sub-agent) — so one slow tool doesn't force the cap up for every tool. |
 | `safety.acp_approval_timeout` | ACP transport | all | `0.0` (unlimited) | Seconds the ACP client has to respond to a permission approval request |
 | `timeout` | Agent loop | all | `0.0` (unlimited) | Total wall-clock limit for a whole `Agent.run()` call |
 
@@ -154,7 +155,7 @@ Agent.run() wall-clock limit  (timeout)
 Key rules:
 
 - **Provider timeout must be ≥ the longest single model response you expect.** Large local models on slow hardware can need 3–10 minutes per step. `null` (unlimited) is the safe default for Ollama and for Anthropic/OpenAI (they have their own 600 s SDK default which is usually sufficient).
-- **`command_timeout` must be ≥ the longest shell command the agent may run.** Build steps, test suites, or long compilations need a generous value (120–300 s). `0` disables the executor's outer guard; the `bash` tool still clamps the model's own `timeout` argument to 3600 s so a run can't hang forever.
+- **`command_timeout` must be ≥ the longest *tool call*, not just the longest shell command.** It wraps every handler, extension tools included — an extension with its own 900 s request timeout is still cancelled at 300 s unless it declares `timeout_s`. Build steps, test suites and long compilations need a generous value (120–300 s). `0` disables the executor's outer guard; the `bash` tool still clamps the model's own `timeout` argument to 3600 s so a run can't hang forever.
 - **`timeout` (agent loop) is the outer bound** — set it larger than the provider timeout × expected number of steps. If it fires mid-stream the run is cancelled cleanly.
 - **`acp_approval_timeout`** only matters in ACP mode (`aar acp`). `0.0` waits indefinitely for the editor to respond, which is usually correct.
 
@@ -439,6 +440,56 @@ See [`docs/agent_loop.md`](agent_loop.md) for the behavioural details of each gu
 The guardrails are deliberately minimal. Agent behavior (planning, persistence, completion quality) is guided entirely by the system prompt — see the `rules.md` file loaded via the configurable system prompt layers.
 
 
+## Sub-agents (`spawn_agent`)
+
+Off by default. When `subagents.enabled` is true and at least one profile is declared, the agent gains a `spawn_agent` tool that runs a **nested agent** as a single tool call and returns its final message.
+
+```json
+{
+  "subagents": {
+    "enabled": true,
+    "max_depth": 1,
+    "agents": {
+      "illustrator": {
+        "description": "Generates images from a description",
+        "tools": [],
+        "system_prompt": "Call image_generate once, then reply with only the saved path.",
+        "max_steps": 6,
+        "timeout": 900
+      },
+      "researcher": {
+        "description": "Reads the codebase and answers questions about it",
+        "tools": ["read_file", "grep", "find_files"],
+        "provider": "qwen359b",
+        "max_steps": 20
+      }
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Register the tool at all |
+| `max_depth` | `1` | Levels of nesting. At `0` the tool is not registered, so a leaf agent has nothing to call |
+| `agents.<name>.description` | `""` | Shown to the calling model — this is how it picks a profile |
+| `agents.<name>.tools` | `[]` | The child's `enabled_builtins`, intersected with the parent's |
+| `agents.<name>.provider` | `""` | Key into `providers`; empty inherits the parent's |
+| `agents.<name>.system_prompt` | `""` | Replaces the child's assembled prompt (see [below](#configurable-system-prompt)) |
+| `agents.<name>.max_steps` | `20` | Loop steps the child may take |
+| `agents.<name>.timeout` | `600` | Wall-clock seconds for the child run, applied as the tool's `timeout_s` so `command_timeout` does not clip it |
+
+**What the model controls:** only `agent_name` and `task`. Tools, provider, sandbox and paths all come from config.
+
+**What the child inherits:** the parent's entire `safety` block (sandbox mode, denied/allowed paths, approval requirements) and its approval callback, so writes still prompt the same human. Its built-ins are intersected with the parent's, so a sub-agent is never *more* capable than the agent that spawned it. `max_depth` decrements at each level.
+
+**Cost:** the child is a real `Agent` — it re-discovers extensions and starts with an empty context. It cannot see the parent conversation, so the `task` must be self-contained. Its transcript is written to `session_dir` and the parent's transcript gets a `SubAgentEvent` recording the profile, duration and child session id; `aar sessions` opens the child.
+
+```
+> Use spawn_agent with the illustrator to make a pixel-art dinosaur sprite,
+  then write the game around whatever file it reports.
+```
+
 ## Configurable system prompt
 
 By default, the system prompt is assembled automatically from up to five layers (all optional except Base):
@@ -471,6 +522,16 @@ If no rules files exist, only the base prompt is used. When present, the layers 
 - This is a FastAPI app. Use pytest-asyncio for async tests.
 - Follow the existing service pattern in app/services/.
 ```
+
+### Replacing the assembled prompt
+
+`system_prompt` in `config.json` is the *assembled result*: `Agent` rebuilds it whenever the tool set changes (built-ins, extensions, skills), so anything written there by hand is overwritten. To replace the prompt outright, set `system_prompt_override`:
+
+```json
+{ "system_prompt_override": "You are an image generator. Reply with only the saved file path." }
+```
+
+The override is used verbatim; extension prompt additions are still appended, because they describe the extension tools the model is being handed. Layers 2–5 above are skipped entirely — use rules files, not the override, when you want to *add* to the prompt.
 
 **Project drop-ins** — place `.md` files in `<project_rules_dir>/rules.d/` for per-contributor or per-machine additions. Add `rules.d/` to `.gitignore` if you don't want them committed, or commit them for shared team overrides.
 
