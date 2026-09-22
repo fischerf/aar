@@ -451,9 +451,10 @@ Off by default. When `subagents.enabled` is true and at least one profile is dec
     "max_depth": 1,
     "agents": {
       "illustrator": {
-        "description": "Generates images from a description",
+        "description": "Generates one image from a description and returns the saved file path",
         "tools": [],
-        "system_prompt": "Call image_generate once, then reply with only the saved path.",
+        "extension_tools": ["image_generate"],
+        "system_prompt": "Call image_generate exactly once, passing BOTH width and height explicitly, then reply with only the saved path.",
         "max_steps": 6,
         "timeout": 900
       },
@@ -483,6 +484,8 @@ Off by default. When `subagents.enabled` is true and at least one profile is dec
 **What the model controls:** only `agent_name` and `task`. Tools, provider, sandbox and paths all come from config.
 
 **What the child inherits:** the parent's entire `safety` block (sandbox mode, denied/allowed paths, approval requirements) and its approval callback, so writes still prompt the same human. Its built-ins are intersected with the parent's, so a sub-agent is never *more* capable than the agent that spawned it. `max_depth` decrements at each level.
+
+**Extensions are not built-ins.** Every child builds its own extension manager, so an installed extension registers into *every* sub-agent regardless of `tools`. `extension_tools` is the only key that narrows them, and leaving it `null` hands the child every extension tool on the machine. Naming exactly one tool is also the cheapest way to make a single-purpose profile reliable: a profile told to "call `image_generate` exactly once" cannot misfire into `image_edit` if `image_edit` was never registered for it.
 
 **Cost:** the child is a real `Agent` — it re-discovers extensions and starts with an empty context. It cannot see the parent conversation, so the `task` must be self-contained. Its transcript is written to `session_dir` and the parent's transcript gets a `SubAgentEvent` recording the profile, duration and child session id; `aar sessions` opens the child.
 

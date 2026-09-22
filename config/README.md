@@ -50,8 +50,9 @@ Set the matching API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 
 ### Sub-agents
 
-`samples/config.json` ships two `subagents` profiles with `"enabled": false` — a
-read-only `researcher` and an `illustrator` for the qwen-image extension. Flip
+`samples/config.json` ships three `subagents` profiles with `"enabled": false` — a
+read-only `researcher`, an `illustrator` that generates images, and a `retoucher` that
+edits existing ones (the last two need the qwen-image extension). Flip
 `subagents.enabled` to `true` and the agent gains a `spawn_agent` tool that runs one
 of those profiles as a nested agent and returns only its final message:
 
@@ -60,8 +61,21 @@ of those profiles as a nested agent and returns only its final message:
 ```
 
 The calling model picks a profile name and writes the task; tools, provider, sandbox
-and paths all come from the profile and from the parent's own config. See
-[docs/configuration.md](../docs/configuration.md#sub-agents-spawn_agent).
+and paths all come from the profile and from the parent's own config.
+
+Two things the profiles demonstrate that are easy to miss:
+
+- **`extension_tools` is separate from `tools`.** An installed extension registers into
+  *every* sub-agent regardless of `tools: []`, so a profile that wants a narrow surface
+  has to name what it keeps. Leaving it `null` hands the child every extension tool on
+  the machine.
+- **Generating and editing want separate profiles.** The prompt that makes one reliable
+  ("call `image_generate` exactly once") makes the other impossible, and the
+  `description` is the only thing the calling model reads when it picks. Giving each
+  profile exactly one tool also makes the split structural rather than a matter of the
+  child obeying its prompt.
+
+See [docs/configuration.md](../docs/configuration.md#sub-agents-spawn_agent).
 
 ### Distro profiles
 
@@ -92,6 +106,10 @@ See `rules/rules.md` for the minimal ReAct system prompt used by default.
 
 **"Permission denied" on tool use**
 - Check `denied_paths` and `allowed_paths` in your config
+- This is not limited to `read_file` / `write_file`: `allowed_paths` applies to *any*
+  tool that declares a read or write and takes a recognisable path argument, extensions
+  included. A tool handed a file outside the whitelist is denied before it runs — see
+  [Which arguments are path-checked](../docs/safety.md#which-arguments-are-path-checked)
 - For non-interactive runs, set `require_approval_for_writes` / `require_approval_for_execute` to `false`
 - If a shell command is refused outright it hit the command deny-list. That list
   now looks through `;`, `&&`, `|`, `sudo` and `sh -c '…'`, so a compound command

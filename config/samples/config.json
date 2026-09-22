@@ -386,11 +386,20 @@
       "illustrator": {
         "description": "Generates one image from a description and returns the saved file path (needs the qwen-image extension)",
         "tools": [],
-        "extension_tools": ["image_generate", "image_edit"],
+        "extension_tools": ["image_generate"],
         "provider": "gemma",
-        "system_prompt": "You are an image generator. Call image_generate exactly once with the requested prompt, then reply with only the saved file path. Never explain.",
+        "system_prompt": "You are an image generator. Call image_generate exactly once with the requested prompt, passing BOTH width and height explicitly - never only one, or the other falls back to a default and silently changes the aspect ratio. Pass 'seed' and 'out' when you were given them. Then reply with only the saved file path. Never explain.",
         "max_steps": 6,
-        "timeout": 900
+        "timeout": 1800
+      },
+      "retoucher": {
+        "description": "Edits an existing picture and returns the path of the NEW file (the original is never modified). Give it the full path of the image to change, exactly what to change, and the output size in pixels - an edit does not keep the original's aspect ratio unless you ask for it. Pass a seed when you want two attempts to be comparable.",
+        "tools": [],
+        "extension_tools": ["image_edit"],
+        "provider": "",
+        "system_prompt": "You edit existing pictures. Call image_edit exactly once: put the file path you were given in 'images', and pass BOTH width and height explicitly - never only one, or the other falls back to a default and silently changes the aspect ratio. Pass 'seed' and 'out' when you were given them. Describe only the change, not the whole picture. Then reply with only the saved file path. Never explain.",
+        "max_steps": 6,
+        "timeout": 1800
       }
     }
   },

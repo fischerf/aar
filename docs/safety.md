@@ -82,7 +82,21 @@ deep audit trails and have reviewed what the agent is likely to run.
 
 ## `allowed_paths` and bash
 
-`allowed_paths` is a hard path boundary for file tools (`read_file`, `write_file`, `edit_file`, `list_directory`). Any access outside the whitelist is **denied**, regardless of approval settings.
+`allowed_paths` is a hard path boundary for any tool that declares `SideEffect.READ` or `SideEffect.WRITE` — the built-in file tools (`read_file`, `write_file`, `edit_file`, `list_directory`), and equally any extension or MCP tool. Access outside the whitelist is **denied**, regardless of approval settings.
+
+### Which arguments are path-checked
+
+The check is schema-driven: the policy walks `spec.input_schema["properties"]` and runs every path-like argument through `denied_paths` / `allowed_paths`. An argument counts as path-like when it is
+
+- **named** `path`, `filepath`, `directory`, `cwd`, or ends in `_path`;
+- **named** `paths`, `filepaths`, `directories`, or ends in `_paths`;
+- **annotated** `{"format": "path"}`, or — for an array — `{"items": {"format": "path"}}`.
+
+List values are checked element by element, so one bad entry among nine good ones denies the call.
+
+**Anything else is invisible to the policy.** A tool that takes `src` or `target_file` and does not annotate it reaches the filesystem unchecked, which is why the annotation matters when you [write a tool](extensions.md#custom-tools). Tools with no `input_schema` at all (some MCP servers) fall back to a legacy lookup of the single `path` key.
+
+The check uses one `is_write` flag for the whole call, derived from the tool's side effects — so a tool declaring both READ and WRITE has *all* of its path arguments evaluated as writes, including ones it only reads.
 
 **Bash is different.** A shell command can access any path; there is no reliable way to inspect what paths an arbitrary command will touch before running it. Aar handles this by mode:
 

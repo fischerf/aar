@@ -67,12 +67,62 @@ section. aar itself never imports the ML stack.
   ```
 
   If that prints only `cpu`, the renderer will run on CPU (minutes per image,
-  quietly). See [Two GPUs, two jobs](#two-gpus-two-jobs) below.
+  quietly) whenever `device` is `"auto"`; an explicit `"cuda:0"` fails at startup
+  instead. `Failed to get device count` there usually means an inherited
+  `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` is hiding the card —
+  `HIP_VISIBLE_DEVICES=-1` set in your *user* environment hides it from everything,
+  and the config keys below are what override it for the server process. See
+  [Two GPUs, two jobs](#two-gpus-two-jobs) below.
 - **`quant: "Q4_K_M"`** drops the pipeline from ~31 GiB to ~22 GiB, which is the
   difference between comfortable and strained on a 24 GB card.
 - **`idle_timeout: 0`** keeps the server alive between renders instead of exiting
   and rebuilding the pipeline. Matters a lot on a slow bus — see
-  [Keeping the model in VRAM](#keeping-the-model-in-vram).
+  [Keeping the model in VRAM](#keeping-the-model-in-vram). The flip side is that a
+  resident server is one you have to stop deliberately; `/qwenimage stop` during a
+  render now says so and escalates to a kill rather than leaving a process on the card.
+- **One server per card.** A render cannot be cancelled, so a stop mid-render waits for
+  it. The server writes a pid file so a `start` in that window refuses instead of
+  stacking a second pipeline onto the same GPU — if you ever see two, neither will
+  finish.
+
+#### The SDNQ alternative — and the package it needs
+
+The config above uses GGUF (`quant: "Q4_K_M"`), which quantizes the transformer
+only and leaves a ~15 GiB bf16 text encoder in the budget. The other route is an
+SDNQ-quantized checkpoint, where *every* component ships pre-quantized — roughly
+11 GiB total for the dynamic 4-bit build, which fits with `offload: "none"`:
+
+```bash
+~/.aar/qwen-image/.venv/Scripts/python.exe -m pip install "sdnq>=0.2.2"
+```
+
+**That package is not optional.** [SDNQ](https://github.com/Disty0/sdnq) weights
+only deserialize once `sdnq` has registered its quant classes with diffusers, so
+the sidecar imports it before `from_pretrained` — and skips it silently when it
+is missing, leaving you with a load error instead of an explanation. Confirm the
+line `sdnq <version> registered` in the log before blaming the checkpoint.
+
+Point aar at a separate config file rather than editing the GGUF one:
+
+```json
+// ~/.aar/qwen-image-sdnq.json
+{
+  "model": "OzzyGT/Qwen_Image_2_1_sdnq_dynamic_4bit",
+  "quant": "none",
+  "offload": "none",
+  "log_file": "~/.aar/qwen-image/server-sdnq.log"
+}
+```
+
+```bash
+AAR_QWEN_IMAGE_CONFIG=~/.aar/qwen-image-sdnq.json aar tui
+```
+
+`quant` stays `"none"` — the weights are already quantized; the field only
+selects a GGUF file. Note that SDNQ's fast matmul path needs `torch.compile` and
+Triton, neither of which is available on Windows + ROCm, so it falls back to
+PyTorch Eager there (it works, just slower than the README's numbers). The
+extension README has the full size and speed comparison.
 
 ### `~/.aar/config.json` — an illustrator sub-agent
 
@@ -88,7 +138,7 @@ model's context.
       "illustrator": {
         "description": "Generates one image from a description and returns the saved file path",
         "tools": [],
-        "extension_tools": ["image_generate", "image_edit"],
+        "extension_tools": ["image_generate"],
         "system_prompt": "You are an image generator. Call image_generate exactly once, passing BOTH width and height explicitly, then reply with only the saved file path. Never explain.",
         "max_steps": 6,
         "timeout": 1800
@@ -105,6 +155,10 @@ model's context.
 - The "BOTH width and height" instruction is not padding. Small local models
   routinely pass only `width` and let `height` fall back to the config default,
   which silently gives you a 512x1024 image when you asked for 512x512.
+- Naming **one** tool is deliberate. A prompt that says "call `image_generate`
+  exactly once" makes the profile unable to edit anyway, so listing `image_edit`
+  here only leaves room for a misfire. Editing wants its own profile — see
+  [B. A dedicated image sub-agent](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#b-a-dedicated-image-sub-agent).
 - `timeout` becomes the tool's `timeout_s`, so a long render is not cut off by
   `tools.command_timeout`.
 
@@ -125,6 +179,27 @@ aar tui
   horizontal row of 4 evenly spaced frames of a small green dinosaur running,
   side view facing right, bold dark outlines, flat colours, no background'
 ```
+
+That phrasing only works if your chat model reliably turns named values into tool
+arguments. Smaller local models drop the optional ones and you get a
+config-default-sized render under a timestamp name instead — which quietly breaks the
+per-pose workflow below, where every frame has to share one seed.
+
+When that happens, render from the slash-command instead. It takes the same values as
+flags and calls the sidecar directly, so nothing depends on the model parsing a
+sentence:
+
+```
+/qwenimage generate --size 1024x512 --steps 30 --seed 2024 --transparent --out sprites.png
+  pixel-art sprite sheet, one horizontal row of 4 evenly spaced frames of a small green
+  dinosaur running, side view facing right, bold dark outlines, flat colours, no background
+```
+
+The trade is that the command only renders — it will not go on to write the game code
+around the result. For a long agent-driven session, move the values out of the chat turn
+instead: `width` / `height` / `steps` into a per-job config selected with
+`AAR_QWEN_IMAGE_CONFIG`, and the call shape into the illustrator's `system_prompt`. See
+[When the model drops your parameters](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#c-when-the-model-drops-your-parameters).
 
 The first render of a session also starts the sidecar (~45 s to load a cached
 Q4_K_M pipeline; several minutes the first time ever, while ~22 GiB downloads).
@@ -242,6 +317,46 @@ Linux, `Environment=` lines in the systemd unit.
 | `HIP_VISIBLE_DEVICES` | `-1` | Hide the AMD card, so Ollama leaves it to the renderer |
 | `OLLAMA_FLASH_ATTENTION` | `1` | Required for KV-cache quantization |
 | `OLLAMA_KV_CACHE_TYPE` | `q8_0` | Halves KV-cache VRAM — see the table below |
+
+#### When the chat model does not fit the small card
+
+The table above gives the renderer the big GPU outright, which only works if
+your chat model fits the other one. When it does not — a 16 GiB model and a
+6 GiB card — the model has to live on the *same* card as the renderer, and the
+two have to take turns. Device visibility is a **process** property, so one
+Ollama server cannot place model A on the NVIDIA and model B on the AMD; the
+way to split them is two servers on two ports, with aar choosing between them
+per provider:
+
+| Server | Port | Devices | Holds |
+|---|---|---|---|
+| nvidia | 11434 | `CUDA_VISIBLE_DEVICES=0`, `HIP_VISIBLE_DEVICES=-1` | the small model |
+| radeon | 11435 | `CUDA_VISIBLE_DEVICES=-1`, `HIP_VISIBLE_DEVICES=0` | the big model |
+
+```json
+{
+  "providers": {
+    "small": { "base_url": "http://localhost:11434" },
+    "big":   { "base_url": "http://localhost:11435" }
+  }
+}
+```
+
+Then point every **image sub-agent** at the small model: a profile that inherits
+the big one keeps its weights pinned on the card for the whole render, which is
+the thing you were trying to avoid.
+
+The renderer frees the card itself — set
+[`evict_ollama`](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#sharing-one-gpu-with-ollama)
+to the big server's URL and it unloads whatever is loaded there before it
+renders. Measured on a 7900 XTX: a 16.09 GiB `qwen3.8` released in **2.6s**.
+Ollama reloads it on the next prompt, so the only cost is that reload (~108s for
+16 GiB from cold on this machine).
+
+One thing to disable first: on Windows, `Ollama.lnk` in
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` launches the tray
+app at login, which starts a *third* server with your global environment and
+grabs whichever card it likes. Remove it and start the two instances yourself.
 
 Two traps, both of which cost real debugging time:
 
@@ -375,80 +490,26 @@ When it expires the process exits and the next render pays a full rebuild:
 skips the load entirely. Measured load cost avoided: **~140 s**. This is safe with
 any `offload` mode and is the first thing to change on a slow-bus machine.
 
-**Cost 2 — the per-render transfer.** Controlled by `offload`. `"none"` keeps
-everything resident on the card, which removes the transfer completely… if it
-fits. Measured on a 24 GB card with Q4_K_M, 1024x512, 30 steps:
+**Cost 2 — the per-render transfer.** Controlled by `offload` and
+`resident_components`. This is extension behaviour rather than workflow, so the
+measurements, the tradeoff table and the SDNQ option live in one place:
+[aar-ext-qwen-image — Keeping the model in VRAM](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#keeping-the-model-in-vram).
 
-| `offload` | load | render | idle VRAM |
-|---|---|---|---|
-| `model` | 44 s | 153 s | ~0 GB |
-| `none` | 130 s | **87 s** | **21.4 GB** |
+The short version for a slow-bus / eGPU setup:
 
-**But `offload: "none"` did not prove reliable at 21.4 GB of 24.** The same
-configuration that rendered 1024x512 in 87 s later took **336 s per step** for the
-same size on a fresh server, and 1024x1024 took **286 s per step** — both are the
-driver silently spilling to host memory over the same slow bus. There is no error;
-the render just crawls, and with ~2.5 GB of headroom the outcome flips on
-fragmentation you cannot see.
-
-`--attention-slicing` does not rescue it (tested), and this pipeline has no
-`enable_vae_tiling` / `enable_vae_slicing` to fall back on — the server warns and
-carries on if you ask for them.
-
-**Recommendation for a slow-bus / eGPU setup:**
-
-1. Set `idle_timeout: 0`. Unambiguous win, no downside beyond a resident process.
-2. Keep `offload: "model"`. Slower per render, but predictable at every size.
-3. Only try `offload: "none"` if you pin sizes to 1024x512 or smaller **and** you
-   benchmark it more than once, on a freshly started server.
-
-#### Per-component placement (`resident_components`)
-
-Components are not used equally. With Q4_K_M the transformer is ~4.5 GB and runs
-for every denoising step; the **unquantized text encoder is ~15 GB** and runs once
-per render, then sits idle. So it is worth being able to say which components stay
-on the card and which travel:
-
-```json
-{ "offload": "model", "resident_components": ["transformer", "vae"] }
-```
-
-Named components are pinned to the GPU; everything else keeps the usual offload
-hooks. `/health` reports `resident` (what you asked for) and `resident_applied`
-(what the pipeline actually had) — names differ between pipeline classes, and an
-unknown one is dropped with a warning rather than failing the start.
-
-This works: with `["transformer", "vae"]` the card holds a steady 5.03 GB between
-renders instead of 0.04 GB.
-
-**On a 24 GB card it still does not pay off.** Measured, 1024x512, 30 steps,
-Q4_K_M, same machine:
-
-| configuration | idle VRAM | render |
-|---|---|---|
-| `offload: "model"`, nothing pinned | 0.04 GB | **153 s** |
-| `resident: ["transformer", "vae"]` | 5.03 GB | 209 s / 199 s |
-| `resident: ["text_encoder"]` | 16.38 GB | 202 s / 206 s |
-| `offload: "none"` (everything) | 21.4 GB | 87 s, then 336 s/step — unstable |
-
-Every pinned configuration is *slower*, and the reason is the same one that makes
-`offload: "none"` unstable: whatever stays resident is headroom the activations no
-longer have, and the spill goes over the same slow bus. Pinning the transformer
-also collapses `model_cpu_offload_seq` to a single entry, and diffusers evicts a
-module when the *next* one in the chain runs — with nothing after it, the 15 GB
-text encoder stays on the card for the whole denoise.
-
-So on a 24 GB card the plain `offload: "model"` eviction, which keeps peak VRAM
-lowest, wins. `resident_components` is worth reaching for when the card has real
-headroom — roughly, when the pipeline's resident footprint is under about half the
-card.
-
-**The remaining lever is the text encoder's size**, not its placement. Quantizing
-it from bf16 (~15 GB) to 4-bit (~4 GB) would put the whole pipeline near 10 GB and
-leave ~14 GB for activations, at which point `offload: "none"` becomes comfortable
-and the bus stops mattering. That needs a quantization backend the server does not
-wire up yet (`bitsandbytes` / `optimum-quanto`), and support for those on
-ROCm + Windows is patchy.
+1. **`idle_timeout: 0`** — unambiguous win, do it first.
+2. **Keep `offload: "model"`.** On a 24 GB card it is the fastest *measured*
+   option: everything you pin is headroom the activations lose, and the spill
+   crosses the same slow bus. `offload: "none"` was faster once and then four
+   times slower on an identical rerun.
+3. **A smaller pipeline beats a cleverer placement.** An SDNQ int4 checkpoint
+   quantizes the text encoder too — 11.37 GB against 21.4 — so it fits resident,
+   and it renders 1024x512 in **25.6 s against 153 s** with the size cliff gone.
+   The catch is that int4 degrades the alpha channel (5.2% fully transparent
+   against 25.1%), so for *sprite sheets* stay on bf16 + GGUF and reach for int4
+   on opaque work and large canvases. Numbers, the alpha comparison and the
+   side-by-side setup:
+   [SDNQ](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#sdnq-a-fully-quantized-pipeline).
 
 #### Activation-memory options
 
@@ -481,7 +542,7 @@ time, or you get a confusing cancellation minutes in:
 
 ## See also
 
-- [aar-ext-qwen-image README](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md) — tools, sizes, GGUF quantization, AMD/ROCm setup,
+- [aar-ext-qwen-image README](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md) — tools, sizes, GGUF and SDNQ quantization, AMD/ROCm setup,
   [Keeping the model in VRAM](../aar-extensions-registry/packages/aar-ext-qwen-image/README.md#keeping-the-model-in-vram)
 - [Configuration — Sub-agents](configuration.md#sub-agents-spawn_agent) — the full `subagents` key reference
 - [Tools — spawn_agent](tools.md#spawn_agent) — parameters and safety model

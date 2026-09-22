@@ -229,6 +229,28 @@ def register(api: ExtensionAPI) -> None:
         return f"{count} words"
 ```
 
+### Path arguments must be declared as such
+
+If a tool touches the filesystem, the safety policy only applies `allowed_paths` /
+`denied_paths` to arguments it can *recognise* as paths — by name (`path`, `*_path`,
+`paths`, `*_paths`, `directory`, `cwd`, …) or by annotation. A differently-named
+argument silently bypasses the whitelist, so annotate it:
+
+```python
+input_schema={
+    "type": "object",
+    "properties": {
+        # a single path under a non-obvious name
+        "src": {"type": "string", "format": "path"},
+        # an array of paths — annotate the *items*
+        "images": {"type": "array", "items": {"type": "string", "format": "path"}},
+    },
+}
+```
+
+The policy only looks at a tool's paths when it declares `SideEffect.READ` or
+`SideEffect.WRITE`; see [Which arguments are path-checked](safety.md#which-arguments-are-path-checked).
+
 For tools with side effects or that need approval:
 
 ```python

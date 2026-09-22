@@ -495,6 +495,79 @@ class TestS1SchemaDrivenPathChecks:
         policy = SafetyPolicy()
         assert policy.check_tool(spec, {"filepath": "/etc/shadow"}) == PolicyDecision.DENY
 
+    def _list_spec(self, name: str = "images", annotate: bool = True) -> ToolSpec:
+        items = {"type": "string"}
+        if annotate:
+            items["format"] = "path"
+        return ToolSpec(
+            name="image_edit",
+            description="edit reference images",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    name: {"type": "array", "items": items},
+                },
+                "required": ["prompt", name],
+            },
+            side_effects=[SideEffect.READ, SideEffect.WRITE],
+        )
+
+    def test_annotated_list_arg_outside_allowed_paths_denied(self):
+        """S1b: an array of paths is checked element by element. Pre-S1b the
+        ``isinstance(val, str)`` guard skipped list values entirely, so a tool
+        taking ``images: [...]`` bypassed ``allowed_paths`` altogether.
+        """
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        spec = self._list_spec()
+        assert policy.check_tool(spec, {"prompt": "x", "images": ["/safe/a.png"]}) != (
+            PolicyDecision.DENY
+        )
+        assert (
+            policy.check_tool(spec, {"prompt": "x", "images": ["/unsafe/a.png"]})
+            == PolicyDecision.DENY
+        )
+
+    def test_every_element_of_a_list_arg_is_checked(self):
+        """A single bad path among good ones must still deny."""
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        d = policy.check_tool(
+            self._list_spec(),
+            {"prompt": "x", "images": ["/safe/a.png", "/safe/b.png", "/unsafe/c.png"]},
+        )
+        assert d == PolicyDecision.DENY
+
+    def test_list_arg_honours_denied_paths(self):
+        policy = SafetyPolicy()
+        d = policy.check_tool(self._list_spec(), {"prompt": "x", "images": ["/etc/shadow"]})
+        assert d == PolicyDecision.DENY
+
+    def test_plural_named_list_arg_checked_without_annotation(self):
+        """``paths`` / ``*_paths`` are recognised by name, like ``*_path``."""
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        for name in ("paths", "filepaths", "directories", "image_paths"):
+            spec = self._list_spec(name=name, annotate=False)
+            assert (
+                policy.check_tool(spec, {"prompt": "x", name: ["/unsafe/a.png"]})
+                == PolicyDecision.DENY
+            ), name
+
+    def test_unannotated_list_arg_is_still_ignored(self):
+        """Selectivity is preserved: an array that is neither named nor
+        annotated as paths must not be policy-checked.
+        """
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        spec = self._list_spec(name="tags", annotate=False)
+        d = policy.check_tool(spec, {"prompt": "x", "tags": ["/unsafe/a.png"]})
+        assert d != PolicyDecision.DENY
+
+    def test_list_arg_tolerates_non_string_elements(self):
+        """A malformed argument must not raise out of the policy engine."""
+        policy = SafetyPolicy(PolicyConfig(allowed_paths=["/safe/**"]))
+        spec = self._list_spec()
+        d = policy.check_tool(spec, {"prompt": "x", "images": [None, 7, "", {"a": 1}]})
+        assert d != PolicyDecision.DENY
+
     def test_non_path_string_args_ignored(self):
         """A free-form ``content`` arg that happens to look path-like must
         NOT be policy-checked. Pre-S1 only ``path`` was checked anyway; S1

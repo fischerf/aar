@@ -252,7 +252,9 @@ The calling model supplies only a profile name and a task — never tools, provi
 paths. The child inherits the parent's entire `safety` block and its approval callback,
 its built-ins are intersected with the parent's (a sub-agent is never *more* capable
 than the agent that spawned it), and `max_depth` decrements at every level, so at zero
-the tool is not registered at all. The child starts with an empty context, so the task
+the tool is not registered at all. Extension tools are the exception to that
+intersection: an installed extension registers into every sub-agent, so a profile that
+wants a narrow surface must name what it keeps in `extension_tools`. The child starts with an empty context, so the task
 must be self-contained; its transcript is saved to `session_dir` and the parent's gets a
 `SubAgentEvent` with the profile, duration and child session id.
 
