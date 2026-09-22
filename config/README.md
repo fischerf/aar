@@ -48,6 +48,21 @@ aar chat --provider qwen3.5
 Set the matching API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `GEMINI_API_KEY`); Ollama entries need only a running local server.
 
+### Sub-agents
+
+`samples/config.json` ships two `subagents` profiles with `"enabled": false` — a
+read-only `researcher` and an `illustrator` for the qwen-image extension. Flip
+`subagents.enabled` to `true` and the agent gains a `spawn_agent` tool that runs one
+of those profiles as a nested agent and returns only its final message:
+
+```json
+{ "subagents": { "enabled": true } }
+```
+
+The calling model picks a profile name and writes the task; tools, provider, sandbox
+and paths all come from the profile and from the parent's own config. See
+[docs/configuration.md](../docs/configuration.md#sub-agents-spawn_agent).
+
 ### Distro profiles
 
 Point `safety.sandbox.wsl.profile` at one of the `distros/*.json` files and it

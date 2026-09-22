@@ -1,9 +1,10 @@
 # Built-in Tools Reference
 
-Aar ships with seven core built-in tools, plus `acp_terminal` which is
+Aar ships with seven core built-in tools, plus `spawn_agent` (gated by
+`subagents.enabled` rather than `enabled_builtins`) and `acp_terminal`, which is
 registered only by the ACP transport (`agent.transports.acp.stdio`).
-All are opt-in via `tools.enabled_builtins` in `config.json`. Tools are
-grouped by their primary purpose.
+The seven core tools are opt-in via `tools.enabled_builtins` in `config.json`.
+Tools are grouped by their primary purpose.
 
 ## Filesystem tools
 
@@ -121,6 +122,41 @@ Applies the same directory-skipping rules as `grep`.
 
 ---
 
+## Sub-agent tool
+
+Source: `agent/tools/builtin/subagent.py`
+
+### `spawn_agent`
+
+Run a nested agent to completion and return its final message. Registered only when
+`subagents.enabled` is true, at least one profile is declared, and the depth budget is
+not exhausted — a leaf agent has no `spawn_agent` to call, which is the recursion guard.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `agent_name` | string (enum) | yes | — | Which configured profile to run; the enum is built from `subagents.agents` |
+| `task` | string | yes | — | The complete task — the sub-agent cannot see the parent conversation |
+
+**Side effects:** EXECUTE
+
+**Timeout:** the profile's `timeout` is set as the tool's `timeout_s`, so a long child
+run is not clipped by `tools.command_timeout`.
+
+Everything else about the child — tools, provider, system prompt, step budget — comes
+from the profile in `config.json`, never from the model. The child inherits the parent's
+`safety` block and approval callback verbatim, and its built-ins are intersected with
+the parent's, so a sub-agent is never more capable than the agent that spawned it.
+
+The tool returns the child's final message plus a one-line footer with the elapsed time
+and the child's session id. Errors (unknown profile, timeout, child failure) come back
+as error strings rather than exceptions, so the parent can recover and try something
+else.
+
+See [Configuration — Sub-agents](configuration.md#sub-agents-spawn_agent) for the key
+reference and worked profiles.
+
+---
+
 ## Tool selection guide
 
 For efficient codebase navigation, prefer specialised tools over `bash`:
@@ -133,6 +169,7 @@ For efficient codebase navigation, prefer specialised tools over `bash`:
 | Install a package | `bash` | Needs shell execution |
 | Run tests | `bash` | Needs shell execution |
 | View directory structure | `list_directory` | Cleaner than `ls` output |
+| Survey a large unfamiliar area of the codebase | `spawn_agent` | Keeps dozens of intermediate reads out of the main context; you get back only the conclusion |
 
 ## Tool-aware system prompt
 
@@ -142,6 +179,12 @@ Every built-in tool carries two optional metadata fields on its `ToolSpec`:
 |-------|------|---------|
 | `prompt_snippet` | `str` | One-line summary shown in the system prompt's "Available tools" section |
 | `prompt_guidelines` | `list[str]` | Conditional guidelines injected when this tool is active |
+
+A third field, `timeout_s`, overrides the executor's shared `tools.command_timeout` for
+one tool. Set it on tools whose work legitimately runs for minutes — a model render, a
+sub-agent — instead of raising the cap for every tool in the process. `None` (the
+default) means "use `command_timeout`"; `command_timeout` itself may be `0` to disable
+the outer guard entirely.
 
 When any registered tool has a non-empty `prompt_snippet`, the system prompt
 automatically includes an **Available tools** section between the base runtime
@@ -211,6 +254,24 @@ In `config.json`:
 
 To disable a tool, remove it from `enabled_builtins`. For example, to create a
 read-only agent, keep only `["read_file", "list_directory", "grep", "find_files"]`.
+
+`spawn_agent` is not listed there — it is gated by its own `subagents` block, because
+what it can do is defined by that config rather than by the tool itself:
+
+```json
+{
+  "subagents": {
+    "enabled": true,
+    "agents": {
+      "researcher": {
+        "description": "Reads the codebase and answers a question about it",
+        "tools": ["read_file", "grep", "find_files"],
+        "max_steps": 20
+      }
+    }
+  }
+}
+```
 
 ## Skipped directories
 

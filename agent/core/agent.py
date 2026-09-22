@@ -310,9 +310,19 @@ class Agent:
                 logger.info("Extension active: %s (%s)", info.name, info.source)
 
         # Register extension tools
+        before = set(self.registry.names())
         count = mgr.register_tools(self.registry)
         if count:
             logger.info("Registered %d extension tool(s)", count)
+
+        # Prune to the configured allowlist. Only tools this call added are
+        # considered, so built-ins and MCP tools are never caught by it.
+        allowed = self.config.tools.enabled_extension_tools
+        if allowed is not None:
+            for name in sorted(set(self.registry.names()) - before):
+                if name not in allowed:
+                    self.registry.unregister(name)
+                    logger.debug("Extension tool %r not in enabled_extension_tools", name)
 
         # Rebuild prompt with updated tool set (includes extension tools)
         self._rebuild_system_prompt()

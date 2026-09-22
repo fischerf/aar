@@ -91,6 +91,19 @@ def test_child_tools_are_intersected_with_the_parent():
     assert child.tools.enabled_builtins == ["read_file"]
 
 
+def test_child_extension_tools_default_to_inheriting_everything():
+    parent = _config()
+    child = build_child_config(parent, parent.subagents.agents["researcher"], 0)
+    assert child.tools.enabled_extension_tools is None
+
+
+def test_child_extension_allowlist_is_passed_down():
+    parent = _config()
+    parent.subagents.agents["researcher"].extension_tools = ["image_generate"]
+    child = build_child_config(parent, parent.subagents.agents["researcher"], 0)
+    assert child.tools.enabled_extension_tools == ["image_generate"]
+
+
 def test_child_depth_budget_decrements():
     parent = _config(max_depth=2)
     child = build_child_config(parent, parent.subagents.agents["researcher"], 1)

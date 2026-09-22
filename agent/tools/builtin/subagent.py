@@ -57,6 +57,10 @@ def build_child_config(
     allowed = set(parent.tools.enabled_builtins)
     child.tools.enabled_builtins = [t for t in profile.tools if t in allowed]
 
+    # Extensions register into every agent in the process, so a profile that
+    # wants one job needs to say which extension tools it keeps.
+    child.tools.enabled_extension_tools = profile.extension_tools
+
     child.max_steps = profile.max_steps
     child.timeout = float(profile.timeout)
 

@@ -490,6 +490,8 @@ Off by default. When `subagents.enabled` is true and at least one profile is dec
   then write the game around whatever file it reports.
 ```
 
+For a worked end-to-end example of that pattern — transparent sprite sheet, then a game around it — see [the sprite sheet workflow](sprite-sheet-workflow.md).
+
 ## Configurable system prompt
 
 By default, the system prompt is assembled automatically from up to five layers (all optional except Base):

@@ -369,6 +369,27 @@
     "truncate_keep_recent": 4,
     "truncate_max_chars": 300
   },
+  "subagents": {
+    "enabled": false,
+    "max_depth": 1,
+    "agents": {
+      "researcher": {
+        "description": "Reads the codebase and answers a question about it, without touching anything",
+        "tools": ["read_file", "list_directory", "grep", "find_files"],
+        "provider": "qwen3.5",
+        "system_prompt": "You investigate a codebase and report what you found. Read only — never write, never run commands. Answer in at most 15 lines, citing file paths and line numbers.",
+        "max_steps": 20,
+        "timeout": 600
+      },
+      "illustrator": {
+        "description": "Generates one image from a description and returns the saved file path (needs the qwen-image extension)",
+        "tools": [],
+        "system_prompt": "You are an image generator. Call image_generate exactly once with the requested prompt, then reply with only the saved file path. Never explain.",
+        "max_steps": 6,
+        "timeout": 900
+      }
+    }
+  },
   "trust_project_extensions": false,
   "skills_dirs": [],
   "skills_enabled": true,

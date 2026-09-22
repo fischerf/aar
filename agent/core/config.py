@@ -210,6 +210,11 @@ class ToolConfig(BaseModel):
             "find_files",
         ]
     )
+    # Allowlist for tools contributed by extensions. ``None`` (the default)
+    # keeps every extension tool; a list keeps only those names; ``[]`` keeps
+    # none. ``enabled_builtins`` does not cover these — an installed extension
+    # registers into every agent in the process, sub-agents included.
+    enabled_extension_tools: list[str] | None = None
     # Default timeout (seconds) for bash commands when the model omits the timeout argument.
     # Set higher for long-running tasks (package installs, builds, docker pulls, etc.).
     bash_default_timeout: int = 120
@@ -452,6 +457,10 @@ class SubAgentProfile(BaseModel):
     # The child's ``enabled_builtins``. Intersected with the parent's, so a
     # child is never more capable than the agent that spawned it.
     tools: list[str] = Field(default_factory=list)
+    # Extension tools the child may keep, as ``ToolConfig.enabled_extension_tools``.
+    # ``None`` inherits every installed extension's tools, which is rarely what a
+    # single-purpose profile wants.
+    extension_tools: list[str] | None = None
     # Replaces the child's assembled system prompt (see ``system_prompt_override``).
     system_prompt: str = ""
     max_steps: int = 20

@@ -55,6 +55,7 @@ A lean, provider-agnostic agent framework with a thin core loop, typed event mod
 - **Observable** — every provider call and tool execution is timed; sessions carry a `trace_id`
 - **Cost-aware** — live token and cost tracking with configurable budget limits and visual warnings
 - **Cancellable** — cooperative and hard cancellation built in
+- **Sub-agents** — opt-in `spawn_agent` tool runs a nested agent from a named config profile; it inherits the parent's sandbox and can never be more capable than its parent
 - **Extensible** — pluggable extension API with three-tier auto-discovery, event hooks, custom tools, and slash-commands
 
 ### Operating modes
@@ -220,6 +221,46 @@ aar acp --http       # HTTP/SSE — for remote or programmatic ACP clients
 
 See [`docs/acp.md`](docs/acp.md) for the full setup guide, HTTP endpoint reference, and programmatic embedding.
 
+## Sub-agents
+
+Off by default. Declare named profiles in `config.json` and the agent gains a `spawn_agent`
+tool that runs one of them as a **nested agent**, returning only its final message:
+
+```json
+{
+  "subagents": {
+    "enabled": true,
+    "max_depth": 1,
+    "agents": {
+      "researcher": {
+        "description": "Reads the codebase and answers a question about it",
+        "tools": ["read_file", "grep", "find_files"],
+        "provider": "qwen3.5",
+        "max_steps": 20
+      }
+    }
+  }
+}
+```
+
+```
+> Use spawn_agent with the researcher to find where sessions are persisted,
+  then add a retention setting there.
+```
+
+The calling model supplies only a profile name and a task — never tools, provider or
+paths. The child inherits the parent's entire `safety` block and its approval callback,
+its built-ins are intersected with the parent's (a sub-agent is never *more* capable
+than the agent that spawned it), and `max_depth` decrements at every level, so at zero
+the tool is not registered at all. The child starts with an empty context, so the task
+must be self-contained; its transcript is saved to `session_dir` and the parent's gets a
+`SubAgentEvent` with the profile, duration and child session id.
+
+Use it to keep bulky, self-contained work — a codebase survey, an image render, a long
+log trawl — out of the main conversation's context. See
+[`docs/configuration.md`](docs/configuration.md#sub-agents-spawn_agent) for the full key
+reference, and `config/samples/config.json` for ready profiles.
+
 ## Extensions
 
 Aar has a pluggable extension system. Extensions are Python modules that expose a `register(api)` entry point and can hook into agent lifecycle events, register custom tools, add slash-commands, and append to the system prompt.
@@ -265,6 +306,7 @@ agent/
 │   └── compaction/ # LLM-based context compaction (opt-in via CompactionConfig)
 ├── providers/      # LLM API adapters (Anthropic, OpenAI, Ollama, Gemini, Generic) + typed errors
 ├── tools/          # Tool registry, schema, execution engine, built-in tools — each tool carries prompt metadata
+│   └── builtin/    # Filesystem, shell, search, and the opt-in spawn_agent sub-agent tool
 ├── safety/         # Policy engine, permission manager, sandboxes
 ├── memory/         # Session persistence (JSONL)
 ├── extensions/     # Extension API, loader, manager, MCP bridge, observability
@@ -334,8 +376,9 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
-| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash |
+| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash, spawn_agent |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
+| [Sprite sheet workflow](docs/sprite-sheet-workflow.md) | Recipe — generate a transparent sprite sheet with the qwen-image sub-agent and build a game around it; two-GPU pinning, timeouts |
 
 ---
 
