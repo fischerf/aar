@@ -2,17 +2,29 @@
 
 The widget knows nothing about any particular extension.  It renders the
 ``UINode`` tree the panel's ``snapshot()`` returns, shows the actions that
-apply to the highlighted node in a hint strip, and dispatches key presses to
-the matching :class:`~agent.extensions.api.UIAction` — confirming first when
-the action is destructive.
+apply to the highlighted node, and dispatches key presses (or, in the zoomed
+window, button clicks) to the matching :class:`~agent.extensions.api.UIAction`
+— confirming first when the action is destructive.
+
+Two modes:
+
+* ``"sidebar"`` — the narrow, always-on column left of the chat body.  Labels
+  only, a one-line status in the title, ``z`` (or a click on the title) asks
+  the app to zoom (``ExtensionPanel.Zoom``).
+* ``"window"`` — hosted by :class:`PanelWindow`, a near-full-screen modal:
+  labels plus ``UINode.detail``, a detail pane fed by
+  :func:`~agent.extensions.api.run_ui_describe` for the highlighted node, and
+  a clickable button per applicable action.
 
 Key handling is deliberately local: action keys (``u``, ``b``, ``D`` …) only
 fire while the panel has focus, so they can never collide with the input
-widget.  ``escape`` asks the app to hide the panel (``ExtensionPanel.Close``).
+widget.  ``escape`` posts ``ExtensionPanel.Close`` (the app hides the sidebar,
+the window dismisses itself).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -23,10 +35,10 @@ try:
     from textual import events, work
     from textual.app import ComposeResult
     from textual.binding import Binding
-    from textual.containers import Vertical
+    from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
     from textual.screen import ModalScreen
-    from textual.widgets import Input, Static, Tree
+    from textual.widgets import Button, Input, Static, Tree
     from textual.widgets.tree import TreeNode
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -40,21 +52,21 @@ from agent.extensions.api import (
     UINode,
     UIPanel,
     run_ui_action,
+    run_ui_describe,
     run_ui_snapshot,
 )
+from agent.transports.tui_utils.ui_tree import DEFAULT_STYLE_MAP, node_text
 
 logger = logging.getLogger(__name__)
 
-# ``UINode.style`` hints → Rich styles.  Kept tiny on purpose; a theme can
-# override via ``ExtensionPanel(style_map=...)``.
-_DEFAULT_STYLE_MAP: dict[str, str] = {
-    "active": "bold",
-    "dim": "dim",
-    "warn": "bold yellow",
-    "": "",
-}
+# ``UINode.style`` hints → Rich styles; override via ``ExtensionPanel(style_map=...)``.
+_DEFAULT_STYLE_MAP: dict[str, str] = dict(DEFAULT_STYLE_MAP)
 
 BUSY_HINT = "⏳ agent running — cancel first (ctrl+x)"
+
+# Panel-local key that zooms the sidebar into a PanelWindow (and back).  An
+# extension action bound to the same key wins.
+ZOOM_KEY = "z"
 
 
 class ConfirmModal(ModalScreen[dict[str, Any] | None]):
@@ -169,8 +181,19 @@ class ConfirmModal(ModalScreen[dict[str, Any] | None]):
             self.query_one("#confirm-force", Static).update(self._force_line())
 
 
+class PanelTitle(Static):
+    """Title row; a click asks the owning panel to zoom (sidebar) or close (window)."""
+
+    class Clicked(Message):
+        pass
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Clicked())
+
+
 class ExtensionPanel(Vertical):
-    """Tree + hint strip for one extension :class:`UIPanel`.
+    """Tree + actions for one extension :class:`UIPanel`.
 
     Collaborators are injected as callables so the widget stays independent of
     :class:`AarFixedApp`:
@@ -179,31 +202,67 @@ class ExtensionPanel(Vertical):
       ``ExtensionManager.update_session`` first, exactly like slash commands).
     * ``write_system(text)`` — async; prints a line into the chat body.
     * ``is_busy()`` — ``True`` while the agent worker is running.
+
+    ``mode`` is ``"sidebar"`` (compact column) or ``"window"`` (zoomed; see
+    the module docstring).
     """
 
     DEFAULT_CSS = """
     ExtensionPanel {
         width: 100%;
         height: 1fr;
-        border-top: solid #2a2a2a;
     }
-    ExtensionPanel > Static.title {
+    ExtensionPanel > PanelTitle {
         height: 1;
         padding: 0 1;
         text-style: bold;
+        background: $boost;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
-    ExtensionPanel > Tree {
+    ExtensionPanel > PanelTitle:hover {
+        background: $accent 30%;
+    }
+    ExtensionPanel Tree {
         height: 1fr;
+        scrollbar-size-vertical: 1;
     }
     ExtensionPanel > Static.hints {
-        height: 2;
+        height: auto;
+        max-height: 3;
         padding: 0 1;
-        color: #777777;
+        color: $text-muted;
+    }
+    ExtensionPanel #panel-main {
+        height: 1fr;
+    }
+    ExtensionPanel #panel-main > Tree {
+        width: 1fr;
+        min-width: 30;
+    }
+    ExtensionPanel #panel-detail-scroll {
+        width: 45%;
+        border-left: solid $primary-background;
+        padding: 0 1;
+    }
+    ExtensionPanel #panel-actions {
+        height: auto;
+        padding: 0 1;
+    }
+    ExtensionPanel #panel-actions > Button {
+        margin-right: 1;
     }
     """
 
     class Close(Message):
         """Posted when the user presses ``escape`` inside the panel."""
+
+        def __init__(self, panel_widget: ExtensionPanel) -> None:
+            super().__init__()
+            self.panel_widget = panel_widget
+
+    class Zoom(Message):
+        """Posted by a sidebar panel when the user asks for the big window."""
 
         def __init__(self, panel_widget: ExtensionPanel) -> None:
             super().__init__()
@@ -229,6 +288,7 @@ class ExtensionPanel(Vertical):
         write_system: Callable[[str], Any],
         is_busy: Callable[[], bool] | None = None,
         style_map: dict[str, str] | None = None,
+        mode: str = "sidebar",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -237,12 +297,22 @@ class ExtensionPanel(Vertical):
         self._write_system = write_system
         self._is_busy = is_busy or (lambda: False)
         self._style_map = {**_DEFAULT_STYLE_MAP, **(style_map or {})}
+        self._mode = mode
+        self.add_class(f"-{mode}")
         self._tree: Tree[UINode] = Tree(panel.title, id=f"panel-tree-{panel.name}")
         self._tree.show_root = False
-        self._tree.guide_depth = 3
+        self._tree.guide_depth = 2 if mode == "sidebar" else 3
+        self._title = PanelTitle(self._title_text(""), classes="title")
         self._hints = Static("", classes="hints")
+        self._detail = Static("", id="panel-detail")
+        self._actions_bar = Horizontal(id="panel-actions")
         self._root: UINode | None = None
         self._last_error: str = ""
+        self._status: str = ""
+        self._button_sig: tuple[Any, ...] = ()
+        # Highlight events and an action worker's refresh can both rebuild
+        # the buttons; interleaved remove/mount would collide on widget ids.
+        self._buttons_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Composition
@@ -253,17 +323,51 @@ class ExtensionPanel(Vertical):
         return self._panel
 
     @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
     def root(self) -> UINode | None:
         """The most recent snapshot root (``None`` before the first refresh)."""
         return self._root
 
+    @property
+    def status(self) -> str:
+        return self._status
+
     def compose(self) -> ComposeResult:
-        yield Static(self._panel.title, classes="title")
-        yield self._tree
+        yield self._title
+        if self._mode == "window":
+            with Horizontal(id="panel-main"):
+                yield self._tree
+                with VerticalScroll(id="panel-detail-scroll"):
+                    yield self._detail
+            yield self._actions_bar
+        else:
+            yield self._tree
         yield self._hints
 
     def focus_tree(self) -> None:
         self._tree.focus()
+
+    def _title_text(self, status: str) -> Text:
+        title = self._panel.title
+        # Statuses often repeat the title's icon ("⎇ Shadow" / "⎇ shadow · 4 cp").
+        icon = title.split(maxsplit=1)[0] if title else ""
+        if icon and status.startswith(icon + " "):
+            status = status[len(icon) + 1 :]
+        text = Text()
+        text.append(title, style="bold")
+        if status:
+            text.append(" · ", style="dim")
+            text.append(status)
+        hint = "  ⊞" if self._mode == "sidebar" else "  ✕ esc"
+        text.append(hint, style="dim")
+        return text
+
+    def set_status(self, status: str) -> None:
+        self._status = status
+        self._title.update(self._title_text(status))
 
     # ------------------------------------------------------------------
     # Data
@@ -275,8 +379,9 @@ class ExtensionPanel(Vertical):
         Expansion state and the cursor are keyed on ``UINode.id`` so a refresh
         while the user is navigating doesn't jump.
         """
+        ctx = self._ctx_getter()
         try:
-            root = await run_ui_snapshot(self._panel, self._ctx_getter())
+            root = await run_ui_snapshot(self._panel, ctx)
             self._last_error = ""
         except Exception as exc:
             logger.warning("panel %r snapshot failed: %s", self._panel.name, exc)
@@ -284,7 +389,11 @@ class ExtensionPanel(Vertical):
             root = UINode("root", f"✗ {exc}", "info", style="warn")
         self._rebuild(root)
         self._panel.changed.clear()
+        self.set_status(self._panel.status_text(ctx))
         self._update_hints()
+        await self._update_actions_bar()
+        if self._mode == "window":
+            self._load_detail(self.selected_node())
 
     def _rebuild(self, root: UINode) -> None:
         expanded, cursor_id = self._collect_state()
@@ -306,7 +415,7 @@ class ExtensionPanel(Vertical):
             self._tree.call_after_refresh(self._tree.move_cursor, target)
 
     def _add_node(self, parent: TreeNode[UINode], node: UINode, expanded: dict[str, bool]) -> None:
-        label = Text(node.label, style=self._style_map.get(node.style, ""))
+        label = node_text(node, self._style_map, with_detail=self._mode == "window")
         if node.children:
             tn = parent.add(label, data=node, expand=expanded.get(node.id, node.expanded))
             for child in node.children:
@@ -341,33 +450,111 @@ class ExtensionPanel(Vertical):
         cursor = self._tree.cursor_node
         return cursor.data if cursor is not None else None
 
+    def select_node(self, node_id: str) -> bool:
+        """Move the cursor to the node with *node_id* (used to hand the sidebar
+        selection over to the zoomed window).  Returns ``False`` if unknown."""
+        target = self._find_tree_node(self._tree.root, node_id)
+        if target is None:
+            return False
+        self._tree.call_after_refresh(self._tree.move_cursor, target)
+        return True
+
     # ------------------------------------------------------------------
-    # Hints
+    # Hints, action buttons, detail pane
     # ------------------------------------------------------------------
 
     def _update_hints(self) -> None:
         node = self.selected_node()
+        zoom = f"[{ZOOM_KEY}] zoom" if self._mode == "sidebar" else f"[{ZOOM_KEY}]/esc close"
         if self._is_busy():
             movable = [a for a in self._panel.actions_for(node) if not a.mutates]
             parts = [BUSY_HINT]
             if movable:
                 parts.append("  ".join(f"[{a.key}] {a.label}" for a in movable))
-            self._hints.update("\n".join(parts))
+            self._hints.update(Text("\n".join(parts)))
             return
         actions = self._panel.actions_for(node)
-        if not actions:
-            self._hints.update("↑↓ move · space fold · esc close")
+        if self._mode == "window":
+            # Actions are buttons in the window; the strip carries navigation.
+            self._hints.update(
+                Text(f"↑↓ move · space fold · click a button or press its key · {zoom}")
+            )
             return
-        self._hints.update("  ".join(f"[{a.key}] {a.label}" for a in actions))
+        if not actions:
+            self._hints.update(Text(f"↑↓ move · space fold · {zoom} · esc hide"))
+            return
+        self._hints.update(Text("  ".join(f"[{a.key}] {a.label}" for a in actions) + f"  {zoom}"))
 
-    def on_tree_node_highlighted(self, _event: Tree.NodeHighlighted) -> None:
+    async def _update_actions_bar(self) -> None:
+        if self._mode != "window":
+            return
+        node = self.selected_node()
+        busy = self._is_busy()
+        actions = self._panel.actions_for(node)
+        sig = (node.id if node else None, busy, tuple(a.id for a in actions))
+        async with self._buttons_lock:
+            if sig == self._button_sig:
+                return
+            self._button_sig = sig
+            await self._actions_bar.remove_children()
+            await self._mount_buttons(actions, busy)
+
+    async def _mount_buttons(self, actions: list[UIAction], busy: bool) -> None:
+        buttons = [
+            Button(
+                Text(f"{a.label} [{a.key}]"),
+                id=f"panel-act-{a.id}",
+                variant="error" if a.destructive else "default",
+                compact=True,
+                disabled=busy and a.mutates,
+            )
+            for a in actions
+        ]
+        if buttons:
+            await self._actions_bar.mount_all(buttons)
+
+    @work(exclusive=True, group="extension-panel-detail")
+    async def _load_detail(self, node: UINode | None) -> None:
+        if self._mode != "window":
+            return
+        if node is None:
+            self._detail.update(Text(""))
+            return
+        await asyncio.sleep(0.05)  # debounce fast cursor movement
+        try:
+            text = await run_ui_describe(self._panel, node, self._ctx_getter())
+        except Exception as exc:
+            text = f"✗ {exc}"
+        self._detail.update(Text(text))
+
+    async def on_tree_node_highlighted(self, _event: Tree.NodeHighlighted) -> None:
         self._update_hints()
+        await self._update_actions_bar()
+        if self._mode == "window":
+            self._load_detail(self.selected_node())
 
     def on_tree_node_selected(self, _event: Tree.NodeSelected) -> None:
         self._update_hints()
 
     def on_focus(self, _event: events.Focus) -> None:
         self._update_hints()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if not button_id.startswith("panel-act-"):
+            return
+        event.stop()
+        action = self._panel.action(button_id[len("panel-act-") :])
+        if action is not None:
+            self.invoke(action, self.selected_node())
+            self._tree.focus()
+
+    def on_panel_title_clicked(self, event: PanelTitle.Clicked) -> None:
+        event.stop()
+        if self._mode == "sidebar":
+            self.post_message(self.Zoom(self))
+        else:
+            self.post_message(self.Close(self))
 
     # ------------------------------------------------------------------
     # Keys
@@ -384,6 +571,12 @@ class ExtensionPanel(Vertical):
                 event.stop()
                 self.invoke(action, node)
                 return
+        if event.key == ZOOM_KEY or event.character == ZOOM_KEY:
+            event.stop()
+            if self._mode == "sidebar":
+                self.post_message(self.Zoom(self))
+            else:
+                self.post_message(self.Close(self))
 
     # ------------------------------------------------------------------
     # Invocation
@@ -427,6 +620,67 @@ class ExtensionPanel(Vertical):
             msg = f"✗ {action.id}: {exc}"
         if msg:
             await self._write_system(msg)
+            if self._mode == "window" and not action.mutates:
+                # Read-only output (e.g. a diff) belongs next to the tree too.
+                self._detail.update(Text(msg))
         await self.refresh_tree()
         if action.mutates:
             self.post_message(self.Mutated(self._panel.name, action.id))
+
+
+class PanelWindow(ModalScreen[None]):
+    """The zoomed view of one extension panel — nearly full screen.
+
+    Hosts an :class:`ExtensionPanel` in ``"window"`` mode.  ``escape``, ``z``,
+    a click on the title, or the app's panel key close it; ``Mutated``
+    messages bubble on to the app like they do from the sidebar.
+    """
+
+    DEFAULT_CSS = """
+    PanelWindow {
+        align: center middle;
+        background: $background 60%;
+    }
+    PanelWindow > #panel-window-frame {
+        width: 94%;
+        height: 90%;
+        border: round $accent;
+        background: $surface;
+    }
+    """
+
+    def __init__(
+        self,
+        panel: UIPanel,
+        *,
+        ctx_getter: Callable[[], Any],
+        write_system: Callable[[str], Any],
+        is_busy: Callable[[], bool] | None = None,
+        style_map: dict[str, str] | None = None,
+        select_id: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._select_id = select_id
+        self.panel_widget = ExtensionPanel(
+            panel,
+            ctx_getter=ctx_getter,
+            write_system=write_system,
+            is_busy=is_busy,
+            style_map=style_map,
+            mode="window",
+            id=f"ext-window-{panel.name}",
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="panel-window-frame"):
+            yield self.panel_widget
+
+    async def on_mount(self) -> None:
+        await self.panel_widget.refresh_tree()
+        if self._select_id:
+            self.panel_widget.select_node(self._select_id)
+        self.panel_widget.focus_tree()
+
+    def on_extension_panel_close(self, event: ExtensionPanel.Close) -> None:
+        event.stop()
+        self.dismiss(None)

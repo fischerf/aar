@@ -101,14 +101,25 @@ app = create_acp_asgi_app(config=my_config, agent_name="aar")
 
 ## Extension UI panels
 
-`agent/extensions/api.py` defines a transport-agnostic panel contract: `UINode` (tree),
-`UIAction` (id/label/key/kinds/handler, `destructive`, `inputs`, `mutates`), `UIPanel`
-(`snapshot`, `status`, `changed` event). Extensions call `api.register_panel(...)`;
+`agent/extensions/api.py` defines a transport-agnostic panel contract: `UINode` (tree;
+`label` + optional secondary `detail`), `UIAction` (id/label/key/kinds/handler,
+`destructive`, `inputs`, `mutates`), `UIPanel` (`snapshot`, `status`, optional `describe`
+for a detail pane, `changed` event). Extensions call `api.register_panel(...)`;
 `ExtensionManager.panels` merges them. No Textual in that layer — `run_ui_snapshot` /
-`run_ui_action` run sync handlers in a thread. The fixed TUI mounts one `ExtensionPanel`
-per registered panel in `#right-col` (toggle `ctrl+b`, action keys only while focused,
-destructive → `ConfirmModal`); `_sync_right_col` collapses the column only when every
-child is hidden. Tests: `tests/test_extension_panels.py`, `tests/test_acp_panels.py`.
+`run_ui_action` / `run_ui_describe` run sync handlers in a thread.
+- **Fixed TUI:** one `ExtensionPanel` (mode `sidebar`) per panel in `#left-col`, left of the
+  chat body, shown by default (`tui.layout.extensions.<name>.visible: false` hides it).
+  `ctrl+b` focuses/hides, action keys only while focused, destructive → `ConfirmModal`.
+  `z` or a click on the title opens `PanelWindow` (modal, mode `window`: labels + detail,
+  `describe` pane, clickable action buttons). App queries that must hit the chat body while
+  the window is open go through `_main_query_one` (App.query_one searches the active screen).
+- **Inline TUI:** `/panel [name]` prints the tree (`tui_utils/ui_tree.render_ui_tree`); after
+  a turn or extension slash command, changed panels are printed compactly.
+- Tests: `tests/test_extension_panels.py`, `tests/test_acp_panels.py`.
+- Don't `pip install` extensions from `aar-extensions-registry` into the venv you run the core
+  suite with: entry-point discovery loads them into test agents running in the repo (the
+  shadow-branching one then commits to `shadow/session-*` branches of this checkout). Run
+  extension tests with `PYTHONPATH=<package dir>` instead.
 
 ## Zed Editor extension
 

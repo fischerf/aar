@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state across runs instead of being rebuilt and discarded on every run.
 
 ### Changed
+- **Extension panels moved to a left sidebar** in the fixed TUI (`#left-col`),
+  visible by default so progress can be followed while the agent works, and no
+  longer sharing the thinking panel's column. `z` (or a click on the panel
+  title) zooms a panel into a near-full-screen `PanelWindow` with per-node
+  details, a detail pane and mouse-clickable action buttons; `esc`/`z`/`ctrl+b`
+  close it. `tui.layout.extensions.<name>.visible: false` hides a panel.
+- The inline TUI renders extension panels as Rich trees: `/panel [name]` shows
+  the full tree; after a turn or an extension slash command that changed a
+  panel, a compact tree is printed.
+- Panel contract: `UINode.detail` (secondary text, also in ACP `to_dict`) and
+  `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while
   an extension panel is still visible in it.
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from agent.core.config import AgentConfig
@@ -31,10 +31,12 @@ from agent.core.events import (
 from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
+from agent.extensions.api import UIPanel, run_ui_snapshot
 from agent.memory.session_store import SessionStore
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
+from agent.transports.tui_utils.ui_tree import render_ui_tree
 
 
 class TUIRenderer:
@@ -101,6 +103,53 @@ class TUIRenderer:
             if section and not section.visible:
                 continue
             render_fn(self.console)
+
+    async def render_ui_panels(
+        self,
+        panels: dict[str, UIPanel],
+        ctx: Any,
+        *,
+        name: str | None = None,
+        only_changed: bool = False,
+    ) -> int:
+        """Print extension :class:`UIPanel` trees; returns how many were shown.
+
+        ``/panel`` shows every panel (or the one called *name*) in full.  After
+        a turn or a slash command the loop passes *only_changed*: panels whose
+        ``changed`` flag is set are printed compactly, unless
+        ``tui.layout.extensions.<name>.visible`` is ``false``.
+        """
+        shown = 0
+        for pname, panel in panels.items():
+            if name is not None and name not in (pname, panel.title):
+                continue
+            if only_changed:
+                if not panel.changed.is_set():
+                    continue
+                section = self.layout.extensions.get(pname)
+                if section is not None and not section.visible:
+                    panel.changed.clear()
+                    continue
+            try:
+                root = await run_ui_snapshot(panel, ctx)
+            except Exception as exc:
+                self.console.print(
+                    Text(f"✗ panel {pname}: {exc}", style=self.theme.error.border_style)
+                )
+                continue
+            panel.changed.clear()
+            self.console.print(
+                render_ui_tree(
+                    root,
+                    title=panel.title,
+                    status=panel.status_text(ctx),
+                    max_children=5 if only_changed else 0,
+                    border_style=self.theme.dim_text,
+                    footer=f"/panel {pname} — full tree" if only_changed else "",
+                )
+            )
+            shown += 1
+        return shown
 
     # ------------------------------------------------------------------
     # Event rendering
@@ -327,7 +376,7 @@ class TUIRenderer:
         if not self.layout.welcome.visible:
             return
         t = self.theme
-        builtin = ["help", "quit", "model", "status", "tools", "policy", "theme", "clear"]
+        builtin = ["help", "quit", "model", "status", "tools", "policy", "theme", "clear", "panel"]
         cmds = builtin + list(extra_commands or [])
         cmds_markup = " ".join(f"[bold]/{c}[/]" for c in cmds)
         self.console.print(
@@ -527,6 +576,29 @@ async def run_tui(
                             )
                 continue
 
+            # --- Extension UI panels -------------------------------------
+            elif stripped.lower().split()[0] in {"/panel", "/panels"}:
+                ext_mgr = getattr(agent, "_extension_manager", None)
+                panels = ext_mgr.panels if ext_mgr is not None else {}
+                if not panels:
+                    renderer.console.print(
+                        Text("No extension panels registered", style=renderer.theme.dim_text)
+                    )
+                    continue
+                if session is not None:
+                    ext_mgr.update_session(session)
+                parts = stripped.split(maxsplit=1)
+                wanted = parts[1].strip() if len(parts) > 1 else None
+                if not await renderer.render_ui_panels(panels, ext_mgr._context, name=wanted):
+                    names = ", ".join(panels)
+                    renderer.console.print(
+                        Text(
+                            f"Unknown panel: {wanted} (available: {names})",
+                            style=renderer.theme.dim_text,
+                        )
+                    )
+                continue
+
             # --- Extension slash-commands --------------------------------
             elif stripped.startswith("/"):
                 cmd_name = stripped[1:].split()[0].lower()
@@ -549,6 +621,9 @@ async def run_tui(
                             renderer.console.print(
                                 f"[{renderer.theme.error.border_style}]Extension command error: {exc}[/]"
                             )
+                        # A command that moved extension state (e.g. /undo)
+                        # shows the updated panel tree right away.
+                        await renderer.render_ui_panels(ext_mgr.panels, ctx, only_changed=True)
                         continue
                 renderer.console.print(f"[{renderer.theme.dim_text}]Unknown command: {stripped}[/]")
                 continue
@@ -586,6 +661,10 @@ async def run_tui(
 
             # Render extension panels after each turn
             renderer.render_extension_panels()
+            ext_mgr = getattr(agent, "_extension_manager", None)
+            if ext_mgr is not None and ext_mgr.panels:
+                ext_mgr.update_session(session)
+                await renderer.render_ui_panels(ext_mgr.panels, ext_mgr._context, only_changed=True)
 
     except KeyboardInterrupt:
         renderer.console.print(f"\n[{renderer.theme.dim_text}]Goodbye.[/]")

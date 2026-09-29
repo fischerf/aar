@@ -104,18 +104,21 @@ from agent.transports.tui_widgets.companion import CompanionPanel, KaomojiCompan
 from agent.transports.tui_widgets.file_picker import FilePickerModal  # noqa: F401
 from agent.transports.tui_widgets.input import HistoryInput, HistoryTextArea  # noqa: F401
 from agent.transports.tui_widgets.log_viewer import TUI_LOG_HANDLER, LogViewerModal  # noqa: F401
-from agent.transports.tui_widgets.extension_panel import ExtensionPanel  # noqa: F401
+from agent.transports.tui_widgets.extension_panel import (  # noqa: F401
+    ExtensionPanel,
+    PanelWindow,
+)
 from agent.transports.tui_widgets.thinking_panel import ThinkingPanel  # noqa: F401
 
 
 def _sync_right_col(right_col: object) -> None:
-    """Collapse ``#right-col`` only when *every* child is hidden.
+    """Collapse a side column only when *every* child is hidden.
 
-    The right column has a fixed width (typ. 40 cols).  Hiding just one
-    child (thinking panel *or* an extension panel) would leave an empty
-    gutter, but hiding the column while another child is still visible would
-    take that child down with it — so the column's display follows the
-    union of its children.
+    Used for ``#right-col`` (thinking panel) and ``#left-col`` (extension
+    panel sidebar).  Both have a fixed width; hiding just one child would
+    leave an empty gutter, but hiding the column while another child is still
+    visible would take that child down with it — so the column's display
+    follows the union of its children.
     """
     try:
         children = list(getattr(right_col, "children", []))
@@ -552,7 +555,10 @@ class FixedTUIRenderer:
         panels_line = ""
         if extra_panels:
             panels_markup = " ".join(f"[bold]{p}[/]" for p in extra_panels)
-            panels_line = f"Panels: {panels_markup} — {_KB.toggle_panel.key}\n"
+            panels_line = (
+                f"Panels: {panels_markup} — left sidebar · {_KB.toggle_panel.key} focus/hide"
+                " · z zoom\n"
+            )
         welcome_text = (
             "[bold]Aar Agent TUI (Textual)[/]\n\n"
             "Type your message and press Ctrl+S to send.\n"
@@ -619,6 +625,11 @@ class AarFixedApp(App):
         height: 100%;
         width: 40;
     }
+    #left-col {
+        height: 100%;
+        width: 34;
+        border-right: solid #2a2a2a;
+    }
     ThinkingPanel {
         height: 1fr;
     }
@@ -664,6 +675,8 @@ class AarFixedApp(App):
         self._prompt_queue: PromptQueue = PromptQueue()
         self._drain_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._agent_running: bool = False
+        self._sidebar_panels: list[ExtensionPanel] = []
+        self._panel_window: PanelWindow | None = None
 
     # ------------------------------------------------------------------
     # Compose the widget tree from theme layout config
@@ -678,8 +691,10 @@ class AarFixedApp(App):
         body = ChatBody(id="chat-body")
 
         # Companion now lives in the header bar as KaomojiCompanion.
-        # The right column holds the ThinkingPanel plus one ExtensionPanel per
-        # registered extension UIPanel (hidden until ctrl+b).
+        # The right column holds the ThinkingPanel; extension UIPanels get a
+        # sidebar of their own on the far left (``#left-col``), shown unless
+        # ``tui.layout.extensions.<name>.visible`` is false.  ctrl+b focuses /
+        # hides it, ``z`` inside zooms a panel into a PanelWindow.
         ext_panels: list[ExtensionPanel] = []
         for ui_panel in self._registered_panels().values():
             widget = ExtensionPanel(
@@ -687,15 +702,26 @@ class AarFixedApp(App):
                 ctx_getter=self._panel_ctx,
                 write_system=self._write_system_line,
                 is_busy=lambda: self._agent_running,
+                mode="sidebar",
                 id=f"ext-panel-{ui_panel.name}",
             )
-            widget.styles.display = "none"
+            section = self._layout_config.extensions.get(ui_panel.name)
+            if section is not None and not section.visible:
+                widget.styles.display = "none"
             ext_panels.append(widget)
-        right_col = Vertical(panel, *ext_panels, id="right-col")
+        self._sidebar_panels = ext_panels
+        right_col = Vertical(panel, id="right-col")
+        cols: list[Any] = []
+        if ext_panels:
+            left_col = Vertical(*ext_panels, id="left-col")
+            # Children aren't attached before mount, so decide from the list.
+            if all(w.styles.display == "none" for w in ext_panels):
+                left_col.styles.display = "none"
+            cols.append(left_col)
 
         if tp_cfg.side == "left":
-            return Horizontal(right_col, body, id="body-split")
-        return Horizontal(body, right_col, id="body-split")
+            return Horizontal(*cols, right_col, body, id="body-split")
+        return Horizontal(*cols, body, right_col, id="body-split")
 
     def compose(self) -> ComposeResult:
         fl = self._theme.fixed_layout
@@ -1040,10 +1066,14 @@ class AarFixedApp(App):
         return [p.title for p in self._registered_panels().values()]
 
     def _extension_panels(self) -> list[ExtensionPanel]:
+        """The sidebar panels (the zoomed window's panel is not included)."""
+        return list(self._sidebar_panels)
+
+    def _left_col(self) -> Any:
         try:
-            return list(self.query(ExtensionPanel))
+            return self.screen_stack[0].query_one("#left-col")
         except Exception:
-            return []
+            return None
 
     def _panel_ctx(self) -> Any:
         """Extension context for panel actions — same sync as slash commands."""
@@ -1054,14 +1084,32 @@ class AarFixedApp(App):
             mgr.update_session(self._session)
         return mgr._context
 
+    def _main_query_one(self, selector: str, expect_type: Any = None) -> Any:
+        """``query_one`` against the base screen.
+
+        ``App.query_one`` searches the *active* screen, which is the modal
+        while a PanelWindow is open — actions run from there still write to
+        the chat body and header underneath.
+        """
+        base = self.screen_stack[0] if self.screen_stack else self.screen
+        if expect_type is None:
+            return base.query_one(selector)
+        return base.query_one(selector, expect_type)
+
     async def _write_system_line(self, text: str) -> None:
         """Print *text* into the chat body, one block per line (slash-command style)."""
-        chat_body = self.query_one("#chat-body", ChatBody)
+        chat_body = self._main_query_one("#chat-body", ChatBody)
         for line in str(text).splitlines() or [str(text)]:
             await chat_body._mount_block(RichBlock(Text(line), raw=line, kind="system"))
 
     def action_toggle_panel(self) -> None:
-        """Ctrl+B — hidden → shown + focused; focused → back to input; shown → focus."""
+        """Ctrl+B — hidden → shown + focused; focused → back to input; shown → focus.
+
+        With the zoomed window open, ctrl+b closes it instead.
+        """
+        if self._panel_window is not None:
+            self._panel_window.dismiss(None)
+            return
         panels = self._extension_panels()
         if not panels:
             if self._renderer is not None:
@@ -1072,10 +1120,9 @@ class AarFixedApp(App):
                 )
             return
         panel = panels[0]
-        right_col = self.query_one("#right-col")
         if panel.styles.display == "none":
             panel.styles.display = "block"
-            _sync_right_col(right_col)
+            _sync_right_col(self._left_col())
             panel.focus_tree()
             self.call_later(self._refresh_panels, True)
             return
@@ -1086,8 +1133,35 @@ class AarFixedApp(App):
 
     def _hide_panel(self, panel: ExtensionPanel) -> None:
         panel.styles.display = "none"
-        _sync_right_col(self.query_one("#right-col"))
+        _sync_right_col(self._left_col())
         self.query_one("#user-input", HistoryTextArea).focus()
+
+    def on_extension_panel_zoom(self, event: ExtensionPanel.Zoom) -> None:
+        """``z`` / title click in the sidebar — open the big panel window."""
+        event.stop()
+        if self._panel_window is not None:
+            return
+        sidebar = event.panel_widget
+        selected = sidebar.selected_node()
+        window = PanelWindow(
+            sidebar.panel,
+            ctx_getter=self._panel_ctx,
+            write_system=self._write_system_line,
+            is_busy=lambda: self._agent_running,
+            select_id=selected.id if selected is not None else None,
+        )
+        self._panel_window = window
+
+        def _closed(_result: None) -> None:
+            self._panel_window = None
+            node = window.panel_widget.selected_node()
+            if node is not None:
+                sidebar.select_node(node.id)
+            self.call_later(self._refresh_panels, True)
+            if sidebar.styles.display != "none":
+                sidebar.focus_tree()
+
+        self.push_screen(window, _closed)
 
     def on_extension_panel_close(self, event: ExtensionPanel.Close) -> None:
         event.stop()
@@ -1108,15 +1182,20 @@ class AarFixedApp(App):
             return
         ctx = self._panel_ctx()
         chips: list[str] = []
+        window = self._panel_window
         for widget in panels:
             visible = widget.styles.display != "none"
-            if force or widget.panel.changed.is_set() or (visible and widget.root is None):
+            changed = widget.panel.changed.is_set()
+            if force or changed or (visible and widget.root is None):
                 await widget.refresh_tree()
+                # The zoomed window shows the same panel; keep it in step.
+                if window is not None and window.panel_widget.panel is widget.panel:
+                    await window.panel_widget.refresh_tree()
             chip = widget.panel.status_text(ctx)
             if chip:
                 chips.append(chip)
         try:
-            header = self.query_one(HeaderBar)
+            header = self._main_query_one(HeaderBar)
             status = " · ".join(chips)
             if status != header.panel_status:
                 header.panel_status = status
@@ -1142,7 +1221,7 @@ class AarFixedApp(App):
         """
         if self._renderer is None or self._session is None:
             return
-        chat_body = self.query_one("#chat-body", ChatBody)
+        chat_body = self._main_query_one("#chat-body", ChatBody)
         await chat_body.remove_children()
         chat_body.auto_scroll = True
         r = self._renderer

@@ -121,14 +121,18 @@ class UINode:
     kind: str = "info"
     children: list[UINode] = field(default_factory=list)
     expanded: bool = True
-    style: str = ""  # theme role hint: "active" | "dim" | "warn" | ""
+    style: str = ""  # theme role hint: "active" | "dim" | "warn" | "ok" | ""
     data: dict[str, Any] = field(default_factory=dict)
+    # Secondary text shown after the label where there is room (the zoomed
+    # panel window, the inline TUI tree); compact views may drop it.
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe representation (used by the ACP transport)."""
         return {
             "id": self.id,
             "label": self.label,
+            "detail": self.detail,
             "kind": self.kind,
             "expanded": self.expanded,
             "style": self.style,
@@ -198,9 +202,11 @@ class UIPanel:
 
     ``snapshot(ctx)`` returns the current root :class:`UINode` (sync or
     async — see :func:`run_ui_snapshot`).  ``status(ctx)`` returns a short
-    string for a header chip, or ``""`` to hide it.  The extension sets
-    ``changed`` whenever its state moves; the transport refreshes and clears
-    it.
+    string for a header chip, or ``""`` to hide it.  ``describe(node, ctx)``
+    optionally returns a longer, read-only text for the highlighted node (the
+    zoomed panel window shows it in a detail pane — see
+    :func:`run_ui_describe`).  The extension sets ``changed`` whenever its
+    state moves; the transport refreshes and clears it.
     """
 
     name: str
@@ -209,6 +215,7 @@ class UIPanel:
     actions: list[UIAction] = field(default_factory=list)
     status: Callable[[Any], str] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+    describe: Callable[[UINode, Any], str | None | Awaitable[str | None]] | None = None
 
     def action(self, action_id: str) -> UIAction | None:
         for a in self.actions:
@@ -246,6 +253,21 @@ async def run_ui_snapshot(panel: UIPanel, ctx: Any) -> UINode:
     if not isinstance(root, UINode):
         raise TypeError(f"panel {panel.name!r} snapshot returned {type(root).__name__}")
     return root
+
+
+async def run_ui_describe(panel: UIPanel, node: UINode, ctx: Any) -> str:
+    """Detail text for *node*: the panel's ``describe`` hook, or a generic
+    summary of the node's label, detail and data when there is none."""
+    if panel.describe is not None:
+        text = await _await_maybe_threaded(panel.describe, node, ctx)
+        if text:
+            return str(text)
+    lines = [node.label]
+    if node.detail:
+        lines.append(node.detail)
+    for key, value in node.data.items():
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
 
 
 async def run_ui_action(action: UIAction, invocation: UIInvocation) -> str | None:
