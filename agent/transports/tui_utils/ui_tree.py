@@ -43,6 +43,33 @@ def node_text(
     return text
 
 
+def _looks_like_diff(lines: list[str]) -> bool:
+    return any(ln.startswith(("diff --git ", "@@ ")) for ln in lines)
+
+
+def reply_lines(text: str) -> list[Text]:
+    """An extension command reply as literal ``Text`` lines (never parsed as
+    Rich markup — diffs and code are full of ``[``).  When the reply contains a
+    unified diff, added / removed / hunk lines are coloured."""
+    lines = str(text).splitlines() or [str(text)]
+    if not _looks_like_diff(lines):
+        return [Text(line) for line in lines]
+    out: list[Text] = []
+    for line in lines:
+        if line.startswith(("+++", "---", "diff --git ", "index ")):
+            style = "bold"
+        elif line.startswith("+"):
+            style = "green"
+        elif line.startswith("-"):
+            style = "red"
+        elif line.startswith("@@"):
+            style = "cyan"
+        else:
+            style = ""
+        out.append(Text(line, style=style))
+    return out
+
+
 def notes_text(notes: list[str], style: str = "dim") -> Text | None:
     """Tool-result notes as one line for a panel subtitle (``None`` if empty)."""
     if not notes:

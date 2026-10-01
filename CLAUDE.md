@@ -119,7 +119,9 @@ for a detail pane, `changed` event). Extensions call `api.register_panel(...)`;
   `ToolResult.data["notes"]` (never sent to the model); shown as the result panel's subtitle
   in both TUIs and as an extra content block on the ACP tool-call card.
 - **ACP command UX:** `api.command(..., hint=...)` → `AvailableCommand.input`;
-  `format_command_reply` (acp/common.py) fences plain-text trees so Markdown doesn't reflow them.
+  `format_command_reply` (acp/common.py) fences plain-text trees / stats (`text`) and unified
+  diffs (`diff`) so Markdown doesn't reflow them. The TUIs print replies via `reply_lines`
+  (literal text, never Rich markup; diff lines coloured).
 - Tests: `tests/test_extension_panels.py`, `tests/test_acp_panels.py`.
 - Don't `pip install` extensions from `aar-extensions-registry` into the venv you run the core
   suite with: entry-point discovery loads them into test agents running in the repo (the

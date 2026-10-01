@@ -81,7 +81,7 @@ from agent.transports.tui_utils.formatting import (
     _format_args,
     _side_effect_badge,
 )
-from agent.transports.tui_utils.ui_tree import notes_text
+from agent.transports.tui_utils.ui_tree import notes_text, reply_lines
 
 # ---------------------------------------------------------------------------
 # Widget imports — classes extracted to agent.transports.tui_widgets.*
@@ -1543,8 +1543,8 @@ class AarFixedApp(App):
                         if asyncio.iscoroutine(result):
                             result = await result
                         if result is not None:
-                            for line in str(result).splitlines() or [str(result)]:
-                                await _write(Text(line), raw=line, kind="system")
+                            for line in reply_lines(str(result)):
+                                await _write(line, raw=line.plain, kind="system")
                     except Exception as exc:
                         await _write(
                             Text(f"Extension command error: {exc}", style=t.error.border_style)

@@ -36,7 +36,7 @@ from agent.memory.session_store import SessionStore
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
-from agent.transports.tui_utils.ui_tree import notes_text, render_ui_tree
+from agent.transports.tui_utils.ui_tree import notes_text, render_ui_tree, reply_lines
 
 
 class TUIRenderer:
@@ -630,7 +630,8 @@ async def run_tui(
                         try:
                             result = handler(args_str, ctx)
                             if result is not None:
-                                renderer.console.print(str(result))
+                                for line in reply_lines(str(result)):
+                                    renderer.console.print(line)
                         except Exception as exc:
                             renderer.console.print(
                                 f"[{renderer.theme.error.border_style}]Extension command error: {exc}[/]"

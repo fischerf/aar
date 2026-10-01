@@ -326,7 +326,7 @@ def _available_commands(
 
 # Line starts that mark plain-text layout (trees, indented listings) which a
 # Markdown renderer would reflow into one paragraph.
-_PREFORMATTED_STARTS = ("├", "└", "│", "┌", "  ", "\t")
+_PREFORMATTED_STARTS = ("├", "└", "│", "┌", " ", "\t")
 
 
 def format_command_reply(text: str) -> str:
@@ -334,12 +334,15 @@ def format_command_reply(text: str) -> str:
 
     ACP clients (Zed) render agent messages as Markdown, which joins single
     newlines — a box-drawn tree collapses into one paragraph.  Multi-line
-    replies laid out as plain text are wrapped in a ``text`` code fence;
-    one-liners and replies that already use fences pass through unchanged.
+    replies laid out as plain text (trees, indented listings, ``git --stat``
+    columns) are wrapped in a ``text`` code fence, unified diffs in a ``diff``
+    fence; one-liners and replies that already use fences pass through.
     """
     if "\n" not in text or "```" in text:
         return text
     lines = text.splitlines()
+    if any(line.startswith(("diff --git ", "@@ ")) for line in lines):
+        return f"```diff\n{text.rstrip()}\n```"
     if not any(line.startswith(_PREFORMATTED_STARTS) for line in lines[1:]):
         return text
     return f"```text\n{text.rstrip()}\n```"

@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `AvailableCommand.input`, so editors show argument placeholders; extension
   replies laid out as plain-text trees are wrapped in a code fence so Markdown
   rendering (Zed) keeps their shape.
+- **Extension command replies print literally** in both TUIs (no Rich markup
+  parsing — diffs and code contain `[`); replies containing a unified diff get
+  +/−/hunk colouring (`tui_utils/ui_tree.reply_lines`). Over ACP, diffs are
+  sent in a `diff` code fence and `git --stat` columns in a `text` fence.
 - Panel contract: `UINode.detail` (secondary text, also in ACP `to_dict`) and
   `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while

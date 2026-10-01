@@ -259,3 +259,27 @@ class TestAcpStdio:
         updates = [c.kwargs["update"] for c in mock_conn.session_update.call_args_list]
         texts = [u.content.text for u in updates if isinstance(u, AgentMessageChunk)]
         assert "```text\n⎇ s\n├─ one\n└─ two\n```" in texts
+
+
+class TestReplyRendering:
+    def test_reply_lines_are_literal(self) -> None:
+        from agent.transports.tui_utils.ui_tree import reply_lines
+
+        lines = reply_lines("x = items[0]\n[bold]not markup[/]")
+        assert [ln.plain for ln in lines] == ["x = items[0]", "[bold]not markup[/]"]
+        assert all(not ln.spans and not ln.style for ln in lines)
+
+    def test_diff_lines_are_coloured(self) -> None:
+        from agent.transports.tui_utils.ui_tree import reply_lines
+
+        diff = "t3 write_file\ndiff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n ctx"
+        styles = {ln.plain: str(ln.style) for ln in reply_lines(diff)}
+        assert styles["+new"] == "green" and styles["-old"] == "red"
+        assert styles["@@ -1 +1 @@"] == "cyan" and styles["+++ b/x"] == "bold"
+        assert styles[" ctx"] == "" and styles["t3 write_file"] == ""
+
+    def test_acp_fences_diffs_and_stats(self) -> None:
+        diff = "t3\ndiff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new"
+        assert format_command_reply(diff) == f"```diff\n{diff}\n```"
+        stat = 'p1 "x" · 2 checkpoint(s)\n a.py | 2 +-\n 1 file changed'
+        assert format_command_reply(stat).startswith("```text\n")
