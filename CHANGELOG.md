@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsing — diffs and code contain `[`); replies containing a unified diff get
   +/−/hunk colouring (`tui_utils/ui_tree.reply_lines`). Over ACP, diffs are
   sent in a `diff` code fence and `git --stat` columns in a `text` fence.
+- **Panel action previews** — `UIAction.preview(node, ctx)` returns what a
+  destructive action would do ("drops 3 checkpoint(s) · 4 files +60 −12");
+  the fixed TUI shows it in the confirm dialog (now rendered literally, no Rich
+  markup), and ACP clients get it with `preview: true` on `_aar/panel_action`
+  / the HTTP action endpoint without running the action.
 - Panel contract: `UINode.detail` (secondary text, also in ACP `to_dict`) and
   `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while

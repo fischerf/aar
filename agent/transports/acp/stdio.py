@@ -1181,7 +1181,12 @@ class AarAcpAgent:
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ``_aar/*`` requests (see :attr:`_PANEL_METHODS`)."""
         from acp.exceptions import RequestError
-        from agent.extensions.api import UIInvocation, run_ui_action, run_ui_snapshot
+        from agent.extensions.api import (
+            UIInvocation,
+            run_ui_action,
+            run_ui_preview,
+            run_ui_snapshot,
+        )
 
         if method not in self._PANEL_METHODS:
             raise RequestError.method_not_found(f"_{method}")
@@ -1228,6 +1233,13 @@ class AarAcpAgent:
             raise RequestError.invalid_params(
                 {"action": f"{action.id!r} does not apply to node kind {node.kind!r}"}
             )
+        if self._param(params, "preview", default=False) is True:
+            # Read-only: what the action would do, for the client's confirm step.
+            return {
+                "panel": panel.name,
+                "action": action.id,
+                "preview": await run_ui_preview(action, node, ctx),
+            }
         running = self._run_tasks.get(session_id)
         if action.mutates and running is not None and not running.done():
             raise RequestError.invalid_params(

@@ -124,7 +124,7 @@ aar acp --http --host 0.0.0.0 --port 9000
 | `GET` | `/sessions/{session_id}` | Session metadata |
 | `GET` | `/sessions/{session_id}/panels` | Extension UI panels registered for the session, with their actions |
 | `GET` | `/sessions/{session_id}/panels/{name}` | Panel snapshot — `{panel, root, status}`; `root` is a `UINode` tree |
-| `POST` | `/sessions/{session_id}/panels/{name}/actions/{action}` | Run an action; body `{"node_id": "...", "args": {...}}` → `{message, root, status}` |
+| `POST` | `/sessions/{session_id}/panels/{name}/actions/{action}` | Run an action; body `{"node_id": "...", "args": {...}}` → `{message, root, status}`. With `"preview": true` nothing runs → `{preview}` |
 
 Panel semantics match the stdio `_aar/panel_*` methods (see §4): the client
 confirms destructive actions itself; mutating actions return `409` while a run
@@ -251,7 +251,7 @@ strips the prefix and dispatches on the `aar/…` name.
 |-----------|--------|--------|--------|
 | client → agent | `_aar/panel_list` | `sessionId` | `{panels: [{name, title, status, actions: [{id, label, key, kinds, destructive, confirm, inputs, mutates}]}]}` |
 | client → agent | `_aar/panel_snapshot` | `sessionId`, `panel` | `{panel, root, status}` — `root` is a `UINode` (`id`, `label`, `detail`, `kind`, `style`, `expanded`, `data`, `children`) |
-| client → agent | `_aar/panel_action` | `sessionId`, `panel`, `action`, `nodeId`, `args?` | `{panel, action, message, root, status}` — `message` is the same line the slash command would print; `root` is a fresh snapshot |
+| client → agent | `_aar/panel_action` | `sessionId`, `panel`, `action`, `nodeId`, `args?`, `preview?` | `{panel, action, message, root, status}` — `message` is the same line the slash command would print; `root` is a fresh snapshot. With `preview: true` nothing runs: `{panel, action, preview}` describes what the action would do (for the client's confirm step; actions that offer one have `preview: true` in `panel_list`) |
 | agent → client | `_aar/panel_changed` | `sessionId`, `panel` | notification, sent after a prompt or slash command when the extension flagged its state as stale; fetch a new snapshot to clear it |
 
 Rules:

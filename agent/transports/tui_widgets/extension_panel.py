@@ -53,6 +53,7 @@ from agent.extensions.api import (
     UIPanel,
     run_ui_action,
     run_ui_describe,
+    run_ui_preview,
     run_ui_snapshot,
 )
 from agent.transports.tui_utils.ui_tree import DEFAULT_STYLE_MAP, node_text
@@ -133,7 +134,7 @@ class ConfirmModal(ModalScreen[dict[str, Any] | None]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self._title, classes="title")
-            yield Static(self._message, classes="message")
+            yield Static(Text(self._message), classes="message")
             if self._force_option:
                 yield Static(self._force_line(), classes="force", id="confirm-force")
             if self._message_input:
@@ -599,8 +600,12 @@ class ExtensionPanel(Vertical):
 
         collected: dict[str, Any] = dict(args or {})
         if action.destructive or action.inputs:
+            message = action.confirm.format(label=node.label) if action.confirm else action.label
+            preview = await run_ui_preview(action, node, self._ctx_getter())
+            if preview:
+                message = f"{message}\n\n{preview}"
             modal = ConfirmModal(
-                action.confirm.format(label=node.label) if action.confirm else action.label,
+                message,
                 title=f"{self._panel.title} · {action.label}",
                 force_option="force" in action.inputs,
                 message_input="message" in action.inputs,

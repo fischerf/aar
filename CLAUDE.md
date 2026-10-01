@@ -122,7 +122,11 @@ for a detail pane, `changed` event). Extensions call `api.register_panel(...)`;
   `format_command_reply` (acp/common.py) fences plain-text trees / stats (`text`) and unified
   diffs (`diff`) so Markdown doesn't reflow them. The TUIs print replies via `reply_lines`
   (literal text, never Rich markup; diff lines coloured).
-- Tests: `tests/test_extension_panels.py`, `tests/test_acp_panels.py`.
+- **Action previews:** optional `UIAction.preview(node, ctx)` (`run_ui_preview`, never raises)
+  is appended to the fixed TUI's `ConfirmModal`; ACP `_aar/panel_action` / HTTP actions accept
+  `preview: true` to return it without running the action.
+- Tests: `tests/test_extension_panels.py`, `tests/test_acp_panels.py`,
+  `tests/test_panel_action_preview.py`, `tests/test_tool_result_notes.py`.
 - Don't `pip install` extensions from `aar-extensions-registry` into the venv you run the core
   suite with: entry-point discovery loads them into test agents running in the repo (the
   shadow-branching one then commits to `shadow/session-*` branches of this checkout). Run

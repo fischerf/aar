@@ -179,6 +179,9 @@ class UIAction:
     confirm: str = ""  # confirmation template; ``{label}`` is substituted
     inputs: tuple[str, ...] = ()  # extra args the UI should collect: "force", "message"
     mutates: bool = True  # refused while the agent is running
+    # Optional read-only preview of what the action would do to *node* (e.g.
+    # "drops 3 checkpoints · 4 files +60 −12"); shown in the confirmation.
+    preview: Callable[[UINode, Any], str | None | Awaitable[str | None]] | None = None
 
     def applies_to(self, node: UINode | None) -> bool:
         return node is not None and node.kind in self.kinds
@@ -193,6 +196,7 @@ class UIAction:
             "confirm": self.confirm,
             "inputs": list(self.inputs),
             "mutates": self.mutates,
+            "preview": self.preview is not None,
         }
 
 
@@ -281,6 +285,19 @@ def tool_result_notes(event: Any) -> list[str]:
     data = getattr(event, "data", None)
     notes = data.get(TOOL_RESULT_NOTES_KEY) if isinstance(data, dict) else None
     return [str(n) for n in notes] if isinstance(notes, list) else []
+
+
+async def run_ui_preview(action: UIAction, node: UINode, ctx: Any) -> str:
+    """The action's preview text for *node* (``""`` when it has none or fails —
+    a preview must never block the action itself)."""
+    if action.preview is None:
+        return ""
+    try:
+        text = await _await_maybe_threaded(action.preview, node, ctx)
+    except Exception as exc:  # noqa: BLE001 — a preview must never block the action
+        logger.debug("preview for action %r failed: %s", action.id, exc)
+        return ""
+    return str(text) if text else ""
 
 
 async def run_ui_describe(panel: UIPanel, node: UINode, ctx: Any) -> str:
