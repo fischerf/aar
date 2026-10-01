@@ -43,6 +43,13 @@ def node_text(
     return text
 
 
+def notes_text(notes: list[str], style: str = "dim") -> Text | None:
+    """Tool-result notes as one line for a panel subtitle (``None`` if empty)."""
+    if not notes:
+        return None
+    return Text(" · ".join(notes), style=style)
+
+
 def _add(
     parent: Tree,
     node: UINode,

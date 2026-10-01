@@ -28,7 +28,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from agent.extensions.api import UIPanel
+from agent.extensions.api import UIPanel, tool_result_notes
 
 if TYPE_CHECKING:
     from agent.core.config import AgentConfig
@@ -81,6 +81,7 @@ from agent.transports.tui_utils.formatting import (
     _format_args,
     _side_effect_badge,
 )
+from agent.transports.tui_utils.ui_tree import notes_text
 
 # ---------------------------------------------------------------------------
 # Widget imports — classes extracted to agent.transports.tui_widgets.*
@@ -402,7 +403,10 @@ class FixedTUIRenderer:
 
         # --- Tool result ------------------------------------------------------
         elif isinstance(event, ToolResult):
+            notes = tool_result_notes(event)
             if not self.layout.tool_result.visible:
+                for note in notes:
+                    self._write(Text(f"  {note}", style=t.dim_text), raw=note, kind="system")
                 return
             ps = t.tool_error if event.is_error else t.tool_result
             output = event.output
@@ -416,8 +420,15 @@ class FixedTUIRenderer:
             if event.is_error:
                 title += f" [{t.tool_error.border_style}]ERROR[/]"
             self._write(
-                Panel(output, title=title, border_style=ps.border_style, padding=ps.padding),
-                raw=output,
+                Panel(
+                    output,
+                    title=title,
+                    border_style=ps.border_style,
+                    padding=ps.padding,
+                    subtitle=notes_text(notes, t.dim_text),
+                    subtitle_align="right",
+                ),
+                raw="\n".join([output, *notes]),
                 kind="tool_result",
             )
             if event.is_error and self._companion is not None:

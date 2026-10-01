@@ -68,7 +68,7 @@ class ExtensionAPIProtocol(Protocol):
 
     def register_tool(self, spec: Any) -> None: ...
 
-    def command(self, name: str, *, description: str = ...) -> Callable: ...
+    def command(self, name: str, *, description: str = ..., hint: str = ...) -> Callable: ...
 
     def append_system_prompt(self, text: str) -> None: ...
 
@@ -255,6 +255,34 @@ async def run_ui_snapshot(panel: UIPanel, ctx: Any) -> UINode:
     return root
 
 
+# ---------------------------------------------------------------------------
+# Tool-result notes — short, display-only annotations an extension attaches to
+# a ToolResult from its ``tool_result`` hook (which runs before the result is
+# emitted).  Transports show them next to the tool call (inline TUI, fixed
+# TUI, ACP tool-call content); they live in ``ToolResult.data`` and are never
+# sent to the model.
+# ---------------------------------------------------------------------------
+
+TOOL_RESULT_NOTES_KEY = "notes"
+
+
+def add_tool_result_note(event: Any, text: str) -> bool:
+    """Attach *text* to *event*'s display notes; ``False`` if *event* can't carry
+    them (e.g. an earlier handler already replaced the result with a string)."""
+    data = getattr(event, "data", None)
+    if not isinstance(data, dict) or not text:
+        return False
+    data.setdefault(TOOL_RESULT_NOTES_KEY, []).append(str(text))
+    return True
+
+
+def tool_result_notes(event: Any) -> list[str]:
+    """Display notes attached to *event* (empty when there are none)."""
+    data = getattr(event, "data", None)
+    notes = data.get(TOOL_RESULT_NOTES_KEY) if isinstance(data, dict) else None
+    return [str(n) for n in notes] if isinstance(notes, list) else []
+
+
 async def run_ui_describe(panel: UIPanel, node: UINode, ctx: Any) -> str:
     """Detail text for *node*: the panel's ``describe`` hook, or a generic
     summary of the node's label, detail and data when there is none."""
@@ -346,6 +374,7 @@ class ExtensionAPI:
         self._event_handlers: dict[str, list[Callable]] = defaultdict(list)
         self._tools: list[ToolSpec] = []
         self._commands: dict[str, tuple[str, Callable]] = {}
+        self._command_hints: dict[str, str] = {}
         self._system_prompt_parts: list[str] = []
         self._panels: list[UIPanel] = []
         self.events = ExtensionEventBus()
@@ -416,11 +445,17 @@ class ExtensionAPI:
     # Slash-commands
     # ------------------------------------------------------------------
 
-    def command(self, name: str, *, description: str = "") -> Callable:
-        """Decorator to register a slash-command (e.g. ``/mycmd``)."""
+    def command(self, name: str, *, description: str = "", hint: str = "") -> Callable:
+        """Decorator to register a slash-command (e.g. ``/mycmd``).
+
+        *hint* describes the arguments (``"[N] [--force]"``); editors show it
+        as the input placeholder (ACP ``AvailableCommand.input``).
+        """
 
         def decorator(fn: Callable) -> Callable:
             self._commands[name] = (description, fn)
+            if hint:
+                self._command_hints[name] = hint
             logger.debug("Extension %r registered command /%s", self.name, name)
             return fn
 

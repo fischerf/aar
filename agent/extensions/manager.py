@@ -160,6 +160,18 @@ class ExtensionManager:
         return merged
 
     @property
+    def command_hints(self) -> dict[str, str]:
+        """Argument hints for slash-commands that declared one (name → hint)."""
+        merged: dict[str, str] = {}
+        for info in self._extensions:
+            if info.api is None:
+                continue
+            for name in info.api._commands:
+                merged.pop(name, None)  # a later extension's command replaces the hint too
+            merged.update(getattr(info.api, "_command_hints", {}))
+        return merged
+
+    @property
     def panels(self) -> dict[str, UIPanel]:
         """All registered UI panels from all extensions, keyed by panel name."""
         merged: dict[str, UIPanel] = {}

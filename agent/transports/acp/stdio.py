@@ -27,6 +27,7 @@ from agent.core.events import (
 )
 from agent.core.session import Session
 from agent.core.state import AgentState
+from agent.extensions.api import tool_result_notes
 from agent.memory.session_store import SessionStore, validate_session_id
 from agent.safety.permissions import ApprovalCallback
 from agent.tools.registry import ToolRegistry
@@ -46,6 +47,7 @@ from .common import (
     _supports_reasoning_effort,
     _model_id_to_provider,
     _side_effects_to_tool_kind,
+    format_command_reply,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,7 +196,9 @@ class AarAcpAgent:
             await self._conn.session_update(
                 session_id=session_id,
                 update=AvailableCommandsUpdate(
-                    available_commands=_available_commands(ext_extra),
+                    available_commands=_available_commands(
+                        ext_extra, ext_mgr.command_hints if ext_mgr else None
+                    ),
                     session_update="available_commands_update",
                 ),
                 source=self._agent_name,
@@ -843,6 +847,7 @@ class AarAcpAgent:
         from acp import PromptResponse, text_block, update_agent_message
         from acp.schema import (
             AgentThoughtChunk,
+            ContentToolCallContent,
             Cost,
             SessionInfoUpdate,
             TextContentBlock,
@@ -995,6 +1000,14 @@ class AarAcpAgent:
                     event.output,
                     event.is_error,
                 )
+                # Extension notes (e.g. a shadow-branching checkpoint) ride on
+                # the same tool-call card the editor already shows.
+                for _note in tool_result_notes(event):
+                    _content.append(
+                        ContentToolCallContent(
+                            type="content", content=TextContentBlock(type="text", text=_note)
+                        )
+                    )
                 _push(
                     ToolCallProgress(
                         title=event.tool_name,
@@ -1059,7 +1072,7 @@ class AarAcpAgent:
                         result = handler(args_str, ext_mgr._context)
                         if asyncio.iscoroutine(result):
                             result = await result
-                        reply = str(result) if result is not None else ""
+                        reply = format_command_reply(str(result)) if result is not None else ""
                     except Exception as exc:
                         logger.error("ACP: extension command %r error: %s", cmd_name, exc)
                         reply = f"Extension command error: {exc}"

@@ -282,12 +282,16 @@ def _model_id_to_provider(model_id: str) -> tuple[str, str]:
     return "ollama", model_id
 
 
-def _available_commands(extra: dict[str, str] | None = None) -> list[Any]:
+def _available_commands(
+    extra: dict[str, str] | None = None, hints: dict[str, str] | None = None
+) -> list[Any]:
     """Return the list of slash commands Aar exposes to ACP editors.
 
-    *extra* maps command name → description for extension-registered commands.
+    *extra* maps command name → description for extension-registered commands;
+    *hints* maps command name → argument hint (``"[N] [--force]"``), sent as the
+    command's ``input`` so editors can show it as a placeholder.
     """
-    from acp.schema import AvailableCommand
+    from acp.schema import AvailableCommand, UnstructuredCommandInput
 
     cmds = [
         AvailableCommand(
@@ -309,8 +313,36 @@ def _available_commands(extra: dict[str, str] | None = None) -> list[Any]:
     ]
     if extra:
         for name, desc in extra.items():
-            cmds.append(AvailableCommand(name=name, description=desc or ""))
+            hint = (hints or {}).get(name)
+            cmds.append(
+                AvailableCommand(
+                    name=name,
+                    description=desc or "",
+                    input=UnstructuredCommandInput(hint=hint) if hint else None,
+                )
+            )
     return cmds
+
+
+# Line starts that mark plain-text layout (trees, indented listings) which a
+# Markdown renderer would reflow into one paragraph.
+_PREFORMATTED_STARTS = ("├", "└", "│", "┌", "  ", "\t")
+
+
+def format_command_reply(text: str) -> str:
+    """Make an extension slash-command reply survive Markdown rendering.
+
+    ACP clients (Zed) render agent messages as Markdown, which joins single
+    newlines — a box-drawn tree collapses into one paragraph.  Multi-line
+    replies laid out as plain text are wrapped in a ``text`` code fence;
+    one-liners and replies that already use fences pass through unchanged.
+    """
+    if "\n" not in text or "```" in text:
+        return text
+    lines = text.splitlines()
+    if not any(line.startswith(_PREFORMATTED_STARTS) for line in lines[1:]):
+        return text
+    return f"```text\n{text.rstrip()}\n```"
 
 
 def _derive_mode_id(safety_cfg: Any, current_mode_id: str | None = None) -> str:

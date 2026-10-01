@@ -102,9 +102,15 @@ handler. Parameters:
 
 Imperative alternative to the `@api.tool` decorator — pass a pre-built `ToolSpec`.
 
-### `api.command(name: str, *, description: str = "")`
+### `api.command(name: str, *, description: str = "", hint: str = "")`
 
-Decorator. Register a `/name` slash-command available in the CLI and TUI.
+Decorator. Register a `/name` slash-command available in the CLI, both TUIs and
+ACP stdio. *hint* describes the arguments (`"[N] [--force]"`); editors show it as
+the input placeholder in their `/` menu (ACP `AvailableCommand.input`).
+
+Over ACP the reply is rendered as Markdown by the editor. Multi-line plain-text
+layouts (lines starting with `├ └ │` or indentation) are wrapped in a code fence
+automatically so trees keep their shape; return Markdown yourself for anything else.
 
 ### `api.append_system_prompt(text: str)`
 
@@ -179,6 +185,22 @@ handlers sequentially — each handler receives the previous handler's output as
 input. The final transformed value is what the loop uses. This enables chaining
 multiple extensions that each refine or enrich the content (e.g. one strips PII,
 another injects context).
+
+**Tool-result notes:** a `tool_result` handler runs before the result is shown,
+so it can attach a short, display-only line to it:
+
+```python
+from agent.extensions.api import add_tool_result_note
+
+@api.on("tool_result")
+def on_result(event, ctx):
+    add_tool_result_note(event, "⎇ checkpoint t3 · abc1234 · 1 file +2 −0")
+```
+
+Notes live in `ToolResult.data["notes"]`, are never sent to the model, and are
+shown under the result panel in both TUIs and as an extra content block on the
+editor's tool-call card over ACP. `add_tool_result_note` returns `False` when an
+earlier handler already replaced the result with a string.
 
 ---
 

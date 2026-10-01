@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The inline TUI renders extension panels as Rich trees: `/panel [name]` shows
   the full tree; after a turn or an extension slash command that changed a
   panel, a compact tree is printed.
+- **Tool-result notes** — `add_tool_result_note(event, text)` from a
+  `tool_result` hook attaches a display-only line (`ToolResult.data["notes"]`,
+  never sent to the model) shown under the result in both TUIs and on the
+  editor's tool-call card over ACP. The inline TUI no longer reprints changed
+  panels after every turn (notes replace that); it still does after an
+  extension slash command.
+- **ACP slash-command UX** — `api.command(..., hint="[N] [--force]")` is sent
+  as `AvailableCommand.input`, so editors show argument placeholders; extension
+  replies laid out as plain-text trees are wrapped in a code fence so Markdown
+  rendering (Zed) keeps their shape.
 - Panel contract: `UINode.detail` (secondary text, also in ACP `to_dict`) and
   `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while

@@ -233,11 +233,11 @@ curl -s -N -X POST http://127.0.0.1:8000/runs \
 | `agent_message_chunk` | Each streaming token (when provider streaming is enabled) or complete assistant message |
 | `agent_thought_chunk` | Extended thinking / reasoning content |
 | `tool_call` (start) | When the agent calls a tool |
-| `tool_call_update` (progress) | When the tool returns its result (status: `completed` or `failed`) |
+| `tool_call_update` (progress) | When the tool returns its result (status: `completed` or `failed`); extension tool-result notes (e.g. a shadow-branching checkpoint line) are appended as extra text content blocks |
 | `plan` | Updated after each tool call and result — shows the current step list with statuses |
 | `usage_update` | After each provider call — reports token count and estimated cost |
 | `session_info_update` | After the first assistant response — sets the session title in the editor sidebar |
-| `available_commands_update` | Once per session on first prompt — advertises `/model` and `/clear` slash commands |
+| `available_commands_update` | Once per session on first prompt — advertises the built-in and extension slash commands; extension commands registered with `hint=` carry it as `input.hint` |
 
 ### Extension UI panels (`_aar/panel_*`)
 

@@ -31,12 +31,12 @@ from agent.core.events import (
 from agent.core.multimodal import parse_multimodal_input
 from agent.core.session import Session
 from agent.core.state import AgentState
-from agent.extensions.api import UIPanel, run_ui_snapshot
+from agent.extensions.api import UIPanel, run_ui_snapshot, tool_result_notes
 from agent.memory.session_store import SessionStore
 from agent.transports.themes import Theme, ThemeRegistry
 from agent.transports.themes.builtin import DEFAULT_THEME
 from agent.transports.themes.models import LayoutConfig
-from agent.transports.tui_utils.ui_tree import render_ui_tree
+from agent.transports.tui_utils.ui_tree import notes_text, render_ui_tree
 
 
 class TUIRenderer:
@@ -115,7 +115,7 @@ class TUIRenderer:
         """Print extension :class:`UIPanel` trees; returns how many were shown.
 
         ``/panel`` shows every panel (or the one called *name*) in full.  After
-        a turn or a slash command the loop passes *only_changed*: panels whose
+        an extension slash command the loop passes *only_changed*: panels whose
         ``changed`` flag is set are printed compactly, unless
         ``tui.layout.extensions.<name>.visible`` is ``false``.
         """
@@ -228,7 +228,11 @@ class TUIRenderer:
 
         elif isinstance(event, ToolResult):
             self._tool_results.append(event)
+            notes = tool_result_notes(event)
             if not self.layout.tool_result.visible:
+                # The result is hidden, its notes (e.g. a checkpoint) are not.
+                for note in notes:
+                    self.console.print(Text(f"  {note}", style=t.dim_text))
                 return
             ps = t.tool_error if event.is_error else t.tool_result
             output = event.output
@@ -242,7 +246,14 @@ class TUIRenderer:
             if event.is_error:
                 title += f" [{t.tool_error.border_style}]ERROR[/]"
             self.console.print(
-                Panel(output, title=title, border_style=ps.border_style, padding=ps.padding)
+                Panel(
+                    output,
+                    title=title,
+                    border_style=ps.border_style,
+                    padding=ps.padding,
+                    subtitle=notes_text(notes, t.dim_text),
+                    subtitle_align="right",
+                )
             )
 
         elif isinstance(event, ReasoningBlock) and event.content:
@@ -613,6 +624,9 @@ async def run_tui(
                             ext_mgr.update_session(session)
                         _, handler = cmds[cmd_name]
                         ctx = ext_mgr._context
+                        # Only changes made by *this* command should print a tree.
+                        for _panel in ext_mgr.panels.values():
+                            _panel.changed.clear()
                         try:
                             result = handler(args_str, ctx)
                             if result is not None:
@@ -659,12 +673,10 @@ async def run_tui(
                     session.state = AgentState.COMPLETED
             store.save(session)
 
-            # Render extension panels after each turn
+            # Render extension panels after each turn.  UIPanels are not
+            # re-printed here: progress shows as tool-result notes (e.g. a
+            # checkpoint line under each result); /panel shows the tree.
             renderer.render_extension_panels()
-            ext_mgr = getattr(agent, "_extension_manager", None)
-            if ext_mgr is not None and ext_mgr.panels:
-                ext_mgr.update_session(session)
-                await renderer.render_ui_panels(ext_mgr.panels, ext_mgr._context, only_changed=True)
 
     except KeyboardInterrupt:
         renderer.console.print(f"\n[{renderer.theme.dim_text}]Goodbye.[/]")
