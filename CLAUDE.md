@@ -113,6 +113,8 @@ for a detail pane, `changed` event). Extensions call `api.register_panel(...)`;
   `z` or a click on the title opens `PanelWindow` (modal, mode `window`: labels + detail,
   `describe` pane, clickable action buttons). App queries that must hit the chat body while
   the window is open go through `_main_query_one` (App.query_one searches the active screen).
+  Nodes new since the last snapshot are highlighted for `FRESH_SECONDS`; the detail pane
+  renders via `reply_text` (diffs coloured).
 - **Inline TUI:** `/panel [name]` prints the tree (`tui_utils/ui_tree.render_ui_tree`); after
   an extension slash command that changed a panel, it is printed compactly.
 - **Tool-result notes:** `add_tool_result_note(event, text)` in a `tool_result` hook →

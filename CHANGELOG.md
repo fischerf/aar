@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsing — diffs and code contain `[`); replies containing a unified diff get
   +/−/hunk colouring (`tui_utils/ui_tree.reply_lines`). Over ACP, diffs are
   sent in a `diff` code fence and `git --stat` columns in a `text` fence.
+- **Fixed TUI panel polish** — nodes that appear in a refresh (a new
+  checkpoint, say) are highlighted for a few seconds (`FRESH_SECONDS`); the
+  zoomed window's detail pane colours unified diffs (`reply_text`).
 - **Panel action previews** — `UIAction.preview(node, ctx)` returns what a
   destructive action would do ("drops 3 checkpoint(s) · 4 files +60 −12");
   the fixed TUI shows it in the confirm dialog (now rendered literally, no Rich

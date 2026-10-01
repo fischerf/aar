@@ -659,3 +659,39 @@ class TestInlineRenderUiPanels:
         assert await renderer.render_ui_panels({"demo": panel}, None, only_changed=True) == 0
         assert not panel.changed.is_set()
         assert await renderer.render_ui_panels({"demo": panel}, None) == 1
+
+
+class TestFreshHighlight:
+    async def test_new_nodes_are_highlighted_then_cleared(self, monkeypatch) -> None:
+        import agent.transports.tui_widgets.extension_panel as ep
+
+        monkeypatch.setattr(ep, "FRESH_SECONDS", 0.2)
+        panel, state = make_panel([])
+        app = _make_app(panel)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            widget = app.query_one(ExtensionPanel)
+            await widget.refresh_tree()
+            assert widget.fresh_ids == set(), "nothing is 'new' on the first load"
+
+            state["n"] = 3  # a new checkpoint appears
+            await widget.refresh_tree()
+            assert widget.fresh_ids == {"cp:3"}
+            node = widget._find_tree_node(widget._tree.root, "cp:3")  # noqa: SLF001
+            assert node is not None and "reverse" in str(node.label.spans)
+
+            await asyncio.sleep(0.35)
+            await pilot.pause()
+            assert widget.fresh_ids == set()
+            node = widget._find_tree_node(widget._tree.root, "cp:3")  # noqa: SLF001
+            assert node is not None and "reverse" not in str(node.label.spans)
+
+
+class TestReplyText:
+    def test_joined_and_coloured(self) -> None:
+        from agent.transports.tui_utils.ui_tree import reply_text
+
+        text = reply_text("head\ndiff --git a/x b/x\n+new\n-old")
+        assert text.plain == "head\ndiff --git a/x b/x\n+new\n-old"
+        styles = {str(s.style) for s in text.spans}
+        assert {"green", "red", "bold"} <= styles

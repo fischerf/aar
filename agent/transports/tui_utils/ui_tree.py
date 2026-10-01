@@ -70,6 +70,11 @@ def reply_lines(text: str) -> list[Text]:
     return out
 
 
+def reply_text(text: str) -> Text:
+    """:func:`reply_lines` joined into one ``Text`` (for a single widget)."""
+    return Text("\n").join(reply_lines(text))
+
+
 def notes_text(notes: list[str], style: str = "dim") -> Text | None:
     """Tool-result notes as one line for a panel subtitle (``None`` if empty)."""
     if not notes:

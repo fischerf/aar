@@ -56,7 +56,7 @@ from agent.extensions.api import (
     run_ui_preview,
     run_ui_snapshot,
 )
-from agent.transports.tui_utils.ui_tree import DEFAULT_STYLE_MAP, node_text
+from agent.transports.tui_utils.ui_tree import DEFAULT_STYLE_MAP, node_text, reply_text
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STYLE_MAP: dict[str, str] = dict(DEFAULT_STYLE_MAP)
 
 BUSY_HINT = "⏳ agent running — cancel first (ctrl+x)"
+
+# Nodes that appear in a refresh (e.g. a new checkpoint) are highlighted for
+# this many seconds so progress catches the eye.
+FRESH_SECONDS = 4.0
 
 # Panel-local key that zooms the sidebar into a PanelWindow (and back).  An
 # extension action bound to the same key wins.
@@ -180,6 +184,13 @@ class ConfirmModal(ModalScreen[dict[str, Any] | None]):
             event.stop()
             self._force = not self._force
             self.query_one("#confirm-force", Static).update(self._force_line())
+
+
+def _walk_nodes(node: UINode) -> list[UINode]:
+    out = [node]
+    for child in node.children:
+        out.extend(_walk_nodes(child))
+    return out
 
 
 class PanelTitle(Static):
@@ -311,6 +322,8 @@ class ExtensionPanel(Vertical):
         self._last_error: str = ""
         self._status: str = ""
         self._button_sig: tuple[Any, ...] = ()
+        self._fresh_ids: set[str] = set()
+        self._fresh_timer: Any = None
         # Highlight events and an action worker's refresh can both rebuild
         # the buttons; interleaved remove/mount would collide on widget ids.
         self._buttons_lock = asyncio.Lock()
@@ -388,6 +401,15 @@ class ExtensionPanel(Vertical):
             logger.warning("panel %r snapshot failed: %s", self._panel.name, exc)
             self._last_error = str(exc)
             root = UINode("root", f"✗ {exc}", "info", style="warn")
+        if self._root is not None:
+            # Highlight what is new since the last snapshot (not on first load).
+            before = {n.id for n in _walk_nodes(self._root)}
+            fresh = {n.id for n in _walk_nodes(root)} - before
+            if fresh:
+                self._fresh_ids = fresh
+                if self._fresh_timer is not None:
+                    self._fresh_timer.stop()
+                self._fresh_timer = self.set_timer(FRESH_SECONDS, self._clear_fresh)
         self._rebuild(root)
         self._panel.changed.clear()
         self.set_status(self._panel.status_text(ctx))
@@ -415,8 +437,21 @@ class ExtensionPanel(Vertical):
             # first row), so defer the move until the lines exist.
             self._tree.call_after_refresh(self._tree.move_cursor, target)
 
+    def _clear_fresh(self) -> None:
+        self._fresh_timer = None
+        if self._fresh_ids and self._root is not None:
+            self._fresh_ids = set()
+            self._rebuild(self._root)
+
+    @property
+    def fresh_ids(self) -> set[str]:
+        """Ids currently highlighted as new."""
+        return set(self._fresh_ids)
+
     def _add_node(self, parent: TreeNode[UINode], node: UINode, expanded: dict[str, bool]) -> None:
         label = node_text(node, self._style_map, with_detail=self._mode == "window")
+        if node.id in self._fresh_ids:
+            label.stylize("reverse", 0, len(node.label))
         if node.children:
             tn = parent.add(label, data=node, expand=expanded.get(node.id, node.expanded))
             for child in node.children:
@@ -526,7 +561,7 @@ class ExtensionPanel(Vertical):
             text = await run_ui_describe(self._panel, node, self._ctx_getter())
         except Exception as exc:
             text = f"✗ {exc}"
-        self._detail.update(Text(text))
+        self._detail.update(reply_text(text))
 
     async def on_tree_node_highlighted(self, _event: Tree.NodeHighlighted) -> None:
         self._update_hints()
@@ -627,7 +662,7 @@ class ExtensionPanel(Vertical):
             await self._write_system(msg)
             if self._mode == "window" and not action.mutates:
                 # Read-only output (e.g. a diff) belongs next to the tree too.
-                self._detail.update(Text(msg))
+                self._detail.update(reply_text(msg))
         await self.refresh_tree()
         if action.mutates:
             self.post_message(self.Mutated(self._panel.name, action.id))
