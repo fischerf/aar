@@ -300,3 +300,43 @@ class TestInitConfigMatchesDefaults:
 
         loaded = load_config(config_path)
         assert loaded.provider.name == AgentConfig().provider.name
+
+
+# ---------------------------------------------------------------------------
+# --provider: named profile vs provider type
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfigProviderFlag:
+    def _write_config(self, tmp_path: Path) -> Path:
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "provider": "big",
+                    "providers": {
+                        "big": {"name": "ollama", "model": "qwen3.8:latest"},
+                        "small": {
+                            "name": "ollama",
+                            "model": "gemma4:latest",
+                            "base_url": "http://localhost:11434",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_profile_name_selects_whole_profile(self, fake_home, tmp_path):
+        cfg = _build_config(provider="small", config_file=str(self._write_config(tmp_path)))
+        assert cfg.provider.name == "ollama"
+        assert cfg.provider.model == "gemma4:latest"
+        assert cfg.provider.base_url == "http://localhost:11434"
+        # a copy — later CLI overrides must not leak into the providers table
+        assert cfg.provider is not cfg.providers["small"]
+
+    def test_provider_type_still_overrides_default_profile(self, fake_home, tmp_path):
+        cfg = _build_config(provider="openai", config_file=str(self._write_config(tmp_path)))
+        assert cfg.provider.name == "openai"
+        assert cfg.provider.model == "qwen3.8:latest"

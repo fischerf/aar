@@ -380,6 +380,7 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
 | [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash, spawn_agent |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
+| [Image generation & editing](docs/image-generation.md) | Driving the qwen-image sidecar from `aar run` / `chat` / `tui` — generate, edit, transparency (checking and cleaning alpha), GPU sharing with the chat model, troubleshooting |
 | [Sprite sheet workflow](docs/sprite-sheet-workflow.md) | Recipe — generate a transparent sprite sheet with the qwen-image sub-agent and build a game around it; two-GPU pinning, timeouts |
 
 ---

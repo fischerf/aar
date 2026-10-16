@@ -788,3 +788,24 @@ class TestLiveOllama:
             result = runner.invoke(app, ["chat", "--session", saved_id], input="Say OK.\n/quit\n")
 
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Redirected output encoding
+# ---------------------------------------------------------------------------
+
+
+def test_redirected_cp1252_stdout_is_switched_to_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cp1252 pipe (Windows default) must not crash on the thinking marker."""
+    import io
+    import sys
+
+    from agent.transports.cli import _ensure_utf8_stdio
+
+    raw = io.BytesIO()
+    fake = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", fake)
+    _ensure_utf8_stdio()
+    print("▸ thinking", file=sys.stdout)
+    sys.stdout.flush()
+    assert raw.getvalue().decode("utf-8").startswith("▸ thinking")
