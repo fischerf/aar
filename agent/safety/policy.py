@@ -202,22 +202,56 @@ def _redact_secrets(command: str) -> str:
 # entirely.
 _PATH_ARG_NAMES = frozenset({"path", "filepath", "directory", "cwd"})
 
+# S1b — The plural forms of the same conventions.  A tool that takes a *list*
+# of paths is the same hole S1 closed for scalars: pre-S1b ``_iter_path_args``
+# only ever yielded ``str`` values, so ``{"paths": [...]}`` — or any annotated
+# array, e.g. the qwen-image extension's ``images`` — reached the filesystem
+# without ``allowed_paths`` or ``denied_paths`` being consulted at all.
+_PATH_ARG_NAMES_PLURAL = frozenset({"paths", "filepaths", "directories"})
+
 
 def _is_path_property(name: str, prop_schema: dict[str, Any] | None) -> bool:
-    """Return True if a schema property describes a filesystem path."""
+    """Return True if a schema property describes a filesystem path.
+
+    Covers both the scalar conventions (``path``, ``source_path``, …) and the
+    plural/array ones (``paths``, ``image_paths``, or an array annotated
+    ``items: {"format": "path"}``).
+    """
     if name in _PATH_ARG_NAMES or name.endswith("_path"):
         return True
-    if isinstance(prop_schema, dict) and prop_schema.get("format") == "path":
+    if name in _PATH_ARG_NAMES_PLURAL or name.endswith("_paths"):
         return True
+    if isinstance(prop_schema, dict):
+        if prop_schema.get("format") == "path":
+            return True
+        items = prop_schema.get("items")
+        if isinstance(items, dict) and items.get("format") == "path":
+            return True
     return False
+
+
+def _iter_path_values(value: Any):
+    """Yield every non-empty path string in *value*.
+
+    A path-like argument may hold a single path or a list of them; anything
+    else (a number, a nested object, an empty string) yields nothing.
+    """
+    if isinstance(value, str):
+        if value:
+            yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item:
+                yield item
 
 
 def _iter_path_args(spec: ToolSpec, arguments: dict[str, Any]):
     """Yield ``(arg_name, value)`` pairs for every path-like argument.
 
     Schema-driven: walks ``spec.input_schema['properties']`` and yields any
-    property whose name or ``format`` annotation marks it as a path, provided
-    the call carries a non-empty string value for that argument.
+    property whose name or ``format`` annotation marks it as a path.  A
+    list-valued argument yields one pair per element, so every member of an
+    ``images`` / ``paths`` array is checked individually.
 
     When the spec has no schema (e.g. MCP tools registered without one), this
     falls back to the legacy ``arguments['path']`` lookup so we still get
@@ -229,13 +263,11 @@ def _iter_path_args(spec: ToolSpec, arguments: dict[str, Any]):
         for name, prop_schema in properties.items():
             if not _is_path_property(name, prop_schema):
                 continue
-            val = arguments.get(name)
-            if isinstance(val, str) and val:
+            for val in _iter_path_values(arguments.get(name)):
                 yield name, val
         return
     # Fallback: no schema — keep the legacy single-arg check.
-    val = arguments.get("path")
-    if isinstance(val, str) and val:
+    for val in _iter_path_values(arguments.get("path")):
         yield "path", val
 
 

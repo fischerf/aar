@@ -572,8 +572,15 @@ class AcpTransport:
         action_id: str,
         node_id: str | None,
         args: dict[str, Any] | None,
+        preview: bool = False,
     ) -> dict[str, Any]:
-        from agent.extensions.api import UIInvocation, run_ui_action, run_ui_snapshot
+        """Run a panel action — or, with *preview*, only return what it would do."""
+        from agent.extensions.api import (
+            UIInvocation,
+            run_ui_action,
+            run_ui_preview,
+            run_ui_snapshot,
+        )
 
         mgr, panel = await self._panel(session_id, name)
         action = panel.action(action_id)
@@ -588,6 +595,13 @@ class AcpTransport:
             raise HttpError(404, f"Node '{node_id}' not found")
         if not action.applies_to(node):
             raise HttpError(422, f"Action '{action_id}' does not apply to node kind '{node.kind}'")
+        if preview:
+            return {
+                "session_id": session_id,
+                "panel": panel.name,
+                "action": action.id,
+                "preview": await run_ui_preview(action, node, ctx),
+            }
         if action.mutates and self.session_busy(session_id):
             raise HttpError(409, "A run is in progress for this session — cancel it first")
         try:
@@ -852,6 +866,7 @@ def create_acp_asgi_app(
                             parts[4],
                             node_id if isinstance(node_id, str) else None,
                             args if isinstance(args, dict) else None,
+                            preview=data.get("preview") is True,
                         )
                     )
                 else:

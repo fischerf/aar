@@ -235,7 +235,7 @@ the core loop and transports do not depend on Ollama's response format.
 - **Explicit**: `registry.add(ToolSpec(...))`
 - **MCP bridge**: `bridge.register_all(registry)` — registers all tools from connected MCP servers
 
-Each tool is a `ToolSpec` with: name, description, input JSON schema, side-effects, and a handler function.
+Each tool is a `ToolSpec` with: name, description, input JSON schema, side-effects, an optional `timeout_s` (per-tool override of the executor's shared `command_timeout`), and a handler function.
 
 ### Side effects
 
@@ -262,8 +262,31 @@ Side effects drive policy decisions (read-only mode blocks WRITE+EXECUTE, approv
 | `bash` | EXECUTE | `tools/builtin/shell.py` | Execute a shell command (sandboxed when configured). |
 | `grep` | READ | `tools/builtin/search.py` | Regex content search across files. Returns matches with paths and line numbers. Skips hidden/generated dirs. Paginated. |
 | `find_files` | READ | `tools/builtin/search.py` | Glob-based file path search. Returns relative paths. Skips hidden/generated dirs. |
+| `spawn_agent` | EXECUTE | `tools/builtin/subagent.py` | Run a nested `Agent` from a named config profile and return its final message. Gated by `SubAgentConfig`, not `enabled_builtins`. |
 
 Built-ins are opt-in via `ToolConfig.enabled_builtins`. The agent constructor registers only the enabled set.
+
+### Sub-agents
+
+`spawn_agent` is the one built-in whose capability is defined by config rather than by
+its own code, so it is registered separately — after the `enabled_builtins` prune, and
+only when `subagents.enabled` is set with at least one profile and depth budget left.
+
+```
+parent Agent
+  └─ spawn_agent(agent_name, task)        ← the only two values the model supplies
+       └─ build_child_config(parent.config, profile, depth-1)
+            ├─ safety           ← deep-copied from the parent, unmodifiable by the profile
+            ├─ enabled_builtins ← profile.tools ∩ parent.tools.enabled_builtins
+            ├─ provider         ← profile.provider resolved against parent.providers
+            └─ subagents.max_depth ← decremented; at 0 the tool is not registered
+       └─ child Agent.chat(task) → final message → ToolResult
+```
+
+The child is a full `Agent` with its own registry, executor and extension manager, so it
+re-runs extension discovery and starts with an empty context. It shares the parent's
+approval callback, so approval-gated calls still reach the same human. The child's
+session is persisted to `session_dir`; the parent's session records a `SubAgentEvent`.
 
 ### Execution pipeline
 
@@ -293,7 +316,7 @@ Error [<category>]: <human-readable message>
 | `invalid_arguments` | Arguments fail JSON-schema validation |
 | `blocked` | Safety policy denied the call (`PolicyDecision.DENY`) |
 | `denied` | Human declined an approval-gated call |
-| `timeout` | Handler exceeded `ToolConfig.command_timeout` |
+| `timeout` | Handler exceeded `ToolSpec.timeout_s`, or `ToolConfig.command_timeout` when the spec sets none |
 | `exception` | Handler raised an unhandled exception |
 
 Clients (ACP, TUI, tests) should pattern-match on the bracketed category
@@ -345,6 +368,7 @@ All events extend `Event` (`agent/core/events.py`) and carry a `type` field from
 | `ErrorEvent` | `error` | `message` |
 | `StreamChunk` | `stream_chunk` | `text`, `reasoning_text`, `finished` |
 | `SessionEvent` | `session` | `action` |
+| `SubAgentEvent` | `subagent` | `agent_name`, `task`, `status`, `child_session_id`, `steps`, `duration_ms` |
 
 Events are Pydantic models — fully serializable and type-safe. Subscribe with `agent.on_event(callback)`.
 

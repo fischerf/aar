@@ -63,11 +63,12 @@ class ExtensionAPIProtocol(Protocol):
         *,
         side_effects: list[Any] | None = ...,
         requires_approval: bool = ...,
+        timeout_s: int | None = ...,
     ) -> Callable: ...
 
     def register_tool(self, spec: Any) -> None: ...
 
-    def command(self, name: str, *, description: str = ...) -> Callable: ...
+    def command(self, name: str, *, description: str = ..., hint: str = ...) -> Callable: ...
 
     def append_system_prompt(self, text: str) -> None: ...
 
@@ -120,14 +121,18 @@ class UINode:
     kind: str = "info"
     children: list[UINode] = field(default_factory=list)
     expanded: bool = True
-    style: str = ""  # theme role hint: "active" | "dim" | "warn" | ""
+    style: str = ""  # theme role hint: "active" | "dim" | "warn" | "ok" | ""
     data: dict[str, Any] = field(default_factory=dict)
+    # Secondary text shown after the label where there is room (the zoomed
+    # panel window, the inline TUI tree); compact views may drop it.
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe representation (used by the ACP transport)."""
         return {
             "id": self.id,
             "label": self.label,
+            "detail": self.detail,
             "kind": self.kind,
             "expanded": self.expanded,
             "style": self.style,
@@ -174,6 +179,9 @@ class UIAction:
     confirm: str = ""  # confirmation template; ``{label}`` is substituted
     inputs: tuple[str, ...] = ()  # extra args the UI should collect: "force", "message"
     mutates: bool = True  # refused while the agent is running
+    # Optional read-only preview of what the action would do to *node* (e.g.
+    # "drops 3 checkpoints · 4 files +60 −12"); shown in the confirmation.
+    preview: Callable[[UINode, Any], str | None | Awaitable[str | None]] | None = None
 
     def applies_to(self, node: UINode | None) -> bool:
         return node is not None and node.kind in self.kinds
@@ -188,6 +196,7 @@ class UIAction:
             "confirm": self.confirm,
             "inputs": list(self.inputs),
             "mutates": self.mutates,
+            "preview": self.preview is not None,
         }
 
 
@@ -197,9 +206,11 @@ class UIPanel:
 
     ``snapshot(ctx)`` returns the current root :class:`UINode` (sync or
     async — see :func:`run_ui_snapshot`).  ``status(ctx)`` returns a short
-    string for a header chip, or ``""`` to hide it.  The extension sets
-    ``changed`` whenever its state moves; the transport refreshes and clears
-    it.
+    string for a header chip, or ``""`` to hide it.  ``describe(node, ctx)``
+    optionally returns a longer, read-only text for the highlighted node (the
+    zoomed panel window shows it in a detail pane — see
+    :func:`run_ui_describe`).  The extension sets ``changed`` whenever its
+    state moves; the transport refreshes and clears it.
     """
 
     name: str
@@ -208,6 +219,7 @@ class UIPanel:
     actions: list[UIAction] = field(default_factory=list)
     status: Callable[[Any], str] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+    describe: Callable[[UINode, Any], str | None | Awaitable[str | None]] | None = None
 
     def action(self, action_id: str) -> UIAction | None:
         for a in self.actions:
@@ -245,6 +257,62 @@ async def run_ui_snapshot(panel: UIPanel, ctx: Any) -> UINode:
     if not isinstance(root, UINode):
         raise TypeError(f"panel {panel.name!r} snapshot returned {type(root).__name__}")
     return root
+
+
+# ---------------------------------------------------------------------------
+# Tool-result notes — short, display-only annotations an extension attaches to
+# a ToolResult from its ``tool_result`` hook (which runs before the result is
+# emitted).  Transports show them next to the tool call (inline TUI, fixed
+# TUI, ACP tool-call content); they live in ``ToolResult.data`` and are never
+# sent to the model.
+# ---------------------------------------------------------------------------
+
+TOOL_RESULT_NOTES_KEY = "notes"
+
+
+def add_tool_result_note(event: Any, text: str) -> bool:
+    """Attach *text* to *event*'s display notes; ``False`` if *event* can't carry
+    them (e.g. an earlier handler already replaced the result with a string)."""
+    data = getattr(event, "data", None)
+    if not isinstance(data, dict) or not text:
+        return False
+    data.setdefault(TOOL_RESULT_NOTES_KEY, []).append(str(text))
+    return True
+
+
+def tool_result_notes(event: Any) -> list[str]:
+    """Display notes attached to *event* (empty when there are none)."""
+    data = getattr(event, "data", None)
+    notes = data.get(TOOL_RESULT_NOTES_KEY) if isinstance(data, dict) else None
+    return [str(n) for n in notes] if isinstance(notes, list) else []
+
+
+async def run_ui_preview(action: UIAction, node: UINode, ctx: Any) -> str:
+    """The action's preview text for *node* (``""`` when it has none or fails —
+    a preview must never block the action itself)."""
+    if action.preview is None:
+        return ""
+    try:
+        text = await _await_maybe_threaded(action.preview, node, ctx)
+    except Exception as exc:  # noqa: BLE001 — a preview must never block the action
+        logger.debug("preview for action %r failed: %s", action.id, exc)
+        return ""
+    return str(text) if text else ""
+
+
+async def run_ui_describe(panel: UIPanel, node: UINode, ctx: Any) -> str:
+    """Detail text for *node*: the panel's ``describe`` hook, or a generic
+    summary of the node's label, detail and data when there is none."""
+    if panel.describe is not None:
+        text = await _await_maybe_threaded(panel.describe, node, ctx)
+        if text:
+            return str(text)
+    lines = [node.label]
+    if node.detail:
+        lines.append(node.detail)
+    for key, value in node.data.items():
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
 
 
 async def run_ui_action(action: UIAction, invocation: UIInvocation) -> str | None:
@@ -323,6 +391,7 @@ class ExtensionAPI:
         self._event_handlers: dict[str, list[Callable]] = defaultdict(list)
         self._tools: list[ToolSpec] = []
         self._commands: dict[str, tuple[str, Callable]] = {}
+        self._command_hints: dict[str, str] = {}
         self._system_prompt_parts: list[str] = []
         self._panels: list[UIPanel] = []
         self.events = ExtensionEventBus()
@@ -360,8 +429,13 @@ class ExtensionAPI:
         *,
         side_effects: list[SideEffect] | None = None,
         requires_approval: bool = False,
+        timeout_s: int | None = None,
     ) -> Callable:
-        """Decorator to register a tool provided by this extension."""
+        """Decorator to register a tool provided by this extension.
+
+        *timeout_s* overrides the executor's shared ``command_timeout`` for this
+        tool alone — use it for work that legitimately runs for minutes.
+        """
 
         def decorator(fn: Callable) -> Callable:
             spec = ToolSpec(
@@ -370,6 +444,7 @@ class ExtensionAPI:
                 input_schema=input_schema,
                 side_effects=side_effects or [SideEffect.NONE],
                 requires_approval=requires_approval,
+                timeout_s=timeout_s,
                 handler=fn,
             )
             self._tools.append(spec)
@@ -387,11 +462,17 @@ class ExtensionAPI:
     # Slash-commands
     # ------------------------------------------------------------------
 
-    def command(self, name: str, *, description: str = "") -> Callable:
-        """Decorator to register a slash-command (e.g. ``/mycmd``)."""
+    def command(self, name: str, *, description: str = "", hint: str = "") -> Callable:
+        """Decorator to register a slash-command (e.g. ``/mycmd``).
+
+        *hint* describes the arguments (``"[N] [--force]"``); editors show it
+        as the input placeholder (ACP ``AvailableCommand.input``).
+        """
 
         def decorator(fn: Callable) -> Callable:
             self._commands[name] = (description, fn)
+            if hint:
+                self._command_hints[name] = hint
             logger.debug("Extension %r registered command /%s", self.name, name)
             return fn
 

@@ -446,3 +446,107 @@ class TestCompanionExtension:
         # Should have the companion_status tool
         tool_names = [t.name for t in api._tools]
         assert "companion_status" in tool_names
+
+
+class TestExtensionToolAllowlist:
+    """``tools.enabled_extension_tools`` bounds what extensions contribute.
+
+    ``enabled_builtins`` does not cover extension tools: an installed extension
+    registers into every agent in the process, sub-agents included, which is not
+    what a single-purpose sub-agent profile wants.
+    """
+
+    @staticmethod
+    def _two_tool_extension(tmp_path):
+        d = tmp_path / "ext"
+        d.mkdir()
+        (d / "two_tools.py").write_text(
+            textwrap.dedent(
+                """
+                def register(api):
+                    @api.tool(name="keep_me", description="k", input_schema={"type": "object"})
+                    def keep() -> str:
+                        return "k"
+
+                    @api.tool(name="drop_me", description="d", input_schema={"type": "object"})
+                    def drop() -> str:
+                        return "d"
+                """
+            ),
+            encoding="utf-8",
+        )
+        return d
+
+    async def _init(self, tmp_path, monkeypatch, allowlist):
+        from unittest.mock import MagicMock
+
+        from agent.core.agent import Agent
+        from agent.core.config import AgentConfig
+        from agent.core.session import Session
+
+        d = self._two_tool_extension(tmp_path)
+        real_init = ExtensionManager.initialize
+
+        async def scoped_init(self, session, config, cancel_event=None, **kw):
+            kw.pop("user_dir", None)
+            kw.pop("project_dir", None)
+            return await real_init(
+                self, session, config, cancel_event,
+                user_dir=d, project_dir=tmp_path / "no-project", **kw
+            )
+
+        monkeypatch.setattr(ExtensionManager, "initialize", scoped_init)
+
+        config = AgentConfig()
+        config.tools.enabled_builtins = []
+        config.tools.enabled_extension_tools = allowlist
+        agent = Agent(config, provider=MagicMock())
+        await agent._init_extensions(Session())
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_allowlist_keeps_only_named_tools(self, tmp_path, monkeypatch):
+        agent = await self._init(tmp_path, monkeypatch, ["keep_me"])
+        assert agent.registry.get("keep_me") is not None
+        assert agent.registry.get("drop_me") is None
+
+    @pytest.mark.asyncio
+    async def test_none_keeps_every_extension_tool(self, tmp_path, monkeypatch):
+        agent = await self._init(tmp_path, monkeypatch, None)
+        assert agent.registry.get("keep_me") is not None
+        assert agent.registry.get("drop_me") is not None
+
+    @pytest.mark.asyncio
+    async def test_empty_list_keeps_none(self, tmp_path, monkeypatch):
+        agent = await self._init(tmp_path, monkeypatch, [])
+        assert agent.registry.get("keep_me") is None
+        assert agent.registry.get("drop_me") is None
+
+    @pytest.mark.asyncio
+    async def test_builtins_are_not_pruned_by_the_extension_allowlist(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from agent.core.agent import Agent
+        from agent.core.config import AgentConfig
+        from agent.core.session import Session
+
+        d = self._two_tool_extension(tmp_path)
+        real_init = ExtensionManager.initialize
+
+        async def scoped_init(self, session, config, cancel_event=None, **kw):
+            kw.pop("user_dir", None)
+            kw.pop("project_dir", None)
+            return await real_init(
+                self, session, config, cancel_event,
+                user_dir=d, project_dir=tmp_path / "no-project", **kw
+            )
+
+        monkeypatch.setattr(ExtensionManager, "initialize", scoped_init)
+
+        config = AgentConfig()
+        config.tools.enabled_builtins = ["read_file"]
+        config.tools.enabled_extension_tools = []
+        agent = Agent(config, provider=MagicMock())
+        await agent._init_extensions(Session())
+
+        assert agent.registry.get("read_file") is not None

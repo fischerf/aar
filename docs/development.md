@@ -229,8 +229,12 @@ print(msg.content)         # "Analyse this chart and audio."  (text summary for 
 | `edit_file` | write | Replace an exact string in a file (must be unique) |
 | `list_directory` | read | List files and directories |
 | `bash` | execute | Run a shell command, return stdout + stderr |
+| `grep` | read | Regex content search across files |
+| `find_files` | read | Glob-based file path search |
+| `spawn_agent` | execute | Run a nested agent from a config profile (gated by `SubAgentConfig`) |
 
-All built-ins are opt-in via `ToolConfig.enabled_builtins`.
+All built-ins are opt-in via `ToolConfig.enabled_builtins`, except `spawn_agent`, which
+is gated by `subagents.enabled` — see [Configuration](configuration.md#sub-agents-spawn_agent).
 
 ### Custom tools
 
@@ -267,6 +271,50 @@ agent.registry.add(ToolSpec(
     handler=lambda path: str(sum(1 for _ in open(path))),
 ))
 ```
+
+### Long-running tools
+
+`ToolExecutor` wraps every handler in `tools.command_timeout` (300 s by default), so a
+tool that legitimately runs for minutes must say so on its spec:
+
+```python
+agent.registry.add(ToolSpec(
+    name="render_image",
+    description="Render an image with a local diffusion model",
+    input_schema={"type": "object", "properties": {"prompt": {"type": "string"}}},
+    side_effects=[SideEffect.NETWORK, SideEffect.WRITE],
+    timeout_s=900,          # overrides command_timeout for this tool only
+    handler=render,
+))
+```
+
+`timeout_s=None` (the default) falls back to `command_timeout`; `command_timeout = 0`
+disables the outer guard entirely. The extension API accepts the same keyword:
+`@api.tool(..., timeout_s=900)`.
+
+### Sub-agents programmatically
+
+`spawn_agent` is a thin wrapper around `Agent.chat()`, so a nested run is equally easy
+to drive yourself — useful when you want the nesting without exposing a tool to the
+model:
+
+```python
+from agent import Agent
+from agent.tools.builtin.subagent import build_child_config
+
+parent = Agent(config)
+profile = config.subagents.agents["researcher"]
+
+child = Agent(build_child_config(config, profile, depth_remaining=0),
+              approval_callback=parent.approval_callback)
+answer = await child.chat("Where are sessions persisted?")
+transcript = child.last_session          # the child's full event log
+```
+
+`build_child_config` is what enforces the invariants: `safety` is deep-copied from the
+parent, the child's built-ins are intersected with the parent's, and the depth budget
+decrements. Build the child config by hand and you take responsibility for those
+yourself.
 
 ## Sessions and persistence
 

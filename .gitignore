@@ -29,3 +29,6 @@ docs/ideas/
 docs/issues/
 *.pyc
 docs/ignore/
+start_serve.bat
+start_webchat.bat
+docs/done/review-2026-06-plan.md

@@ -26,6 +26,13 @@ class ToolSpec(BaseModel):
     side_effects: list[SideEffect] = Field(default_factory=lambda: [SideEffect.NONE])
     requires_approval: bool = False
 
+    # Per-tool override for the executor's outer timeout, in seconds. ``None``
+    # falls back to ``ToolConfig.command_timeout``; a value <= 0 means "no outer
+    # timeout". Set this on tools whose work legitimately outlives the shared
+    # cap (a diffusion render, a sub-agent run) instead of raising the cap for
+    # every tool in the process.
+    timeout_s: int | None = None
+
     # One-line summary shown in the system prompt's "Available tools" section.
     prompt_snippet: str = ""
     # Conditional guidelines injected into the system prompt when this tool is active.

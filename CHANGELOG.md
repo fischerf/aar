@@ -35,6 +35,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state across runs instead of being rebuilt and discarded on every run.
 
 ### Changed
+- **Extension panels moved to a left sidebar** in the fixed TUI (`#left-col`),
+  visible by default so progress can be followed while the agent works, and no
+  longer sharing the thinking panel's column. `z` (or a click on the panel
+  title) zooms a panel into a near-full-screen `PanelWindow` with per-node
+  details, a detail pane and mouse-clickable action buttons; `esc`/`z`/`ctrl+b`
+  close it. `tui.layout.extensions.<name>.visible: false` hides a panel.
+- The inline TUI renders extension panels as Rich trees: `/panel [name]` shows
+  the full tree; after a turn or an extension slash command that changed a
+  panel, a compact tree is printed.
+- **Tool-result notes** — `add_tool_result_note(event, text)` from a
+  `tool_result` hook attaches a display-only line (`ToolResult.data["notes"]`,
+  never sent to the model) shown under the result in both TUIs and on the
+  editor's tool-call card over ACP. The inline TUI no longer reprints changed
+  panels after every turn (notes replace that); it still does after an
+  extension slash command.
+- **ACP slash-command UX** — `api.command(..., hint="[N] [--force]")` is sent
+  as `AvailableCommand.input`, so editors show argument placeholders; extension
+  replies laid out as plain-text trees are wrapped in a code fence so Markdown
+  rendering (Zed) keeps their shape.
+- **Extension command replies print literally** in both TUIs (no Rich markup
+  parsing — diffs and code contain `[`); replies containing a unified diff get
+  +/−/hunk colouring (`tui_utils/ui_tree.reply_lines`). Over ACP, diffs are
+  sent in a `diff` code fence and `git --stat` columns in a `text` fence.
+- **Fixed TUI panel polish** — nodes that appear in a refresh (a new
+  checkpoint, say) are highlighted for a few seconds (`FRESH_SECONDS`); the
+  zoomed window's detail pane colours unified diffs (`reply_text`).
+- **Panel action previews** — `UIAction.preview(node, ctx)` returns what a
+  destructive action would do ("drops 3 checkpoint(s) · 4 files +60 −12");
+  the fixed TUI shows it in the confirm dialog (now rendered literally, no Rich
+  markup), and ACP clients get it with `preview: true` on `_aar/panel_action`
+  / the HTTP action endpoint without running the action.
+- Panel contract: `UINode.detail` (secondary text, also in ACP `to_dict`) and
+  `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while
   an extension panel is still visible in it.
 

@@ -127,17 +127,21 @@ class ToolExecutor:
                 return _error_result(tc, "denied", "tool call denied by user")
 
         # --- Execute ---
+        # ``None`` disables the outer guard entirely; ``wait_for(timeout=None)``
+        # simply awaits. Passing 0 here would cancel the handler on its first
+        # suspension, which is what ``command_timeout = 0`` used to do despite
+        # being documented as "disables the outer guard".
+        timeout = spec.timeout_s if spec.timeout_s is not None else self.tool_config.command_timeout
+        timeout = timeout if timeout and timeout > 0 else None
+
         t_start = time.monotonic()
         try:
             if inspect.iscoroutinefunction(spec.handler):
-                output = await asyncio.wait_for(
-                    spec.handler(**tc.arguments),
-                    timeout=self.tool_config.command_timeout,
-                )
+                output = await asyncio.wait_for(spec.handler(**tc.arguments), timeout=timeout)
             else:
                 output = await asyncio.wait_for(
                     asyncio.to_thread(spec.handler, **tc.arguments),
-                    timeout=self.tool_config.command_timeout,
+                    timeout=timeout,
                 )
             output_str = str(output)
             if len(output_str) > self.tool_config.max_output_chars:
@@ -152,7 +156,7 @@ class ToolExecutor:
             return _error_result(
                 tc,
                 "timeout",
-                f"tool '{tc.tool_name}' timed out after {self.tool_config.command_timeout}s",
+                f"tool '{tc.tool_name}' timed out after {timeout}s",
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except Exception as e:

@@ -124,7 +124,7 @@ aar acp --http --host 0.0.0.0 --port 9000
 | `GET` | `/sessions/{session_id}` | Session metadata |
 | `GET` | `/sessions/{session_id}/panels` | Extension UI panels registered for the session, with their actions |
 | `GET` | `/sessions/{session_id}/panels/{name}` | Panel snapshot — `{panel, root, status}`; `root` is a `UINode` tree |
-| `POST` | `/sessions/{session_id}/panels/{name}/actions/{action}` | Run an action; body `{"node_id": "...", "args": {...}}` → `{message, root, status}` |
+| `POST` | `/sessions/{session_id}/panels/{name}/actions/{action}` | Run an action; body `{"node_id": "...", "args": {...}}` → `{message, root, status}`. With `"preview": true` nothing runs → `{preview}` |
 
 Panel semantics match the stdio `_aar/panel_*` methods (see §4): the client
 confirms destructive actions itself; mutating actions return `409` while a run
@@ -233,25 +233,25 @@ curl -s -N -X POST http://127.0.0.1:8000/runs \
 | `agent_message_chunk` | Each streaming token (when provider streaming is enabled) or complete assistant message |
 | `agent_thought_chunk` | Extended thinking / reasoning content |
 | `tool_call` (start) | When the agent calls a tool |
-| `tool_call_update` (progress) | When the tool returns its result (status: `completed` or `failed`) |
+| `tool_call_update` (progress) | When the tool returns its result (status: `completed` or `failed`); extension tool-result notes (e.g. a shadow-branching checkpoint line) are appended as extra text content blocks |
 | `plan` | Updated after each tool call and result — shows the current step list with statuses |
 | `usage_update` | After each provider call — reports token count and estimated cost |
 | `session_info_update` | After the first assistant response — sets the session title in the editor sidebar |
-| `available_commands_update` | Once per session on first prompt — advertises `/model` and `/clear` slash commands |
+| `available_commands_update` | Once per session on first prompt — advertises the built-in and extension slash commands; extension commands registered with `hint=` carry it as `input.hint` |
 
 ### Extension UI panels (`_aar/panel_*`)
 
 Extensions can register a **UI panel** — a JSON-safe tree of nodes plus a list
-of actions (see `agent.extensions.api.UIPanel`). The fixed TUI draws it behind
-`ctrl+b`; over stdio ACP the same data is exposed through custom methods so an
+of actions (see `agent.extensions.api.UIPanel`). The fixed TUI draws it in a
+left sidebar (`ctrl+b` focus, `z` zoom); over stdio ACP the same data is exposed through custom methods so an
 editor extension can render it. The SDK prefixes custom methods with `_`; Aar
 strips the prefix and dispatches on the `aar/…` name.
 
 | Direction | Method | Params | Result |
 |-----------|--------|--------|--------|
 | client → agent | `_aar/panel_list` | `sessionId` | `{panels: [{name, title, status, actions: [{id, label, key, kinds, destructive, confirm, inputs, mutates}]}]}` |
-| client → agent | `_aar/panel_snapshot` | `sessionId`, `panel` | `{panel, root, status}` — `root` is a `UINode` (`id`, `label`, `kind`, `style`, `expanded`, `data`, `children`) |
-| client → agent | `_aar/panel_action` | `sessionId`, `panel`, `action`, `nodeId`, `args?` | `{panel, action, message, root, status}` — `message` is the same line the slash command would print; `root` is a fresh snapshot |
+| client → agent | `_aar/panel_snapshot` | `sessionId`, `panel` | `{panel, root, status}` — `root` is a `UINode` (`id`, `label`, `detail`, `kind`, `style`, `expanded`, `data`, `children`) |
+| client → agent | `_aar/panel_action` | `sessionId`, `panel`, `action`, `nodeId`, `args?`, `preview?` | `{panel, action, message, root, status}` — `message` is the same line the slash command would print; `root` is a fresh snapshot. With `preview: true` nothing runs: `{panel, action, preview}` describes what the action would do (for the client's confirm step; actions that offer one have `preview: true` in `panel_list`) |
 | agent → client | `_aar/panel_changed` | `sessionId`, `panel` | notification, sent after a prompt or slash command when the extension flagged its state as stale; fetch a new snapshot to clear it |
 
 Rules:
