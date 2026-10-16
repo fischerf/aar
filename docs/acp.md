@@ -535,11 +535,12 @@ it. Only `aar acp` (stdio) and `create_acp_asgi_app` need it at runtime.
 
 ### Supported SDK versions
 
-Aar declares `agent-client-protocol>=0.10.0` and is tested against both ends of
-that range (0.10.0 and 0.12.1). Every version so far speaks **wire protocol
-version 1**, so the SDK releases are additive within one protocol — an Aar
-agent built on an older SDK still interoperates with a newer client, it just
-doesn't advertise the newer capabilities.
+Aar declares `agent-client-protocol>=0.10.0,<1.0` and is tested against the
+minimum and latest stable releases (0.10.0 and 0.12.1). Those versions speak
+**wire protocol version 1**, so an Aar agent built on an older SDK still
+interoperates with a newer client; it simply does not advertise newer
+capabilities. The 1.0 release candidates contain breaking schema and helper-API
+changes and remain unsupported until Aar completes a dedicated migration.
 
 One behavioural note for 0.12+: the *unstable* `session/set_model` method was
 removed (`SetSessionModelResponse`, `SetSessionModelRequest`, `ModelInfo` and
