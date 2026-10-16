@@ -248,6 +248,87 @@ class TestToolExecution:
         assert results[0].duration_ms < 5000
 
     @pytest.mark.asyncio
+    async def test_zero_command_timeout_disables_the_guard(self):
+        """``command_timeout = 0`` is documented as disabling the outer guard.
+
+        ``wait_for(timeout=0)`` cancels the handler on its first suspension, so
+        a literal 0 used to kill every tool in the process instead.
+        """
+        reg = ToolRegistry()
+
+        async def slow() -> str:
+            await asyncio.sleep(0.05)
+            return "done"
+
+        reg.add(
+            ToolSpec(
+                name="slow",
+                description="slow",
+                handler=slow,
+                input_schema={"type": "object", "properties": {}, "required": []},
+            )
+        )
+        executor = ToolExecutor(reg, ToolConfig(command_timeout=0), SafetyConfig())
+
+        results = await executor.execute(
+            [ToolCall(tool_name="slow", tool_call_id="tc_1", arguments={})]
+        )
+        assert not results[0].is_error
+        assert results[0].output == "done"
+
+    @pytest.mark.asyncio
+    async def test_tool_spec_timeout_overrides_command_timeout(self):
+        """A render or a sub-agent run outlives the shared cap legitimately."""
+        reg = ToolRegistry()
+
+        async def slow() -> str:
+            await asyncio.sleep(0.05)
+            return "done"
+
+        reg.add(
+            ToolSpec(
+                name="slow",
+                description="slow",
+                handler=slow,
+                input_schema={"type": "object", "properties": {}, "required": []},
+                timeout_s=30,
+            )
+        )
+        # command_timeout would have cancelled it at 0s; timeout_s wins.
+        executor = ToolExecutor(reg, ToolConfig(command_timeout=0), SafetyConfig())
+
+        results = await executor.execute(
+            [ToolCall(tool_name="slow", tool_call_id="tc_1", arguments={})]
+        )
+        assert results[0].output == "done"
+
+    @pytest.mark.asyncio
+    async def test_tool_spec_timeout_can_be_shorter_and_still_fires(self):
+        reg = ToolRegistry()
+
+        async def slow() -> str:
+            await asyncio.sleep(100)
+            return "done"
+
+        reg.add(
+            ToolSpec(
+                name="slow",
+                description="slow",
+                handler=slow,
+                input_schema={"type": "object", "properties": {}, "required": []},
+                timeout_s=1,
+            )
+        )
+        executor = ToolExecutor(reg, ToolConfig(command_timeout=600), SafetyConfig())
+
+        results = await executor.execute(
+            [ToolCall(tool_name="slow", tool_call_id="tc_1", arguments={})]
+        )
+        assert results[0].is_error
+        assert results[0].output.startswith("Error [timeout]:")
+        assert "1s" in results[0].output
+
+    @pytest.mark.asyncio
     async def test_execute_timeout_sync_handler(self):
         """Sync (thread-offloaded) handlers must respect ``command_timeout`` too.
 

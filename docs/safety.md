@@ -82,7 +82,21 @@ deep audit trails and have reviewed what the agent is likely to run.
 
 ## `allowed_paths` and bash
 
-`allowed_paths` is a hard path boundary for file tools (`read_file`, `write_file`, `edit_file`, `list_directory`). Any access outside the whitelist is **denied**, regardless of approval settings.
+`allowed_paths` is a hard path boundary for any tool that declares `SideEffect.READ` or `SideEffect.WRITE` — the built-in file tools (`read_file`, `write_file`, `edit_file`, `list_directory`), and equally any extension or MCP tool. Access outside the whitelist is **denied**, regardless of approval settings.
+
+### Which arguments are path-checked
+
+The check is schema-driven: the policy walks `spec.input_schema["properties"]` and runs every path-like argument through `denied_paths` / `allowed_paths`. An argument counts as path-like when it is
+
+- **named** `path`, `filepath`, `directory`, `cwd`, or ends in `_path`;
+- **named** `paths`, `filepaths`, `directories`, or ends in `_paths`;
+- **annotated** `{"format": "path"}`, or — for an array — `{"items": {"format": "path"}}`.
+
+List values are checked element by element, so one bad entry among nine good ones denies the call.
+
+**Anything else is invisible to the policy.** A tool that takes `src` or `target_file` and does not annotate it reaches the filesystem unchecked, which is why the annotation matters when you [write a tool](extensions.md#custom-tools). Tools with no `input_schema` at all (some MCP servers) fall back to a legacy lookup of the single `path` key.
+
+The check uses one `is_write` flag for the whole call, derived from the tool's side effects — so a tool declaring both READ and WRITE has *all* of its path arguments evaluated as writes, including ones it only reads.
 
 **Bash is different.** A shell command can access any path; there is no reliable way to inspect what paths an arbitrary command will touch before running it. Aar handles this by mode:
 
@@ -751,14 +765,39 @@ Paths that look absolute are never fed through `Path.resolve()` because that
 would prepend the current drive on Windows (`/etc/shadow` → `C:/etc/shadow`),
 breaking defaults like `denied_paths=["/etc/shadow"]`.
 
+## Sub-agents
+
+A sub-agent spawned with `spawn_agent` runs in the same process under the **same safety
+model as its parent** — it is not a way to get a less restricted agent:
+
+| Aspect | How it is constrained |
+|---|---|
+| Sandbox, denied/allowed paths, approval flags | `safety` is deep-copied from the parent config; a profile cannot set or relax it |
+| Built-in tools | `profile.tools` is intersected with the parent's `enabled_builtins` — a child can only ever be a subset |
+| Approval gates | The parent's `ApprovalCallback` is passed to the child, so an approval-gated write still prompts the same human |
+| What the model controls | Only `agent_name` (from a fixed enum) and `task` — never tools, provider, or paths |
+| Recursion | `max_depth` decrements at each level; at zero the tool is not registered at all |
+
+Two things to be aware of:
+
+- **Approval prompts come from a context the user did not start.** An approval that
+  reaches the human during a sub-agent run is for a call the *child* made, described by
+  the child's tool name and arguments. Keep `require_approval_for_write` /
+  `_execute` on if that matters to you; a profile cannot turn them off.
+- **A sub-agent's `task` is model-written text.** Giving a profile `bash` means the
+  parent model can compose a command for it indirectly. The deny-list and sandbox still
+  apply, but prefer read-only profiles (`read_file`, `grep`, `find_files`) unless a
+  child genuinely needs to act.
+
 ## Architecture
 
-The safety system has four components:
+The safety system has five components:
 
 - **`agent/safety/policy.py`** — `SafetyPolicy` evaluates tool calls against `PolicyConfig` rules, returning ALLOW/DENY/ASK
 - **`agent/safety/permissions.py`** — `PermissionManager` handles ASK decisions by calling the approval callback and caching APPROVED_ALWAYS results
 - **`agent/safety/sandbox.py`** — `LocalSandbox`, `LinuxSandbox`, `WindowsSubprocessSandbox`, and `WslDistroSandbox` control how shell commands are actually executed
 - **`agent/safety/wsl_manager.py`** — helpers for WSL2 distro lifecycle (`is_wsl_available`, `list_distros`, `import_distro`, `unregister_distro`, `run_in_distro`, `download_rootfs`); used by `aar sandbox` commands
 - **`agent/tools/builtin/shell.py`** — the `bash` tool handler delegates to the configured sandbox via a closure injected at registration time
+- **`agent/tools/builtin/subagent.py`** — `build_child_config` derives a sub-agent's config from its parent's, carrying `safety` across untouched and intersecting the child's tool set with the parent's
 
 These are composed by `ToolExecutor` (`agent/tools/execution.py`), which is the single entry point for all tool execution in the agent loop.

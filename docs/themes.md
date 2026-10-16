@@ -231,7 +231,10 @@ Each section accepts:
 
 ### Extension sections
 
-Extensions can register custom panels. Control their visibility via the `extensions` key:
+Extensions can register custom panels (`UIPanel`, keyed by panel name — e.g.
+`shadow_branching`). Control their visibility via the `extensions` key. In the
+inline TUI a hidden panel is not auto-printed after turns (`/panel <name>` still
+shows it); in the fixed TUI it starts hidden in the left sidebar (`ctrl+b` shows it):
 
 ```json
 {

@@ -93,6 +93,7 @@ class EventType(str, Enum):
     SESSION = "session"
     PROVIDER_SWITCH = "provider_switch"
     CONTEXT_WINDOW = "context_window"
+    SUBAGENT = "subagent"
 
 
 class StopReason(str, Enum):
@@ -208,6 +209,26 @@ class ProviderSwitchEvent(Event):
     to_model: str = ""
 
 
+class SubAgentEvent(Event):
+    """Emitted by the ``spawn_agent`` tool around a nested agent run.
+
+    The child's own events live in its own session (persisted separately);
+    this is the parent-side record of the spawn, so a transcript shows that a
+    sub-agent ran, which profile, and what it cost.
+    """
+
+    type: EventType = EventType.SUBAGENT
+    agent_name: str = ""
+    task: str = ""
+    status: str = ""  # "started" | "completed" | "failed" | "timeout"
+    child_session_id: str = ""
+    # How many further levels of nesting the spawned child was allowed.
+    depth_remaining: int = 0
+    steps: int = 0
+    duration_ms: float | None = None
+    error: str = ""
+
+
 class ContextWindowEvent(Event):
     """Emitted once per loop turn after context-management trimming.
 
@@ -237,6 +258,7 @@ AnyEvent = (
     | SessionEvent
     | ProviderSwitchEvent
     | ContextWindowEvent
+    | SubAgentEvent
 )
 
 EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
@@ -251,6 +273,7 @@ EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.SESSION: SessionEvent,
     EventType.PROVIDER_SWITCH: ProviderSwitchEvent,
     EventType.CONTEXT_WINDOW: ContextWindowEvent,
+    EventType.SUBAGENT: SubAgentEvent,
 }
 
 
