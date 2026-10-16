@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state across runs instead of being rebuilt and discarded on every run.
 
 ### Changed
+- **Dependency baseline refreshed** — the reproducible requirements set now uses the
+  latest compatible stable releases, including `agent-client-protocol` 0.12.1 and
+  MCP 1.30.0. ACP remains compatible with 0.10.x but is capped below the breaking
+  1.0 line; MCP remains capped below 2.0. The Hatchling build backend is now 1.32.4.
 - **Extension panels moved to a left sidebar** in the fixed TUI (`#left-col`),
   visible by default so progress can be followed while the agent works, and no
   longer sharing the thinking panel's column. `z` (or a click on the panel

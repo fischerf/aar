@@ -324,16 +324,16 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 
 ## Requirements
 
-- Python 3.12+
-- `pydantic >= 2.12`
-- `httpx >= 0.28`
-- `typer >= 0.24`
-- `rich >= 14.3`
-- `textual >= 8.2` (TUI / fixed TUI)
-- `jsonschema >= 4.0`
+- Python 3.12.2+
+- `pydantic >= 2.12.5`
+- `httpx >= 0.28.1`
+- `typer >= 0.26`
+- `rich >= 14.3.4`
+- `textual >= 8.2.3` (TUI / fixed TUI)
+- `jsonschema >= 4.18`
 - Provider SDK as needed: `anthropic`, `openai`, `google-genai`
-- ACP transport: `agent-client-protocol >= 0.10`
-- MCP bridge: `mcp >= 1.27`
+- ACP transport: `agent-client-protocol >= 0.10, < 1.0`
+- MCP bridge: `mcp >= 1.28.1, < 2.0`
 
 ### Windows — `bash` tool
 
