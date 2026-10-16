@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,6 +54,25 @@ _PROVIDER_ENV_KEY: dict[str, str] = {
     "ollama": "",  # Ollama needs no key
     "generic": "",
 }
+
+
+def _ensure_utf8_stdio() -> None:
+    """Switch redirected stdout/stderr to UTF-8.
+
+    On Windows a pipe or file gets the ANSI code page (cp1252), so the first ``▸``
+    or box-drawing character crashes ``aar run ... > log`` with UnicodeEncodeError.
+    Consoles are already UTF-8 (PEP 528) and are left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+@app.callback()
+def _main() -> None:
+    """Lean Python Agent CLI."""
+    _ensure_utf8_stdio()
 
 
 def _harvest_tool_prompt_metadata(
@@ -126,9 +146,14 @@ def _build_config(
     if isinstance(cfg.provider, str):
         cfg.provider = cfg.resolve_provider()
 
-    # Provider settings — only override when explicitly passed
+    # Provider settings — only override when explicitly passed.  A key from the
+    # config's ``providers`` selects that whole profile (model, base_url, extra);
+    # anything else is a provider type applied to the default profile.
     if provider is not None:
-        cfg.provider.name = provider
+        if provider in cfg.providers:
+            cfg.provider = cfg.providers[provider].model_copy(deep=True)
+        else:
+            cfg.provider.name = provider
     if model is not None:
         cfg.provider.model = model
     if base_url:
@@ -548,7 +573,10 @@ async def _async_chat_loop(
 def chat(
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Model to use"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+        None,
+        "--provider",
+        "-p",
+        help="Profile from the config's providers, or a type (anthropic, openai, ollama, generic)",
     ),
     base_url: str = typer.Option(
         "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"
@@ -634,7 +662,10 @@ def run(
     task: str = typer.Argument(..., help="Task to execute"),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+        None,
+        "--provider",
+        "-p",
+        help="Profile from the config's providers, or a type (anthropic, openai, ollama, generic)",
     ),
     base_url: str = typer.Option(
         "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"
@@ -768,7 +799,10 @@ def sessions() -> None:
 def prompt(
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+        None,
+        "--provider",
+        "-p",
+        help="Profile from the config's providers, or a type (anthropic, openai, ollama, generic)",
     ),
     config_file: Optional[str] = typer.Option(
         None, "--config", help="Path to AgentConfig JSON file (default: ~/.aar/config.json)"
@@ -886,7 +920,10 @@ def tools(
 def tui(
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+        None,
+        "--provider",
+        "-p",
+        help="Profile from the config's providers, or a type (anthropic, openai, ollama, generic)",
     ),
     base_url: str = typer.Option(
         "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"
@@ -1069,7 +1106,10 @@ def serve(
     port: int = typer.Option(8080, "--port", help="Port to listen on"),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+        None,
+        "--provider",
+        "-p",
+        help="Profile from the config's providers, or a type (anthropic, openai, ollama, generic)",
     ),
     base_url: str = typer.Option(
         "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"
@@ -1203,7 +1243,10 @@ def acp(
     ),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="Provider name (anthropic, openai, ollama, generic)"
+        None,
+        "--provider",
+        "-p",
+        help="Profile from the config's providers, or a type (anthropic, openai, ollama, generic)",
     ),
     base_url: str = typer.Option(
         "", "--base-url", help="Provider base URL (e.g. http://localhost:11434 for Ollama)"

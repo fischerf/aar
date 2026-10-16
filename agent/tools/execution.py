@@ -21,8 +21,13 @@ from agent.safety.sandbox import (
     WslDistroSandbox,
 )
 from agent.tools.registry import ToolRegistry
+from agent.tools.schema import SideEffect
 
 logger = logging.getLogger(__name__)
+
+# Side effects that cannot change what a sibling call in the same batch observes.
+# EXTERNAL (MCP) is deliberately absent: the bridge cannot tell a read from a write.
+_CONCURRENT_SAFE = frozenset({SideEffect.NONE, SideEffect.READ, SideEffect.NETWORK})
 
 # S7 — Resolve jsonschema once at import time and surface a loud one-shot
 # warning if it isn't installed. Previously ``_validate_arguments`` swallowed
@@ -87,15 +92,31 @@ class ToolExecutor:
 
         Args:
             tool_calls: The tool calls to execute.
-            parallel: If True and multiple calls are present, execute concurrently.
+            parallel: If True and multiple calls are present, execute concurrently —
+                unless one of them writes or executes, in which case the batch runs in
+                the order the model issued it.
         """
-        if parallel and len(tool_calls) > 1:
+        if parallel and len(tool_calls) > 1 and self._can_run_concurrently(tool_calls):
             return await asyncio.gather(*(self._execute_one(tc) for tc in tool_calls))
         results = []
         for tc in tool_calls:
             result = await self._execute_one(tc)
             results.append(result)
         return results
+
+    def _can_run_concurrently(self, tool_calls: list[ToolCall]) -> bool:
+        """True if no call in the batch can change what another one observes.
+
+        A model may emit dependent calls in one step — ``write_file`` then a ``bash``
+        that reads it, or ``image_generate`` then an ``image_edit`` of its output.
+        Run concurrently, the second races the first and fails on a file that does
+        not exist yet.  Only pure reads (and network fetches) are safe to overlap.
+        """
+        for tc in tool_calls:
+            spec = self.registry.get(tc.tool_name)
+            if spec and not set(spec.side_effects) <= _CONCURRENT_SAFE:
+                return False
+        return True
 
     async def _execute_one(self, tc: ToolCall) -> ToolResult:
         spec = self.registry.get(tc.tool_name)
@@ -107,6 +128,7 @@ class ToolExecutor:
 
         # --- Input validation against schema ---
         if spec.input_schema:
+            tc = _drop_null_optionals(tc, spec.input_schema)
             validation_error = _validate_arguments(tc.arguments, spec.input_schema)
             if validation_error:
                 return _error_result(
@@ -202,6 +224,34 @@ def _error_result(
     if duration_ms is not None:
         kwargs["duration_ms"] = duration_ms
     return ToolResult(**kwargs)
+
+
+def _allows_null(prop: dict) -> bool:
+    types = prop.get("type")
+    if types == "null" or (isinstance(types, list) and "null" in types):
+        return True
+    return any(_allows_null(p) for p in prop.get("anyOf", []) + prop.get("oneOf", []))
+
+
+def _drop_null_optionals(tc: ToolCall, schema: dict) -> ToolCall:
+    """Treat ``null`` for an optional, non-nullable parameter as "not given".
+
+    Small local models routinely send ``"negative_prompt": null`` for arguments
+    they mean to omit.  Rejecting that costs a whole model turn for a retry that
+    changes nothing, so the key is dropped and the handler's default applies.
+    Required parameters and ones whose schema allows ``null`` are left alone.
+    """
+    props = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    drop = [
+        k
+        for k, v in tc.arguments.items()
+        if v is None and k in props and k not in required and not _allows_null(props[k])
+    ]
+    if not drop:
+        return tc
+    kept = {k: v for k, v in tc.arguments.items() if k not in drop}
+    return tc.model_copy(update={"arguments": kept})
 
 
 def _validate_arguments(arguments: dict, schema: dict) -> str | None:

@@ -613,6 +613,54 @@ class TestParallelExecution:
         # Allow generous margin but it should be well under 150ms
         assert parallel_time < 0.12
 
+    @pytest.mark.asyncio
+    async def test_dependent_write_then_read_runs_in_order(self):
+        """A batch that writes must not race: the read sees the write that precedes it."""
+        reg = ToolRegistry()
+        store: dict[str, str] = {}
+
+        async def produce(name: str) -> str:
+            await asyncio.sleep(0.05)  # a slow render / write
+            store[name] = "data"
+            return f"saved {name}"
+
+        async def consume(name: str) -> str:
+            return f"read {store[name]}" if name in store else f"not found: {name}"
+
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }
+        reg.add(
+            ToolSpec(
+                name="produce",
+                description="produce",
+                input_schema=schema,
+                side_effects=[SideEffect.NETWORK, SideEffect.WRITE],
+                handler=produce,
+            )
+        )
+        reg.add(
+            ToolSpec(
+                name="consume",
+                description="consume",
+                input_schema=schema,
+                side_effects=[SideEffect.READ],
+                handler=consume,
+            )
+        )
+        safety = SafetyConfig(require_approval_for_writes=False)
+        executor = ToolExecutor(reg, ToolConfig(), safety)
+
+        calls = [
+            ToolCall(tool_name="produce", tool_call_id="tc_0", arguments={"name": "a.png"}),
+            ToolCall(tool_name="consume", tool_call_id="tc_1", arguments={"name": "a.png"}),
+        ]
+        results = await executor.execute(calls, parallel=True)
+        assert results[0].output == "saved a.png"
+        assert results[1].output == "read data"
+
 
 # ---------------------------------------------------------------------------
 # Sandbox wiring through ToolExecutor → shell tool
@@ -952,3 +1000,65 @@ class TestS7SchemaValidation:
         finally:
             ex._JSONSCHEMA_AVAILABLE = orig_available
             ex._JSONSCHEMA_WARNED = orig_warned
+
+
+class TestNullOptionalArguments:
+    @pytest.mark.asyncio
+    async def test_null_for_optional_argument_means_omitted(self):
+        """Small models send ``"negative_prompt": null`` — that must not fail validation."""
+        reg = ToolRegistry()
+
+        async def render(prompt: str, negative_prompt: str = "", seed: int | None = None) -> str:
+            return f"{prompt}|{negative_prompt}|{seed}"
+
+        reg.add(
+            ToolSpec(
+                name="render",
+                description="render",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "negative_prompt": {"type": "string"},
+                        "seed": {"type": ["integer", "null"]},
+                    },
+                    "required": ["prompt"],
+                },
+                handler=render,
+            )
+        )
+        executor = ToolExecutor(reg, ToolConfig(), SafetyConfig())
+        call = ToolCall(
+            tool_name="render",
+            tool_call_id="tc_0",
+            arguments={"prompt": "cat", "negative_prompt": None, "seed": None},
+        )
+        [result] = await executor.execute([call])
+        assert not result.is_error, result.output
+        # dropped → handler default; explicitly nullable → passed through as None
+        assert result.output == "cat||None"
+
+    @pytest.mark.asyncio
+    async def test_null_for_required_argument_still_fails(self):
+        reg = ToolRegistry()
+
+        async def render(prompt: str) -> str:
+            return prompt
+
+        reg.add(
+            ToolSpec(
+                name="render",
+                description="render",
+                input_schema={
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}},
+                    "required": ["prompt"],
+                },
+                handler=render,
+            )
+        )
+        executor = ToolExecutor(reg, ToolConfig(), SafetyConfig())
+        call = ToolCall(tool_name="render", tool_call_id="tc_0", arguments={"prompt": None})
+        [result] = await executor.execute([call])
+        assert result.is_error
+        assert "invalid_arguments" in result.output
