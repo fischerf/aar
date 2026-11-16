@@ -19,14 +19,21 @@ The invariants that keep a sub-agent from being a privilege-escalation path:
 * ``max_depth`` decrements on every level, and at zero the tool is simply not
   registered — a leaf agent has no ``spawn_agent`` to call.
 
+``max_concurrent`` caps how many sub-agents run at once in the process — local
+models usually have one GPU's worth of room.  Spawns past the cap wait for a
+slot; nested spawns reuse their ancestor's slot.
+
 Off by default (``subagents.enabled``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import logging
 import time
+import weakref
 from typing import TYPE_CHECKING
 
 from agent.core.config import AgentConfig, SubAgentProfile
@@ -39,6 +46,42 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle: agent.py imports this modu
 logger = logging.getLogger(__name__)
 
 TOOL_NAME = "spawn_agent"
+
+# Set while a sub-agent holds a concurrency slot.  Its own spawns run inside
+# that slot — waiting for a second one would deadlock at ``max_concurrent=1``.
+_IN_SLOT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "aar_subagent_in_slot", default=False
+)
+
+# One semaphore per (event loop, limit): an asyncio.Semaphore binds to the
+# loop that first waits on it, and every session in the process shares it.
+_SLOTS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int, asyncio.Semaphore]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _slot_for(limit: int) -> asyncio.Semaphore | None:
+    """The semaphore a new spawn must hold, or None if it needs none."""
+    if limit <= 0 or _IN_SLOT.get():
+        return None
+    per_loop = _SLOTS.setdefault(asyncio.get_running_loop(), {})
+    if limit not in per_loop:
+        per_loop[limit] = asyncio.Semaphore(limit)
+    return per_loop[limit]
+
+
+@contextlib.asynccontextmanager
+async def _hold(slot: asyncio.Semaphore | None):
+    """Hold *slot* (if any) and mark this task tree as inside it."""
+    if slot is None:
+        yield
+        return
+    async with slot:
+        token = _IN_SLOT.set(True)
+        try:
+            yield
+        finally:
+            _IN_SLOT.reset(token)
 
 
 def build_child_config(
@@ -106,6 +149,19 @@ def register_subagent_tool(registry: ToolRegistry, *, parent: Agent) -> bool:
             available = ", ".join(sorted(agents))
             return f"Error: unknown agent {agent_name!r}. Available: {available}"
 
+        slot = _slot_for(cfg.max_concurrent)
+        if slot is not None and slot.locked():
+            _emit(
+                parent,
+                agent_name=agent_name,
+                task=task,
+                status="queued",
+                depth_remaining=depth_remaining,
+            )
+        async with _hold(slot):
+            return await _run(agent_name, profile, task)
+
+    async def _run(agent_name: str, profile: SubAgentProfile, task: str) -> str:
         # Deferred: agent.py imports this module at registration time.
         from agent.core.agent import Agent as _Agent
         from agent.memory.session_store import SessionStore
@@ -210,7 +266,11 @@ def register_subagent_tool(registry: ToolRegistry, *, parent: Agent) -> bool:
                 },
                 "required": ["agent_name", "task"],
             },
+            # EXECUTE keeps spawns out of concurrent batches; the child's own
+            # tool calls are what the policy checks, so the forced ASK for
+            # unverifiable shell commands does not apply to the spawn itself.
             side_effects=[SideEffect.EXECUTE],
+            policy_confined=True,
             timeout_s=longest,
             prompt_snippet=(
                 f"{TOOL_NAME}: delegate a self-contained task to a preconfigured sub-agent "

@@ -473,6 +473,7 @@ Off by default. When `subagents.enabled` is true and at least one profile is dec
 |---|---|---|
 | `enabled` | `false` | Register the tool at all |
 | `max_depth` | `1` | Levels of nesting. At `0` the tool is not registered, so a leaf agent has nothing to call |
+| `max_concurrent` | `0` | Sub-agents allowed to run at once across the whole process (all sessions of `aar serve` / `aar acp` share it); `0` = no limit. Extra spawns wait for a slot (a `queued` `SubAgentEvent`), and the wait counts toward the tool's timeout. Nested sub-agents run inside their ancestor's slot. Set `1` when the sub-agent model has one GPU to itself |
 | `agents.<name>.description` | `""` | Shown to the calling model — this is how it picks a profile |
 | `agents.<name>.tools` | `[]` | The child's `enabled_builtins`, intersected with the parent's |
 | `agents.<name>.provider` | `""` | Key into `providers`; empty inherits the parent's |
