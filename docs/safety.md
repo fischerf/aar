@@ -109,6 +109,8 @@ The check uses one `is_write` flag for the whole call, derived from the tool's s
 
 For `linux` and `windows` modes, `require_approval_for_execute` still applies as normal. The forced-ASK only kicks in when the sandbox cannot actually enforce the boundary.
 
+The forced-ASK applies to every EXECUTE tool except those whose `ToolSpec` sets `policy_confined=True`, meaning the tool runs no command of its own and everything it does passes through this same policy. Only `spawn_agent` sets it: the sub-agent inherits the parent's `safety` block, so its `bash` calls are still forced to ASK. `require_approval_for_execute` still applies to a confined tool.
+
 The `<cwd>/**` sentinel in `allowed_paths` is expanded to the working directory path at startup — so `aar init` writes `["<cwd>/**"]` to the config and it resolves correctly regardless of where `aar` is launched.
 
 ## `read_only_paths` and skills

@@ -897,6 +897,39 @@ class TestBashAllowedPathsRestriction:
         )
         assert policy.check_tool(self._bash_spec(), {"command": "ls"}) == PolicyDecision.ALLOW
 
+    def test_policy_confined_tool_not_forced_ask_with_wsl_sandbox(self):
+        """spawn_agent runs no command itself — its child's calls hit the same policy."""
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=False,
+                sandbox_mode="wsl",
+            )
+        )
+        spec = ToolSpec(
+            name="spawn_agent",
+            description="",
+            side_effects=[SideEffect.EXECUTE],
+            policy_confined=True,
+        )
+        assert policy.check_tool(spec, {"agent_name": "x", "task": "y"}) == PolicyDecision.ALLOW
+
+    def test_policy_confined_tool_still_honours_require_approval(self):
+        policy = SafetyPolicy(
+            PolicyConfig(
+                allowed_paths=["/safe/**"],
+                require_approval_for_execute=True,
+                sandbox_mode="wsl",
+            )
+        )
+        spec = ToolSpec(
+            name="spawn_agent",
+            description="",
+            side_effects=[SideEffect.EXECUTE],
+            policy_confined=True,
+        )
+        assert policy.check_tool(spec, {"agent_name": "x", "task": "y"}) == PolicyDecision.ASK
+
     def test_bash_no_forced_ask_without_allowed_paths(self):
         """When allowed_paths is empty, no forced-ASK — existing require_approval_for_execute governs."""
         policy = SafetyPolicy(

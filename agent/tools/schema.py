@@ -26,6 +26,13 @@ class ToolSpec(BaseModel):
     side_effects: list[SideEffect] = Field(default_factory=lambda: [SideEffect.NONE])
     requires_approval: bool = False
 
+    # True for an EXECUTE tool that runs no shell command of its own and whose
+    # work is checked call by call against the same SafetyPolicy (``spawn_agent``:
+    # the child agent inherits the parent's safety config). Such a tool is exempt
+    # from the forced ASK that guards unverifiable shell commands under
+    # ``allowed_paths``; ``require_approval_for_execute`` still applies.
+    policy_confined: bool = False
+
     # Per-tool override for the executor's outer timeout, in seconds. ``None``
     # falls back to ``ToolConfig.command_timeout``; a value <= 0 means "no outer
     # timeout". Set this on tools whose work legitimately outlives the shared

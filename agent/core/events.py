@@ -220,7 +220,7 @@ class SubAgentEvent(Event):
     type: EventType = EventType.SUBAGENT
     agent_name: str = ""
     task: str = ""
-    status: str = ""  # "started" | "completed" | "failed" | "timeout"
+    status: str = ""  # "queued" | "started" | "completed" | "failed" | "timeout"
     child_session_id: str = ""
     # How many further levels of nesting the spawned child was allowed.
     depth_remaining: int = 0

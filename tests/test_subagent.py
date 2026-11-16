@@ -62,6 +62,8 @@ def test_registered_when_configured():
     assert spec.input_schema["properties"]["agent_name"]["enum"] == ["researcher"]
     # The profile timeout must survive the executor's shared command_timeout.
     assert spec.timeout_s == 30
+    # The child's own calls are policy-checked, so no forced ASK on the spawn.
+    assert spec.policy_confined is True
 
 
 def test_description_lists_the_profiles():
@@ -260,6 +262,86 @@ async def test_child_session_is_persisted(monkeypatch, tmp_path):
     from agent.memory.session_store import SessionStore
 
     assert SessionStore(tmp_path / "sessions").load(child_session.session_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# Concurrency limit
+# ---------------------------------------------------------------------------
+
+
+def _track_running(monkeypatch) -> dict[str, int]:
+    """Patch Agent.chat with a slow fake that records peak concurrency."""
+    from agent.core.session import Session
+
+    stats = {"running": 0, "peak": 0}
+
+    async def fake_chat(self, task, session=None):
+        stats["running"] += 1
+        stats["peak"] = max(stats["peak"], stats["running"])
+        await asyncio.sleep(0.05)
+        stats["running"] -= 1
+        self.last_session = Session()
+        return "done"
+
+    monkeypatch.setattr(Agent, "chat", fake_chat)
+    return stats
+
+
+@pytest.mark.asyncio
+async def test_max_concurrent_serialises_spawns(monkeypatch, tmp_path):
+    from agent.core.session import Session
+
+    parent = _agent(_config(max_concurrent=1))
+    parent.config.session_dir = tmp_path / "sessions"
+    parent.last_session = Session()
+    stats = _track_running(monkeypatch)
+
+    handler = parent.registry.get(TOOL_NAME).handler
+    outs = await asyncio.gather(*(handler(agent_name="researcher", task=f"t{i}") for i in range(3)))
+
+    assert all(o.startswith("done") for o in outs)
+    assert stats["peak"] == 1
+    statuses = [e.status for e in parent.last_session.events if isinstance(e, SubAgentEvent)]
+    assert "queued" in statuses
+    assert statuses.count("completed") == 3
+
+
+@pytest.mark.asyncio
+async def test_no_limit_by_default(monkeypatch, tmp_path):
+    parent = _agent(_config())
+    parent.config.session_dir = tmp_path / "sessions"
+    stats = _track_running(monkeypatch)
+
+    handler = parent.registry.get(TOOL_NAME).handler
+    await asyncio.gather(*(handler(agent_name="researcher", task=f"t{i}") for i in range(3)))
+
+    assert stats["peak"] == 3
+
+
+@pytest.mark.asyncio
+async def test_nested_spawn_reuses_the_ancestor_slot(monkeypatch, tmp_path):
+    """At max_concurrent=1 a sub-agent spawning its own child must not deadlock."""
+    from agent.core.session import Session
+
+    parent = _agent(_config(max_concurrent=1, max_depth=2))
+    parent.config.session_dir = tmp_path / "sessions"
+    handler = parent.registry.get(TOOL_NAME).handler
+
+    async def fake_chat(self, task, session=None):
+        self.last_session = Session()
+        if task == "outer":
+            return await handler(agent_name="researcher", task="inner")
+        return "inner done"
+
+    monkeypatch.setattr(Agent, "chat", fake_chat)
+
+    out = await asyncio.wait_for(handler(agent_name="researcher", task="outer"), timeout=5)
+    assert out.startswith("inner done")
+
+
+def test_max_concurrent_rejects_negative():
+    with pytest.raises(ValueError):
+        SubAgentConfig(max_concurrent=-1)
 
 
 # ---------------------------------------------------------------------------

@@ -658,8 +658,16 @@ class SafetyPolicy:
             # commands. Forced ASK keeps the user in the loop.
             #
             # "local" provides no isolation whatsoever.
+            #
+            # A ``policy_confined`` tool runs no command of its own — every tool
+            # call it makes passes through this same policy — so there is
+            # nothing unverifiable to review.
             _ISOLATED_MODES = {"linux", "windows"}
-            if self.config.allowed_paths and self.config.sandbox_mode not in _ISOLATED_MODES:
+            if (
+                self.config.allowed_paths
+                and self.config.sandbox_mode not in _ISOLATED_MODES
+                and not spec.policy_confined
+            ):
                 logger.info(
                     "Policy ASK (bash unverifiable under allowed_paths with local sandbox): %s",
                     spec.name,

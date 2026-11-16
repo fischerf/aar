@@ -476,6 +476,11 @@ class SubAgentConfig(BaseModel):
     # How many levels of nesting are allowed. At depth 0 the tool is not
     # registered at all, rather than registered and erroring.
     max_depth: int = 1
+    # How many sub-agents may run at once across the whole process (every
+    # session of an ``aar serve`` / ``aar acp`` shares the budget). Extra
+    # spawns wait for a free slot. ``0`` means no limit. Nested sub-agents run
+    # inside their ancestor's slot, so a limit of 1 cannot deadlock.
+    max_concurrent: int = Field(default=0, ge=0)
     agents: dict[str, SubAgentProfile] = Field(default_factory=dict)
 
 
