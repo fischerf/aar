@@ -952,6 +952,62 @@ class TestOllamaStreamFlushOnTruncation:
         assert done_deltas[0].meta.usage["input_tokens"] == 5
 
 
+class TestOllamaStreamStopReason:
+    """The streaming done frame must carry Ollama's done_reason.
+
+    Without it the runner inferred END_TURN for an answer cut off at
+    num_predict / max_tokens (done_reason "length"), so the loop's max_tokens
+    recovery never ran: a model that spent its whole output budget thinking
+    simply ended the run without its tool call.
+    """
+
+    @staticmethod
+    def _done_delta(final_frame: dict, extra_frames: list | None = None):
+        import json as _json
+
+        from agent.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig(name="ollama", model="qwen3.8:latest"))
+        frames = list(extra_frames or []) + [
+            {"model": "qwen3.8:latest", "message": {"content": ""}, "done": True, **final_frame}
+        ]
+        chunks = [_json.dumps(f) for f in frames]
+        provider._client.stream = MagicMock(return_value=_FakeStreamCM(_FakeStreamResp(chunks)))
+
+        async def run():
+            deltas = [d async for d in provider.stream([{"role": "user", "content": "hi"}])]
+            done = [d for d in deltas if d.done]
+            assert len(done) == 1
+            return done[0]
+
+        return run()
+
+    @pytest.mark.asyncio
+    async def test_length_maps_to_max_tokens(self):
+        thinking = {"model": "qwen3.8:latest", "message": {"thinking": "planning the grid..."}}
+        done = await self._done_delta(
+            {"done_reason": "length", "eval_count": 16384}, extra_frames=[thinking]
+        )
+        assert done.stop_reason == StopReason.MAX_TOKENS.value
+
+    @pytest.mark.asyncio
+    async def test_stop_maps_to_end_turn(self):
+        done = await self._done_delta({"done_reason": "stop"})
+        assert done.stop_reason == StopReason.END_TURN.value
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_map_to_tool_use(self):
+        call = {
+            "model": "qwen3.8:latest",
+            "message": {
+                "content": "",
+                "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "x"}}}],
+            },
+        }
+        done = await self._done_delta({"done_reason": "stop"}, extra_frames=[call])
+        assert done.stop_reason == StopReason.TOOL_USE.value
+
+
 class TestOpenAIStreamEmitOnce:
     """#6 — OpenAI stream must emit accumulated tool calls EXACTLY ONCE.
 

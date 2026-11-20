@@ -305,7 +305,14 @@ class OllamaProvider(Provider):
                         model=data.get("model", self.config.model),
                         usage=usage,
                     )
-                    yield StreamDelta(done=True, meta=stream_meta)
+                    # Carry Ollama's done_reason so a cut-off ("length") reaches
+                    # the loop as MAX_TOKENS and triggers its recovery; without
+                    # it the runner infers END_TURN and the run just stops.
+                    yield StreamDelta(
+                        done=True,
+                        meta=stream_meta,
+                        stop_reason=_map_stop_reason(data.get("done_reason", ""), bool(tool_acc)),
+                    )
                     emitted_done = True
                     return
 
