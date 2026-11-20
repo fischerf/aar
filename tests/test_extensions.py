@@ -312,7 +312,9 @@ class TestExtensionManagerRegisterTools:
         """,
         )
         mgr = ExtensionManager()
-        await mgr.initialize(MagicMock(), MagicMock(), user_dir=d, project_dir=tmp_path / "np")
+        # Ignore entry-point extensions installed in the developer's environment.
+        with patch("agent.extensions.loader.importlib.metadata.entry_points", return_value=[]):
+            await mgr.initialize(MagicMock(), MagicMock(), user_dir=d, project_dir=tmp_path / "np")
 
         registry = ToolRegistry()
         count = mgr.register_tools(registry)
@@ -491,8 +493,13 @@ class TestExtensionToolAllowlist:
             kw.pop("user_dir", None)
             kw.pop("project_dir", None)
             return await real_init(
-                self, session, config, cancel_event,
-                user_dir=d, project_dir=tmp_path / "no-project", **kw
+                self,
+                session,
+                config,
+                cancel_event,
+                user_dir=d,
+                project_dir=tmp_path / "no-project",
+                **kw,
             )
 
         monkeypatch.setattr(ExtensionManager, "initialize", scoped_init)
@@ -537,8 +544,13 @@ class TestExtensionToolAllowlist:
             kw.pop("user_dir", None)
             kw.pop("project_dir", None)
             return await real_init(
-                self, session, config, cancel_event,
-                user_dir=d, project_dir=tmp_path / "no-project", **kw
+                self,
+                session,
+                config,
+                cancel_event,
+                user_dir=d,
+                project_dir=tmp_path / "no-project",
+                **kw,
             )
 
         monkeypatch.setattr(ExtensionManager, "initialize", scoped_init)
