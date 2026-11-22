@@ -6,6 +6,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -1290,11 +1291,29 @@ class TestLinuxSandbox:
         fn = sb._make_landlock_preexec(str(tmp_path))
         assert callable(fn)
 
-    def test_make_landlock_preexec_does_not_raise_called_directly(self, tmp_path):
-        """The preexec closure must never raise — it silently falls back."""
+    @pytest.mark.skipif(os.name == "nt", reason="preexec_fn is POSIX-only")
+    def test_make_landlock_preexec_does_not_raise_in_child(self, tmp_path):
+        """The preexec closure must never raise, even with a bad workspace path.
+
+        It runs where the product runs it: in the forked child, as
+        ``preexec_fn``.  Called in the pytest process it would Landlock pytest
+        itself (read + execute only, no writes anywhere) and every later test
+        needing a temp dir would error.
+        """
         sb = LinuxSandbox(workspace=str(tmp_path))
         fn = sb._make_landlock_preexec("/nonexistent_workspace_xyz")
-        fn()  # Should not raise even with a bad workspace path
+        probe = tmp_path / "probe.txt"
+        # A raising preexec_fn would surface here as SubprocessError.
+        result = subprocess.run(
+            ["sh", "-c", f"echo x > '{probe}'"], preexec_fn=fn, capture_output=True
+        )
+        if sb._check_landlock():
+            # No workspace rule could be added: the child may write nowhere.
+            assert result.returncode != 0
+            assert not probe.exists()
+        # The test process itself is not restricted.
+        (tmp_path / "parent.txt").write_text("ok")
+        tempfile.TemporaryDirectory().cleanup()
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
@@ -1336,7 +1355,7 @@ class TestLinuxSandbox:
         with caplog.at_level(logging.WARNING, logger="agent.safety.sandbox"):
             result = await sb.execute("echo fallback_ok")
 
-        assert "fallback" in caplog.text.lower()
+        assert "falling back" in caplog.text.lower()
         assert "fallback_ok" in result.stdout
 
 
