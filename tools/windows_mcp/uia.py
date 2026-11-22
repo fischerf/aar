@@ -25,19 +25,24 @@ try:
         Snapshot,
         WindowInfo,
         WinMcpError,
+        clean_document_text,
         clean_text,
         encode_png,
         ensure_fresh,
         escape_for_typing,
         find_window,
+        interpolate,
         looks_like_path,
         lookup_id,
         match_selector,
         normalize_type,
+        page,
         parse_element,
+        parse_points,
         pick_start_app,
         render_tree,
         resolve_program,
+        to_pixels,
     )
 except ImportError:  # executed as a plain script
     from core import (  # type: ignore[no-redef]
@@ -45,20 +50,30 @@ except ImportError:  # executed as a plain script
         Snapshot,
         WindowInfo,
         WinMcpError,
+        clean_document_text,
         clean_text,
         encode_png,
         ensure_fresh,
         escape_for_typing,
         find_window,
+        interpolate,
         looks_like_path,
         lookup_id,
         match_selector,
         normalize_type,
+        page,
         parse_element,
+        parse_points,
         pick_start_app,
         render_tree,
         resolve_program,
+        to_pixels,
     )
+
+# Physical pixels everywhere: UIA rectangles, SendInput and screenshots must agree
+# on scaled monitors (a DPI-unaware process gets virtualised coordinates).
+with contextlib.suppress(AttributeError, OSError):
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # per-monitor v2
 
 auto.Logger.SetLogFile("")  # no @AutomationLog.txt next to the server
 auto.SetGlobalSearchTimeout(1)
@@ -100,6 +115,8 @@ user32.GetDC.restype = wintypes.HDC
 user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
 user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.QueryFullProcessImageNameW.argtypes = [
@@ -656,15 +673,28 @@ def _set_value(control: auto.Control, text: str) -> bool:
         return False
 
 
-def set_text(hwnd: int, ref: str, text: str) -> str:
+def set_text(hwnd: int, ref: str, text: str, press_enter: bool = False) -> str:
     _, info, control = element(hwnd, ref)
     if _set_value(control, text):
-        return f"Set text of {_label(info)} ({len(text)} characters)."
+        done = f"Set text of {_label(info)} ({len(text)} characters)"
+        if not press_enter:
+            # Focus the field so a following send_keys('{Enter}') reaches it
+            # (a browser address bar ignores Enter elsewhere).
+            with contextlib.suppress(Exception):
+                control.SetFocus()
+            return done + "."
+        _require_foreground(hwnd, "Enter")
+        control.SetFocus()
+        auto.SendKeys("{Enter}", interval=0.02)
+        return done + " and pressed Enter."
     # No (writable) ValuePattern, or the control ignored it: type instead.
     _require_foreground(hwnd, "the text")
     control.SetFocus()
-    auto.SendKeys("{Ctrl}a{Delete}" + escape_for_typing(text), interval=0.005)
-    return f"Typed {len(text)} characters into {_label(info)}."
+    keys = "{Ctrl}a{Delete}" + escape_for_typing(text) + ("{Enter}" if press_enter else "")
+    auto.SendKeys(keys, interval=0.005)
+    return f"Typed {len(text)} characters into {_label(info)}" + (
+        " and pressed Enter." if press_enter else "."
+    )
 
 
 def send_keys(hwnd: int, keys: str, ref: str | None = None) -> str:
@@ -679,16 +709,45 @@ def send_keys(hwnd: int, keys: str, ref: str | None = None) -> str:
     return f"Sent keys to {target}."
 
 
-def read_text(hwnd: int, ref: str | None, max_chars: int) -> str:
+_MAX_DOCUMENT = 500_000  # characters fetched from one document
+
+
+def _document_text(hwnd: int, max_visits: int = 600) -> str | None:
+    """Text of the window's main document (web page, Word document) in reading order.
+
+    Browsers expose the page as a Document with a TextPattern; reading it gives
+    the article instead of a list of control names led by the browser's own
+    toolbar. ``None`` when there is no such document.
+    """
+    queue, visits, best = [_root(hwnd)], 0, ""
+    while queue and visits < max_visits:
+        control = queue.pop(0)
+        visits += 1
+        is_doc = False
+        with contextlib.suppress(Exception):
+            is_doc = control.ControlTypeName == "DocumentControl"
+        if is_doc and (tp := _pattern(control, auto.PatternId.TextPattern)) is not None:
+            with contextlib.suppress(Exception):
+                text = clean_document_text(tp.DocumentRange.GetText(_MAX_DOCUMENT) or "")
+                if len(text) > len(best):
+                    best = text
+            continue  # nested documents (iframes) are part of this text
+        queue.extend(_children(control))
+    return best or None
+
+
+def read_text(hwnd: int, ref: str | None, max_chars: int, offset: int = 0) -> str:
     if ref:
         _, _, control = element(hwnd, ref)
         text_pat = _pattern(control, auto.PatternId.TextPattern)
         if text_pat is not None:
-            text = text_pat.DocumentRange.GetText(max_chars + 1)
+            text = clean_document_text(text_pat.DocumentRange.GetText(_MAX_DOCUMENT) or "")
         elif (value := _pattern(control, auto.PatternId.ValuePattern)) is not None:
             text = "" if control.IsPassword else value.Value
         else:
             text = control.Name
+    elif (doc := _document_text(hwnd)) is not None:
+        return f"[{_text(hwnd)}]\n" + page(doc, offset, max_chars)
     else:
         _, snap = render_tree(_root(hwnd), describe, _children, max_depth=40, max_nodes=1000)
         seen: list[str] = []
@@ -697,10 +756,141 @@ def read_text(hwnd: int, ref: str | None, max_chars: int) -> str:
                 if part and part not in seen:
                     seen.append(part)
         text = "\n".join(seen)
-    text = text or ""
-    if len(text) > max_chars:
-        text = text[:max_chars] + f"\n... (truncated at {max_chars} characters)"
-    return text or "(empty)"
+    return page(text, offset, max_chars) if text else "(empty)"
+
+
+# ---------------------------------------------------------------------------
+# Pointer (click_at / drag): real mouse input at positions inside an element
+# ---------------------------------------------------------------------------
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("mi", _MOUSEINPUT)]
+
+
+user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+_MOVE, _ABSOLUTE, _VIRTUALDESK = 0x0001, 0x8000, 0x4000
+_BUTTONS = {"left": (0x0002, 0x0004), "right": (0x0008, 0x0010), "middle": (0x0020, 0x0040)}
+
+
+def _mouse(flags: int, x: int = 0, y: int = 0) -> None:
+    if flags & _MOVE:
+        vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+        vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+        x = (x - vx) * 65535 // max(1, vw - 1)
+        y = (y - vy) * 65535 // max(1, vh - 1)
+        flags |= _ABSOLUTE | _VIRTUALDESK
+    inp = _INPUT(0, _MOUSEINPUT(x, y, 0, flags, 0, 0))  # INPUT_MOUSE
+    if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
+        raise WinMcpError(
+            "Windows blocked the mouse input (is a higher-privileged window in front?)."
+        )
+
+
+def _area(hwnd: int, ref: str | None) -> tuple[tuple[int, int, int, int], str]:
+    """Screen rectangle (left, top, right, bottom) of an element or the window's client area."""
+    win = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(win))
+    if ref:
+        _, info, control = element(hwnd, ref)
+        r = control.BoundingRectangle
+        rect, label = (r.left, r.top, r.right, r.bottom), _label(info)
+    else:
+        client = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(client))
+        origin = wintypes.POINT(0, 0)
+        user32.ClientToScreen(hwnd, ctypes.byref(origin))
+        rect = (origin.x, origin.y, origin.x + client.right, origin.y + client.bottom)
+        label = "the window"
+    # Only the part inside the window can receive input.
+    clipped = (
+        max(rect[0], win.left),
+        max(rect[1], win.top),
+        min(rect[2], win.right),
+        min(rect[3], win.bottom),
+    )
+    if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+        raise WinMcpError(f"{label} is not visible inside the window (scrolled away?).")
+    return clipped, label
+
+
+def _size(rect: tuple[int, int, int, int]) -> str:
+    return f"{rect[2] - rect[0]}x{rect[3] - rect[1]} px"
+
+
+def _check_hits(hwnd: int, path: list[tuple[int, int]]) -> None:
+    for x, y in path:
+        hit = user32.WindowFromPoint(wintypes.POINT(x, y))
+        if not hit or user32.GetAncestor(hit, GA_ROOT) != hwnd:
+            raise WinMcpError(
+                "Another window covers that position; nothing was sent. "
+                "Use focus_window or close the window in front."
+            )
+
+
+def _button(name: str) -> tuple[int, int]:
+    try:
+        return _BUTTONS[name]
+    except KeyError:
+        raise WinMcpError("button must be left, right or middle.") from None
+
+
+def click_at(hwnd: int, x: float, y: float, ref: str | None, action: str = "click") -> str:
+    if action not in ("click", "double_click", "right_click"):
+        raise WinMcpError("action must be click, double_click or right_click.")
+    rect, label = _area(hwnd, ref)
+    (px, py) = to_pixels(rect, parse_points([[x, y]]))[0]
+    _require_foreground(hwnd, "the click")
+    _check_hits(hwnd, [(px, py)])
+    down, up = _button("right" if action == "right_click" else "left")
+    _mouse(_MOVE, px, py)
+    time.sleep(0.03)
+    for _ in range(2 if action == "double_click" else 1):
+        _mouse(down)
+        _mouse(up)
+        time.sleep(0.03)
+    time.sleep(0.1)
+    return f"{action.replace('_', ' ').capitalize()} at [{x:g}, {y:g}] of {label} ({_size(rect)})."
+
+
+def drag(hwnd: int, points, ref: str | None, button: str = "left") -> str:
+    rect, label = _area(hwnd, ref)
+    fractions = parse_points(points)
+    if len(fractions) < 2:
+        raise WinMcpError("drag needs at least two points; use click_at for a single position.")
+    path = to_pixels(rect, fractions)
+    down, up = _button(button)
+    _require_foreground(hwnd, "the drag")
+    _check_hits(hwnd, path)
+    steps = interpolate(path)
+    _mouse(_MOVE, *steps[0])
+    time.sleep(0.05)
+    _mouse(down)
+    time.sleep(0.05)
+    try:
+        for px, py in steps[1:]:
+            _mouse(_MOVE, px, py)
+            time.sleep(0.003)
+        time.sleep(0.05)
+    finally:
+        _mouse(up)
+    time.sleep(0.1)
+    (x0, y0), (x1, y1) = fractions[0], fractions[-1]
+    return (
+        f"Dragged ({button} button) from [{x0:g}, {y0:g}] to [{x1:g}, {y1:g}] "
+        f"through {len(fractions)} point(s) on {label} ({_size(rect)})."
+    )
 
 
 # ---------------------------------------------------------------------------

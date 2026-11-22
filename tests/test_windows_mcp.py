@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import struct
 import sys
 import zlib
@@ -16,19 +17,24 @@ from windows_mcp.core import (
     Snapshot,
     WindowInfo,
     WinMcpError,
+    clean_document_text,
     clean_text,
     encode_png,
     ensure_fresh,
     escape_for_typing,
     find_window,
+    interpolate,
     looks_like_path,
     lookup_id,
     match_selector,
+    page,
     parse_element,
     parse_handle,
+    parse_points,
     pick_start_app,
     render_tree,
     resolve_program,
+    to_pixels,
 )
 
 # ---------------------------------------------------------------------------
@@ -108,7 +114,7 @@ TREE = node(
                 node("MenuItem", "Edit", "Edit"),
             ],
         ),
-        node("Button", "", "CloseButton"),
+        node("Button", "", "CloseButton", children=[node("Image")]),
         node("Text", ""),
         node("CheckBox", "Word wrap", states=["off", "disabled"]),
     ],
@@ -297,12 +303,67 @@ def test_encode_png_roundtrip():
     assert raw == bytes([0, 255, 0, 0, 0, 0, 255])
 
 
+def test_clean_document_text_drops_object_placeholders_and_blank_lines():
+    raw = "Title\r\n￼\r\n  First paragraph.  \r\r\n￼Button\nLast"
+    assert clean_document_text(raw) == "Title\nFirst paragraph.\nButton\nLast"
+
+
+def test_page_tells_the_model_how_to_read_on():
+    text = "abcdefghij"
+    assert page(text, 0, 20) == text
+    first = page(text, 0, 4)
+    assert first.startswith("abcd\n") and "offset=4" in first and "6 more" in first
+    middle = page(text, 4, 4)
+    assert middle.splitlines()[1] == "efgh" and "characters 4-8 of 10" in middle
+    assert "offset=8" in middle
+    assert page(text, 8, 4).endswith("ij")
+    assert "no more text" in page(text, 10, 4)
+
+
+def test_parse_points_accepts_what_models_send():
+    want = [(0.1, 0.2), (0.9, 0.2)]
+    assert parse_points([[0.1, 0.2], [0.9, 0.2]]) == want
+    assert parse_points([{"x": 0.1, "y": 0.2}, {"x": 0.9, "y": 0.2}]) == want
+    assert parse_points("[[0.1, 0.2], [0.9, 0.2]]") == want
+    assert parse_points("0.1,0.2 0.9,0.2") == want
+    for bad in ([], [[1, 2, 3]], "0.1 0.2 0.3", 5):
+        with pytest.raises(WinMcpError, match="0 = left edge"):
+            parse_points(bad)
+
+
+def test_to_pixels_maps_fractions_into_the_rectangle():
+    rect = (100, 50, 300, 151)  # 200 x 101
+    assert to_pixels(rect, [(0, 0), (1, 1), (0.5, 0.5)]) == [(100, 50), (299, 150), (200, 100)]
+    assert to_pixels(rect, [(1.01, -0.01)]) == [(299, 50)]  # rounding noise is clamped
+    with pytest.raises(WinMcpError, match="outside 0..1"):
+        to_pixels(rect, [(50, 50)])  # percent / pixels are refused, not clamped
+    with pytest.raises(WinMcpError, match="no visible area"):
+        to_pixels((0, 0, 0, 10), [(0, 0)])
+
+
+def test_interpolate_fills_gaps_for_freehand_strokes():
+    assert interpolate([(0, 0)]) == [(0, 0)]
+    path = interpolate([(0, 0), (40, 0), (40, 20)], step=10)
+    assert path[0] == (0, 0) and path[-1] == (40, 20)
+    assert (40, 0) in path
+    gaps = [max(abs(b[0] - a[0]), abs(b[1] - a[1])) for a, b in itertools.pairwise(path)]
+    assert max(gaps) <= 10 and len(path) == 7
+
+
 # ---------------------------------------------------------------------------
 # Server (any OS: the UI Automation backend is replaced by tests/windows_mcp_fake.py)
 # ---------------------------------------------------------------------------
 
 READ_ONLY = {"list_windows", "focus_window", "get_ui_tree", "read_text", "screenshot"}
-CHANGING = {"launch_app", "close_window", "click_element", "set_text", "send_keys"}
+CHANGING = {
+    "launch_app",
+    "close_window",
+    "click_element",
+    "set_text",
+    "send_keys",
+    "click_at",
+    "drag",
+}
 REPO = Path(__file__).resolve().parents[1]
 
 # Starts the real server module on top of the fake backend (used over stdio).
@@ -380,6 +441,19 @@ async def test_server_screenshot_returns_png(fake_server):
     assert "Untitled - Notepad" in content[1].text
 
 
+async def test_server_pointer_tools(fake_server):
+    server, state = fake_server
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+    assert "0 = left edge" in tools["drag"].inputSchema["properties"]["points"]["description"]
+    assert tools["drag"].inputSchema["required"] == ["window", "points"]
+    await server.mcp.call_tool(
+        "drag", {"window": "Notepad", "points": [[0, 0.5], [1, 0.5]], "element": "e1"}
+    )
+    assert state["calls"][-1] == ("drag", [[0, 0.5], [1, 0.5]], "e1", "left")
+    await server.mcp.call_tool("click_at", {"window": "Notepad", "x": 0.25, "y": 0.75})
+    assert state["calls"][-1] == ("click_at", 0.25, 0.75, None, "click")
+
+
 async def test_aar_asks_before_desktop_changes_over_stdio():
     """Real MCP stdio round trip: server annotations -> aar bridge -> policy -> approval."""
     pytest.importorskip("mcp")
@@ -403,7 +477,10 @@ async def test_aar_asks_before_desktop_changes_over_stdio():
     )
     async with MCPBridge([cfg]) as bridge:
         registry = ToolRegistry()
-        assert await bridge.register_all(registry) == 10
+        assert await bridge.register_all(registry) == 12
+        # The server's instructions reach the system prompt as a tool guideline.
+        (guideline,) = registry.get_prompt_guidelines()
+        assert guideline.startswith("MCP server 'windows': These tools control")
         for name in READ_ONLY:
             assert registry.get(f"windows__{name}").side_effects == [SideEffect.EXTERNAL]
         for name in CHANGING:

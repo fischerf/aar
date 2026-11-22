@@ -7,6 +7,7 @@ UI-tree renderer, typing escapes and a tiny PNG encoder.
 
 from __future__ import annotations
 
+import itertools
 import re
 import struct
 import zlib
@@ -127,8 +128,9 @@ def normalize_type(name: str) -> str:
 
 
 def _is_noise(info: NodeInfo, parent: NodeInfo | None) -> bool:
-    if info.control_type == "Text" and not info.name and not info.value:
-        return True
+    if info.control_type in ("Text", "Image") and not info.name and not info.value:
+        # Empty labels and icons tell a model nothing (Paint: one per toolbar button).
+        return info.control_type == "Text" or not info.automation_id
     # A label inside a button/menu item that just repeats the parent's name.
     return info.control_type == "Text" and parent is not None and info.name == parent.name
 
@@ -386,6 +388,113 @@ def pick_start_app(apps: list[tuple[str, str]], query: str) -> tuple[str, str] |
         names = ", ".join(sorted({a[0] for a in partial})[:10])
         raise WinMcpError(f"Several programs match {query!r}: {names}. Use the full name.")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Reading text (read_text)
+# ---------------------------------------------------------------------------
+
+
+def clean_document_text(raw: str) -> str:
+    """Tidy a document's TextPattern text: one line per paragraph, no empty lines.
+
+    Browsers put U+FFFC (object replacement) where images, buttons and form
+    fields sit; on a typical page these are a third of all lines.
+    """
+    text = raw.replace("\r\n", "\n").replace("\r", "\n").replace("￼", "")
+    return "\n".join(line.strip() for line in text.split("\n") if line.strip())
+
+
+def page(text: str, offset: int, max_chars: int) -> str:
+    """Return ``max_chars`` characters from *offset* with a hint how to read on."""
+    total = len(text)
+    offset = max(0, offset)
+    if offset >= total and total:
+        return f"(no more text: it has {total} characters)"
+    chunk = text[offset : offset + max_chars]
+    if offset:
+        chunk = f"... (characters {offset}-{offset + len(chunk)} of {total})\n" + chunk
+    if offset + max_chars < total:
+        chunk += (
+            f"\n... (truncated: {total - offset - max_chars} more characters; "
+            f"call read_text again with offset={offset + max_chars})"
+        )
+    return chunk
+
+
+# ---------------------------------------------------------------------------
+# Pointer positions (click_at / drag)
+# ---------------------------------------------------------------------------
+
+POINT_HELP = (
+    "Positions are fractions of the element (or window): x 0 = left edge, 1 = right edge; "
+    "y 0 = top, 1 = bottom; e.g. [0.5, 0.5] is the centre."
+)
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def parse_points(points: Any) -> list[tuple[float, float]]:
+    """Accept ``[[x, y], ...]``, ``[{"x":..,"y":..}, ...]`` or a string of numbers.
+
+    Small models send all of these; anything else raises :class:`WinMcpError`.
+    """
+    pairs: list[tuple[float, float]] = []
+    if isinstance(points, str):
+        nums = [float(n) for n in _NUMBER.findall(points)]
+        if len(nums) % 2:
+            raise WinMcpError(f"Points need x and y for each position. {POINT_HELP}")
+        pairs = list(zip(nums[0::2], nums[1::2], strict=True))
+    elif isinstance(points, (list, tuple)):
+        for p in points:
+            if isinstance(p, dict) and "x" in p and "y" in p:
+                pairs.append((float(p["x"]), float(p["y"])))
+            elif isinstance(p, (list, tuple)) and len(p) == 2:
+                pairs.append((float(p[0]), float(p[1])))
+            else:
+                raise WinMcpError(f"Each point must be [x, y], got {p!r}. {POINT_HELP}")
+    else:
+        raise WinMcpError(f"Points must be a list like [[0.1, 0.2], [0.8, 0.2]]. {POINT_HELP}")
+    if not pairs:
+        raise WinMcpError(f"No points given. {POINT_HELP}")
+    return pairs
+
+
+def to_pixels(
+    rect: tuple[int, int, int, int], points: list[tuple[float, float]]
+) -> list[tuple[int, int]]:
+    """Map fractional *points* into the screen rectangle ``(left, top, right, bottom)``.
+
+    0 and 1 land on the first and last pixel inside the rectangle. Values a
+    little outside 0..1 (rounding) are clamped; clearly wrong ones are refused,
+    including percentages or pixel coordinates.
+    """
+    left, top, right, bottom = rect
+    w, h = right - left, bottom - top
+    if w <= 0 or h <= 0:
+        raise WinMcpError("The element has no visible area, so it cannot be pointed at.")
+    out = []
+    for x, y in points:
+        if not (-0.02 <= x <= 1.02 and -0.02 <= y <= 1.02):
+            raise WinMcpError(f"Position [{x:g}, {y:g}] is outside 0..1. {POINT_HELP}")
+        x, y = min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0)
+        out.append((left + round(x * (w - 1)), top + round(y * (h - 1))))
+    return out
+
+
+def interpolate(path: list[tuple[int, int]], step: int = 8) -> list[tuple[int, int]]:
+    """Insert points so consecutive positions are at most *step* pixels apart.
+
+    Drawing programs only see the mouse moves they receive; without these a
+    freehand stroke would become straight segments or vanish.
+    """
+    if len(path) < 2:
+        return list(path)
+    out = [path[0]]
+    for (x0, y0), (x1, y1) in itertools.pairwise(path):
+        n = max(1, int(max(abs(x1 - x0), abs(y1 - y0)) // max(1, step)))
+        for i in range(1, n + 1):
+            out.append((round(x0 + (x1 - x0) * i / n), round(y0 + (y1 - y0) * i / n)))
+    return out
 
 
 def encode_png(width: int, height: int, bgra: bytes) -> bytes:

@@ -51,7 +51,7 @@ def click(handle, element, action):
     return f"Invoked {element}."
 
 
-def set_text(handle, element, text):
+def set_text(handle, element, text, press_enter=False):
     state["calls"].append(("set_text", element))
     state["text"] = text
     return f"Set text of {element} ({len(text)} characters)."
@@ -62,8 +62,18 @@ def send_keys(handle, keys, element=None):
     return "Sent keys to the window."
 
 
-def read_text(handle, element, max_chars):
-    return state["text"][:max_chars] or "(empty)"
+def click_at(handle, x, y, element, action):
+    state["calls"].append(("click_at", x, y, element, action))
+    return f"Click at [{x:g}, {y:g}] of the window."
+
+
+def drag(handle, points, element, button):
+    state["calls"].append(("drag", points, element, button))
+    return f"Dragged through {len(points)} point(s)."
+
+
+def read_text(handle, element, max_chars, offset=0):
+    return state["text"][offset : offset + max_chars] or "(empty)"
 
 
 def screenshot(handle, max_width):
