@@ -26,6 +26,11 @@ Note that most of Aar's MCP tests mock the SDK, so they pass on any version —
 the constraint above comes from round-trip testing against a real server
 (`tests/test_windows_mcp.py` also runs one real stdio round trip).
 
+A server's `instructions` (from its `initialize` result) are added to the
+system prompt as a tool guideline (`MCP server 'name': …`, at most 2000
+characters), so small models learn what the server is for — without them a
+model may answer "I cannot operate programs" while holding the tools.
+
 The MCP bridge keeps the server connections **alive for the full lifetime of the session** — across every turn in an interactive chat, across every tool call in a multi-step task. Connections are cleanly closed when the bridge context exits.
 
 ## Quick start — CLI with a config file
@@ -348,11 +353,11 @@ an absolute path to `tools`:
 | `list_windows` | Visible windows: handle, program, pid, title | no |
 | `focus_window` | Bring a window to the front (restore if minimized) | no |
 | `get_ui_tree` | The window's controls as a compact list with ids (`e12`), types, names, values and states | no |
-| `read_text` | Text/value of one control, or all visible text of a window | no |
+| `read_text` | Text/value of one control, or a window's text; for a browser or document window the page text in reading order (`offset` to read on) | no |
 | `screenshot` | PNG of a window or the screen | no |
 | `launch_app` | Start a program or open a document; returns the new window(s) | **yes** |
 | `click_element` | Press a button, toggle a checkbox, select an item, open a menu (or a real click) | **yes** |
-| `set_text` | Replace the text of a field or document | **yes** |
+| `set_text` | Replace the text of a field or document; `press_enter` submits it (address bar, search box) | **yes** |
 | `send_keys` | Press keys and shortcuts (`{Ctrl}s`, `{Alt}{F4}`, `{Enter}`) | **yes** |
 | `click_at` | Real click at a position inside an element or the window (canvas, map, slider track) | **yes** |
 | `drag` | Hold the mouse button and move through a path: draw on a canvas, move a slider, drag and drop | **yes** |
@@ -384,6 +389,12 @@ multi-point `drag` draws freehand waves. The server sends real mouse input
 (`SendInput`, with intermediate moves so freehand strokes keep their shape) and
 runs per-monitor DPI aware, so element rectangles and the mouse agree on scaled
 monitors.
+
+Web pages: `set_text` on Edge's or Chrome's address bar with `press_enter`
+opens a page or a search; `read_text` without an element then returns the
+page's text (UI Automation TextPattern of the document) instead of the
+browser's toolbar and a list of control names. Long pages are cut at
+`max_chars` (6000) with a note which `offset` to pass for the next part.
 
 `launch_app` accepts the name from the Start menu (`"Excel"`, `"Calculator"`),
 an exe name (`"notepad"`, `"winword"`), a full path or a document; it searches
