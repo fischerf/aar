@@ -31,6 +31,8 @@ config = AgentConfig(
         bash_default_timeout=120,                  # default seconds when the model omits `timeout` on a bash / powershell call
         command_timeout=300,                       # hard outer per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
+        keep_recent_images=3,                      # tool-result images (e.g. MCP screenshots) kept with data; 0 = none sent (docs/mcp.md#images)
+        max_image_bytes=3_750_000,                 # bigger tool images are dropped with a note
         powershell=PowerShellToolConfig(           # the native Windows shell tool (see docs/tools.md#powershell)
             executable="auto",                     # "auto" = pwsh if on PATH, else powershell.exe (Windows only); or a name / path
             fallback_for_bash=True,                # Windows without bash: register powershell in place of an enabled bash

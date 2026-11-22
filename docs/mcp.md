@@ -238,14 +238,51 @@ A result the server marks `isError` is reported as a failed tool call
 
 ## MCP content types
 
-MCP tool results can contain mixed content. Aar serializes all blocks to a plain string for the LLM:
+MCP tool results can contain mixed content. Aar turns the blocks into the tool
+result's text, and keeps images as images:
 
-| MCP block type | Serialized as |
+| MCP block type | Text | Also sent |
+|---|---|---|
+| `TextContent` | The text value | |
+| `ImageContent` | `[image: mime/type, size]` | the image, to vision models |
+| `EmbeddedResource` (text) | The text value | |
+| `EmbeddedResource` (`image/*` blob) | `[image: mime/type, size]` | the image, to vision models |
+| `EmbeddedResource` (other blob) | `[blob resource: uri]` | |
+
+### Images
+
+When the active model supports vision (`supports_vision`, see
+[providers](providers.md)), it gets the image together with the text; otherwise
+it gets the text placeholder plus `[1 image(s) not shown: the active model does
+not accept images]`. How the image travels depends on the provider:
+
+| Provider | Where the image goes |
 |---|---|
-| `TextContent` | The text value |
-| `ImageContent` | `[image: mime/type]` |
-| `EmbeddedResource` (text) | The text value |
-| `EmbeddedResource` (blob) | `[blob resource: uri]` |
+| Anthropic | `image` blocks inside the `tool_result` |
+| Gemini | `inlineData` parts after the `functionResponse` parts of the same turn |
+| OpenAI, generic | a `user` message right after the turn's `tool` messages (Chat Completions allows images only in user messages) |
+| Ollama | a `user` message with an `images` list right after the `tool` messages |
+
+Limits, in the `tools` config section:
+
+- `max_image_bytes` (default 3 750 000, decoded) — a bigger image is dropped
+  and the text says `[image omitted: 5.1 MB exceeds tools.max_image_bytes
+  (3.6 MB)]`. Aar does not re-encode images, so ask the tool for a smaller one
+  (the Windows `screenshot` tool takes `max_width`). Only PNG, JPEG, GIF and
+  WebP are passed on; others become a note too.
+- `keep_recent_images` (default 3) — only the images of the most recent 3
+  tool results that returned any keep their data, in the context *and* in the
+  saved session JSONL. Older ones shrink to
+  their placeholder plus `[1 image(s) dropped from history; call the tool
+  again to see it]`, so long desktop sessions don't grow without bound.
+  `0` never sends a tool image to the model.
+
+Over ACP the image is also shown on the tool-call card (an ACP `image` content
+block).
+
+Your own tools can return images the same way: return
+`agent.tools.schema.ToolOutput(text=..., images=[ImageURLBlock(...)])` with
+`data:` URIs (`agent.core.multimodal.image_block_from_base64` builds one).
 
 ## Bundled server: Windows desktop automation
 
@@ -356,10 +393,11 @@ an exe name (`"notepad"`, `"winword"`), a full path or a document; it searches
   says so and asks the user to click the window.
 - Errors are short and tell the model what to do next ("Unknown element id …
   Call get_ui_tree again.", "Could not find a program called …").
-- `screenshot` returns a real image, but Aar's bridge hands the model only text
-  (`[image: image/png]` plus the size). In Aar, `get_ui_tree` and `read_text`
-  are what the model can actually use; the image helps in hosts that forward
-  images.
+- `screenshot` returns a PNG (1280 px wide by default, `max_width` to shrink
+  it). A vision model sees the image ([Images](#images)); any other model only
+  the placeholder and size, so `get_ui_tree` and `read_text` stay the main way
+  to read a window. A screenshot shows everything on the screen, and it is sent
+  to the model provider.
 
 ### Tests
 

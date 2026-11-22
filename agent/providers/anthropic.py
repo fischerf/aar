@@ -321,6 +321,10 @@ def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict
     * HTTP/HTTPS URLs  → ``{"type": "url", "url": "..."}``
     * ``data:`` URIs   → ``{"type": "base64", "media_type": "...", "data": "..."}``
 
+    A ``tool_result`` block carrying ``images`` (tool-returned images) gets a
+    content list instead: the text, then one ``image`` block per image —
+    Anthropic accepts images inside ``tool_result``.
+
     All other blocks (``text``, ``tool_use``, ``tool_result``) pass through
     unchanged.
     """
@@ -334,42 +338,39 @@ def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict
         converted: list[dict[str, Any]] = []
         for block in content:
             if block.get("type") == "image_url":
-                url_obj = block.get("image_url", {})
-                url: str = url_obj.get("url", "")
-                if url.startswith("data:"):
-                    # data:<media_type>;base64,<payload>
-                    try:
-                        meta_part, b64_data = url.split(",", 1)
-                        media_type = meta_part.split(":")[1].split(";")[0]
-                    except (IndexError, ValueError):
-                        media_type = "image/jpeg"
-                        b64_data = url
-                    converted.append(
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": b64_data,
-                            },
-                        }
-                    )
-                else:
-                    converted.append(
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "url",
-                                "url": url,
-                            },
-                        }
-                    )
+                converted.append(_image_url_to_anthropic(block))
+            elif block.get("type") == "tool_result" and "images" in block:
+                tool_block = {k: v for k, v in block.items() if k != "images"}
+                images = [_image_url_to_anthropic(img) for img in block["images"] or []]
+                if images:
+                    text = tool_block.get("content", "")
+                    text_blocks = [{"type": "text", "text": text}] if text else []
+                    tool_block["content"] = text_blocks + images
+                converted.append(tool_block)
             else:
                 converted.append(block)
 
         result.append({"role": msg["role"], "content": converted})
 
     return result
+
+
+def _image_url_to_anthropic(block: dict[str, Any]) -> dict[str, Any]:
+    """Convert an internal ``image_url`` block to an Anthropic ``image`` block."""
+    url: str = block.get("image_url", {}).get("url", "")
+    if url.startswith("data:"):
+        # data:<media_type>;base64,<payload>
+        try:
+            meta_part, b64_data = url.split(",", 1)
+            media_type = meta_part.split(":")[1].split(";")[0]
+        except (IndexError, ValueError):
+            media_type = "image/jpeg"
+            b64_data = url
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": b64_data},
+        }
+    return {"type": "image", "source": {"type": "url", "url": url}}
 
 
 def _map_stop_reason(reason: str | None) -> str:

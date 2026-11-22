@@ -66,6 +66,7 @@ import httpx
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, ReasoningBlock, StopReason, ToolCall
+from agent.core.multimodal import split_data_uri
 from agent.providers.base import Provider, ProviderResponse, StreamDelta
 from agent.providers.errors import (
     AuthFailure,
@@ -509,9 +510,7 @@ class GeminiProvider(Provider):
                             )
                         yield StreamDelta(
                             done=True,
-                            meta=_http_provider_meta(
-                                self.config.model, usage, response_headers
-                            )
+                            meta=_http_provider_meta(self.config.model, usage, response_headers)
                             if usage
                             else None,
                         )
@@ -525,9 +524,7 @@ class GeminiProvider(Provider):
         # Fallback sentinel if finish_reason never arrived in the stream.
         yield StreamDelta(
             done=True,
-            meta=_http_provider_meta(self.config.model, usage, response_headers)
-            if usage
-            else None,
+            meta=_http_provider_meta(self.config.model, usage, response_headers) if usage else None,
         )
 
     def _build_http_payload(
@@ -608,6 +605,29 @@ def _signature_for_request(block: dict[str, Any], *, sdk_mode: bool) -> str | by
         return signature.encode()
 
 
+def _image_part(block: dict[str, Any], *, sdk_mode: bool = False) -> dict[str, Any] | None:
+    """Convert an internal ``image_url`` block to a Gemini ``inlineData`` part.
+
+    Only ``data:`` URIs are supported (Gemini's ``fileData`` needs an uploaded
+    file URI); anything else is dropped with a debug log. The SDK's ``Blob``
+    takes raw bytes, the REST API base-64 text.
+    """
+    url = block.get("image_url", {}).get("url", "")
+    parsed = split_data_uri(url)
+    if parsed is None:
+        logger.debug("Gemini: dropping non-inline image %r", url[:80])
+        return None
+    mime, payload = parsed
+    data: Any = payload
+    if sdk_mode:
+        try:
+            data = base64.b64decode(payload, validate=True)
+        except ValueError:
+            logger.debug("Gemini: dropping image with invalid base64 data")
+            return None
+    return {"inlineData": {"mimeType": mime, "data": data}}
+
+
 def _build_contents(
     messages: list[dict[str, Any]], *, sdk_mode: bool = False
 ) -> list[dict[str, Any]]:
@@ -660,6 +680,13 @@ def _build_contents(
                         }
                     }
                 )
+            # Tool-returned images follow the function responses as inline
+            # data parts of the same user turn.
+            for tr in tool_results:
+                for img in tr.get("images") or []:
+                    image_part = _image_part(img, sdk_mode=sdk_mode)
+                    if image_part:
+                        parts.append(image_part)
             if parts:
                 contents.append({"role": "user", "parts": parts})
             continue
@@ -670,6 +697,10 @@ def _build_contents(
             btype = block.get("type")
             if btype == "text" and block.get("text"):
                 parts.append({"text": block["text"]})
+            elif btype == "image_url":
+                image_part = _image_part(block, sdk_mode=sdk_mode)
+                if image_part:
+                    parts.append(image_part)
             elif btype == "tool_use":
                 _tool_id_to_name[block.get("id", "")] = block.get("name", "")
                 function_part: dict[str, Any] = {
@@ -839,9 +870,7 @@ def _parse_http_response(
         tool_calls=tool_calls,
         stop_reason=_map_stop_reason(finish_reason, bool(tool_calls)),
         reasoning=reasoning_blocks,
-        meta=_http_provider_meta(
-            data.get("modelVersion", fallback_model), usage, headers or {}
-        ),
+        meta=_http_provider_meta(data.get("modelVersion", fallback_model), usage, headers or {}),
     )
 
 
@@ -863,9 +892,7 @@ def _map_stop_reason(finish_reason: str, has_tool_calls: bool = False) -> str:
 def _diagnostic_headers(headers: httpx.Headers | dict[str, str]) -> dict[str, str]:
     lower_headers = {str(key).lower(): str(value) for key, value in headers.items()}
     return {
-        name: lower_headers[name]
-        for name in _DIAGNOSTIC_HEADER_NAMES
-        if lower_headers.get(name)
+        name: lower_headers[name] for name in _DIAGNOSTIC_HEADER_NAMES if lower_headers.get(name)
     }
 
 
@@ -884,9 +911,7 @@ def _http_provider_meta(
     )
 
 
-def _http_error_detail(
-    status: int, body: str, headers: httpx.Headers | dict[str, str]
-) -> str:
+def _http_error_detail(status: int, body: str, headers: httpx.Headers | dict[str, str]) -> str:
     detail = f"HTTP {status}"
     if body:
         detail += f": {body[:400]}"
@@ -913,9 +938,7 @@ async def _raise_for_status(resp: httpx.Response) -> None:
     detail = _http_error_detail(status, body, headers)
 
     if status in (401, 403):
-        raise AuthFailure(
-            f"Gemini authentication failed ({detail}). Check the configured API key."
-        )
+        raise AuthFailure(f"Gemini authentication failed ({detail}). Check the configured API key.")
     if status == 429:
         raise RateLimited(f"Gemini rate limit exceeded ({detail}).")
     if status in (400, 404, 409, 422):

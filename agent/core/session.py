@@ -18,6 +18,10 @@ from agent.core.events import (
 )
 from agent.core.state import AgentState
 
+# Rough tokens per image for context estimates (a ~1280x720 screenshot costs
+# about 1 200 tokens on Anthropic; other providers are in the same range).
+IMAGE_TOKEN_ESTIMATE = 1200
+
 
 class Session(BaseModel):
     """Serializable session that tracks the full conversation lifecycle."""
@@ -203,6 +207,9 @@ def estimate_token_count(messages: list[dict[str, Any]]) -> int:
                     total_chars += len(str(block.get("text", "")))
                     total_chars += len(str(block.get("content", "")))
                     total_chars += len(str(block.get("input", "")))
+                    # Tool-result images: a flat per-image cost, not the
+                    # base64 length (which would overstate it ~100x).
+                    total_chars += IMAGE_TOKEN_ESTIMATE * 4 * len(block.get("images") or [])
     return total_chars // 4
 
 
@@ -355,12 +362,68 @@ def _tool_results_message(results: list[ToolResult]) -> dict[str, Any]:
     """Build a user message containing tool result blocks."""
     content = []
     for tr in results:
-        content.append(
-            {
-                "type": "tool_result",
-                "tool_use_id": tr.tool_call_id,
-                "content": tr.output,
-                "is_error": tr.is_error,
-            }
-        )
+        block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": tr.tool_call_id,
+            "content": tr.output,
+            "is_error": tr.is_error,
+        }
+        if tr.images:
+            # Internal key: each provider adapter moves these into its own
+            # wire format (or drops them, see strip_tool_result_images).
+            block["images"] = [img.model_dump(exclude_none=True) for img in tr.images]
+        content.append(block)
     return {"role": "user", "content": content}
+
+
+_NO_VISION_NOTE = "[{n} image(s) not shown: the active model does not accept images]"
+
+
+def strip_tool_result_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove tool-result images for a provider without vision.
+
+    Each affected tool result gets a short note so the model knows an image
+    existed. Returns a new list; *messages* is not mutated.
+    """
+    result: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list) or not any(
+            isinstance(b, dict) and b.get("type") == "tool_result" and b.get("images")
+            for b in content
+        ):
+            result.append(msg)
+            continue
+        new_content = []
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and block.get("images")
+            ):
+                note = _NO_VISION_NOTE.format(n=len(block["images"]))
+                text = block.get("content", "")
+                block = {k: v for k, v in block.items() if k != "images"}
+                block["content"] = f"{text}\n{note}" if text else note
+            new_content.append(block)
+        result.append({**msg, "content": new_content})
+    return result
+
+
+def prune_tool_result_images(events: list[Event], keep: int) -> int:
+    """Drop image data from all but the *keep* most recent image tool results.
+
+    Bounds both the context sent to the model and the size of the saved
+    session JSONL (which is rewritten from ``events`` on every save). The
+    pruned result keeps its text placeholder plus a note. Returns the number
+    of images dropped.
+    """
+    with_images = [e for e in events if isinstance(e, ToolResult) and e.images]
+    stale = with_images[: max(0, len(with_images) - max(0, keep))]
+    dropped = 0
+    for tr in stale:
+        n = len(tr.images)
+        tr.images = []
+        tr.output += f"\n[{n} image(s) dropped from history; call the tool again to see it]"
+        dropped += n
+    return dropped

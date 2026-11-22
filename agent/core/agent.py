@@ -277,10 +277,14 @@ class Agent:
 
     def _warn_capability_mismatch(self, session: Session) -> None:
         """Log warnings if the new provider lacks capabilities used in the session so far."""
-        from agent.core.events import ToolCall, UserMessage
+        from agent.core.events import ToolCall, ToolResult, UserMessage
 
         has_tool_calls = any(isinstance(e, ToolCall) for e in session.events)
-        has_images = any(isinstance(e, UserMessage) and e.is_multimodal for e in session.events)
+        has_images = any(
+            (isinstance(e, UserMessage) and e.is_multimodal)
+            or (isinstance(e, ToolResult) and e.images)
+            for e in session.events
+        )
 
         if has_tool_calls and not self.provider.supports_tools:
             logger.warning(

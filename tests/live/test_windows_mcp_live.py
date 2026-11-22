@@ -220,3 +220,54 @@ def test_msinfo32_all_tools():
     finally:
         _kill(started | _pids("msinfo32.exe"))
     assert not _pids("msinfo32.exe")
+
+
+def test_screenshot_reaches_vision_providers_through_bridge():
+    """The real ``screenshot`` through aar's MCP bridge and executor yields an
+    image every provider adapter serialises (no network calls)."""
+    pytest.importorskip("mcp")
+    pytest.importorskip("uiautomation")
+    import base64
+
+    from agent.core.config import SafetyConfig, ToolConfig
+    from agent.core.events import AssistantMessage, ToolCall, UserMessage
+    from agent.core.session import events_to_messages
+    from agent.extensions.mcp import MCPBridge, MCPServerConfig
+    from agent.providers.anthropic import _convert_messages_for_anthropic
+    from agent.providers.gemini import _build_contents
+    from agent.providers.ollama import _build_messages as ollama_messages
+    from agent.providers.openai import _build_messages as openai_messages
+    from agent.tools.execution import ToolExecutor
+    from agent.tools.registry import ToolRegistry
+
+    server = (
+        f"import sys; sys.path.insert(0, {str(REPO / 'tools')!r}); "
+        "from windows_mcp.server import mcp; mcp.run(transport='stdio')"
+    )
+
+    async def main():
+        reg = ToolRegistry()
+        cfg = MCPServerConfig(name="windows", command=sys.executable, args=["-c", server])
+        async with MCPBridge([cfg]) as bridge:
+            await bridge.register_all(reg)
+            ex = ToolExecutor(reg, ToolConfig(), SafetyConfig())
+            call = ToolCall(
+                tool_name="screenshot", tool_call_id="tc1", arguments={"max_width": 320}
+            )
+            [tr] = await ex.execute([call])
+            return call, tr
+
+    call, tr = asyncio.run(main())
+    assert not tr.is_error, tr.output
+    assert tr.output.startswith("[image: image/png, "), tr.output
+    assert "Screenshot of the screen" in tr.output
+    [img] = tr.images
+    b64 = img.image_url.url.split(",", 1)[1]
+    assert base64.b64decode(b64).startswith(b"\x89PNG\r\n\x1a\n")
+
+    msgs = events_to_messages([UserMessage(content="look"), call, AssistantMessage(), tr])
+    anthropic_block = _convert_messages_for_anthropic(msgs)[-1]["content"][0]
+    assert anthropic_block["content"][1]["source"]["data"] == b64
+    assert openai_messages(msgs, "")[-1]["content"][1]["image_url"]["url"] == img.image_url.url
+    assert ollama_messages(msgs, "")[-1]["images"] == [b64]
+    assert _build_contents(msgs)[-1]["parts"][1]["inlineData"]["data"] == b64

@@ -11,6 +11,7 @@ import httpx
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
+from agent.core.multimodal import tool_images_followup_message
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
 from agent.providers.errors import translate_provider_errors
 
@@ -406,35 +407,44 @@ def _build_messages(messages: list[dict[str, Any]], system: str) -> list[dict[st
                                 "content": tr.get("content", ""),
                             }
                         )
+                    # Chat templates render images reliably only on user
+                    # turns, so the turn's tool images follow as one.
+                    followup = tool_images_followup_message(tool_results)
+                    if followup:
+                        api_messages.append(_ollama_user_message(followup["content"]))
                 else:
-                    image_blocks = [b for b in content if b.get("type") == "image_url"]
-                    audio_blocks = [b for b in content if b.get("type") == "audio"]
-                    text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
-
-                    text = " ".join(t for t in text_parts if t)
-                    api_msg = {"role": "user", "content": text}
-
-                    # Extract base-64 payloads into top-level ``images`` list
-                    images: list[str] = []
-                    for img in image_blocks:
-                        url = img.get("image_url", {}).get("url", "")
-                        if url.startswith("data:"):
-                            try:
-                                images.append(url.split(",", 1)[1])
-                            except IndexError:
-                                pass
-                    if images:
-                        api_msg["images"] = images
-
-                    if audio_blocks:
-                        logger.warning(
-                            "audio not yet supported by Ollama — dropping %d audio block(s)",
-                            len(audio_blocks),
-                        )
-
-                    api_messages.append(api_msg)
+                    api_messages.append(_ollama_user_message(content))
 
     return api_messages
+
+
+def _ollama_user_message(content: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build an Ollama user message: joined text plus a top-level ``images`` list."""
+    image_blocks = [b for b in content if b.get("type") == "image_url"]
+    audio_blocks = [b for b in content if b.get("type") == "audio"]
+    text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+
+    text = " ".join(t for t in text_parts if t)
+    api_msg: dict[str, Any] = {"role": "user", "content": text}
+
+    # Extract base-64 payloads into top-level ``images`` list
+    images: list[str] = []
+    for img in image_blocks:
+        url = img.get("image_url", {}).get("url", "")
+        if url.startswith("data:"):
+            try:
+                images.append(url.split(",", 1)[1])
+            except IndexError:
+                pass
+    if images:
+        api_msg["images"] = images
+
+    if audio_blocks:
+        logger.warning(
+            "audio not yet supported by Ollama — dropping %d audio block(s)",
+            len(audio_blocks),
+        )
+    return api_msg
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
