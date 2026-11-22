@@ -1,10 +1,12 @@
-"""Tests for LoopGuardrails — bash→acp_terminal pivot hint and premature end recovery."""
+"""Tests for LoopGuardrails — shell→acp_terminal pivot hint and premature end recovery."""
 
 from __future__ import annotations
 
 from agent.core.events import ToolCall, ToolResult
 from agent.core.guardrails import (
     _ACP_TERMINAL_HINT,
+    _ACP_TERMINAL_HINT_POWERSHELL,
+    _ACP_TERMINAL_HINT_SHELLS,
     _PREMATURE_END_FOLLOWUP,
     GuardrailsConfig,
     LoopGuardrails,
@@ -124,6 +126,108 @@ class TestBashPivotHint:
         assert guardrails.observe_tool_results(session, results, registry_names) is None
         # Still no hint — pattern didn't match
         assert guardrails.observe_tool_results(session, results, registry_names) is None
+
+
+# What the shell tools return for a failed command: output, then "Exit code: N".
+_PS_NOT_FOUND = (
+    "STDERR:\nfoo : The term 'foo' is not recognized as the name of a cmdlet, function,"
+    " script file, or operable program.\n    + CategoryInfo          : ObjectNotFound:"
+    " (foo:String) [], CommandNotFoundException\n\nExit code: 1"
+)
+
+
+def _result(tool: str, output: str, is_error: bool = False) -> ToolResult:
+    return ToolResult(tool_call_id="tc", tool_name=tool, output=output, is_error=is_error)
+
+
+class TestPowerShellPivotHint:
+    """powershell failures count toward the acp_terminal hint exactly like bash."""
+
+    names = frozenset({"powershell", "acp_terminal"})
+
+    def _guardrails(self, threshold: int = 2) -> LoopGuardrails:
+        return LoopGuardrails(GuardrailsConfig(bash_failure_threshold=threshold))
+
+    def test_powershell_failures_trigger_powershell_hint(self) -> None:
+        g, session = self._guardrails(), Session()
+        assert (
+            g.observe_tool_results(session, [_result("powershell", _PS_NOT_FOUND)], self.names)
+            is None
+        )
+        hint = g.observe_tool_results(session, [_result("powershell", _PS_NOT_FOUND)], self.names)
+        assert hint == _ACP_TERMINAL_HINT_POWERSHELL
+        assert "powershell" in hint and "WSL" not in hint and "bash" not in hint
+
+    def test_powershell_error_result_counts(self) -> None:
+        g, session = self._guardrails(1), Session()
+        err = _result("powershell", "Error [exception]: ModuleNotFoundError: x", is_error=True)
+        assert g.observe_tool_results(session, [err], self.names) == _ACP_TERMINAL_HINT_POWERSHELL
+
+    def test_no_hint_without_acp_terminal(self) -> None:
+        g, session = self._guardrails(1), Session()
+        assert (
+            g.observe_tool_results(session, [_result("powershell", _PS_NOT_FOUND)], {"powershell"})
+            is None
+        )
+
+    def test_powershell_success_resets_counter(self) -> None:
+        g, session = self._guardrails(), Session()
+        fail, ok = _result("powershell", _PS_NOT_FOUND), _result("powershell", "ok\n")
+        assert g.observe_tool_results(session, [fail], self.names) is None
+        assert g.observe_tool_results(session, [ok], self.names) is None
+        assert g.observe_tool_results(session, [fail], self.names) is None
+        assert g.observe_tool_results(session, [fail], self.names) == _ACP_TERMINAL_HINT_POWERSHELL
+
+    def test_other_tools_do_not_reset(self) -> None:
+        g, session = self._guardrails(), Session()
+        fail = _result("powershell", _PS_NOT_FOUND)
+        assert g.observe_tool_results(session, [fail], self.names) is None
+        assert g.observe_tool_results(session, [_result("read_file", "x")], self.names) is None
+        assert g.observe_tool_results(session, [fail], self.names) == _ACP_TERMINAL_HINT_POWERSHELL
+
+    def test_pattern_without_failure_does_not_count(self) -> None:
+        """Exit code 0 output that merely mentions "not found" is not a failure."""
+        g, session = self._guardrails(1), Session()
+        out = _result("powershell", "Cannot find path: 3 entries not found\n")
+        assert g.observe_tool_results(session, [out], self.names) is None
+        zero = _result("bash", "grep: not found\n\nExit code: 0")
+        assert g.observe_tool_results(session, [zero], {"bash", "acp_terminal"}) is None
+
+    def test_failure_without_pattern_does_not_count(self) -> None:
+        g, session = self._guardrails(1), Session()
+        out = _result("powershell", "STDERR:\nAccess denied\n\nExit code: 5")
+        assert g.observe_tool_results(session, [out], self.names) is None
+
+    def test_bash_nonzero_exit_counts_without_is_error(self) -> None:
+        """The bash tool reports a failed command as text + exit code, not is_error."""
+        g, session = self._guardrails(), Session()
+        out = _result("bash", "STDERR:\nbash: foo: command not found\n\nExit code: 127")
+        names = {"bash", "acp_terminal"}
+        assert g.observe_tool_results(session, [out], names) is None
+        assert g.observe_tool_results(session, [out], names) == _ACP_TERMINAL_HINT
+
+    def test_mixed_bash_and_powershell_share_the_counter(self) -> None:
+        g, session = self._guardrails(), Session()
+        names = {"bash", "powershell", "acp_terminal"}
+        assert g.observe_tool_results(session, [_bash_error()], names) is None
+        hint = g.observe_tool_results(session, [_result("powershell", _PS_NOT_FOUND)], names)
+        assert hint == _ACP_TERMINAL_HINT_SHELLS
+        assert "bash" in hint and "powershell" in hint
+        assert g.observe_tool_results(session, [_bash_error()], names) is None  # once only
+
+    def test_legacy_state_without_failed_tools_key(self) -> None:
+        g, session = self._guardrails(1), Session()
+        session.metadata["guardrails"] = {"consecutive_bash_failures": 0}
+        hint = g.observe_tool_results(session, [_result("powershell", _PS_NOT_FOUND)], self.names)
+        assert hint == _ACP_TERMINAL_HINT_POWERSHELL
+
+    def test_state_lists_are_not_shared_between_sessions(self) -> None:
+        g = self._guardrails(3)
+        first, second = Session(), Session()
+        g.observe_tool_results(first, [_result("powershell", _PS_NOT_FOUND)], self.names)
+        g.observe_tool_results(second, [_bash_error()], {"bash", "acp_terminal"})
+        assert first.metadata["guardrails"]["shell_failure_tools"] == ["powershell"]
+        assert second.metadata["guardrails"]["shell_failure_tools"] == ["bash"]
 
 
 # ---------------------------------------------------------------------------

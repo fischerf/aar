@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -24,20 +25,47 @@ _PREMATURE_END_FOLLOWUP = (
     "Do NOT repeat the same fix — try something materially different."
 )
 
-_BASH_FAILURE_PATTERNS = (
+# Local shell tools whose environment-shaped failures suggest acp_terminal.
+_SHELL_TOOLS: frozenset[str] = frozenset({"bash", "powershell"})
+
+_SHELL_FAILURE_PATTERNS = (
     "command not found",
     "not found",
     "No such file or directory",
     "ImportError",
     "ModuleNotFoundError",
     "SyntaxError",  # common from cmd.exe quoting issues
+    # PowerShell / cmd.exe: "The term 'x' is not recognized as a name of a cmdlet…",
+    # "'x' is not recognized as an internal or external command".
+    "is not recognized as",
+    "CommandNotFoundException",
+    "Cannot find path",
 )
+
+# The shell tools append this line to their output when the command exits non-zero
+# (``SandboxResult.output``); a failed command is not an ``is_error`` result.
+_NONZERO_EXIT_RE = re.compile(r"^Exit code: -?[1-9]\d*$", re.MULTILINE)
 
 _ACP_TERMINAL_HINT = (
     "[System hint: The bash tool runs inside WSL which has a different environment "
     "from the Windows host. The acp_terminal tool is available and runs commands in "
     "the native Windows host environment with the user's PATH, Python, and installed "
     "tools. Try using acp_terminal instead.]"
+)
+
+_ACP_TERMINAL_HINT_POWERSHELL = (
+    "[System hint: The powershell tool runs in aar's own subprocess with a filtered "
+    "environment (no PowerShell profile, no activated virtualenv). The acp_terminal "
+    "tool is available and runs commands in the editor's terminal on the host, with "
+    "the user's PATH, Python, and installed tools. Try using acp_terminal instead.]"
+)
+
+_ACP_TERMINAL_HINT_SHELLS = (
+    "[System hint: The bash and powershell tools run in aar's own subprocess (bash "
+    "usually inside WSL), with a different environment from the user's. The "
+    "acp_terminal tool is available and runs commands in the editor's terminal on the "
+    "host, with the user's PATH, Python, and installed tools. Try using acp_terminal "
+    "instead.]"
 )
 
 _READ_ONLY_NUDGE = (
@@ -80,6 +108,7 @@ _STATE_DEFAULTS: dict[str, Any] = {
     "near_budget_warned": False,
     "consecutive_bash_failures": 0,
     "bash_pivot_hinted": False,
+    "shell_failure_tools": [],
     "consecutive_read_only_steps": 0,
     "read_only_nudge_given": False,
 }
@@ -94,7 +123,7 @@ def _get_state(session: Session) -> dict[str, Any]:
     """
     state = session.metadata.setdefault(_STATE_KEY, {})
     for key, default in _STATE_DEFAULTS.items():
-        state.setdefault(key, default)
+        state.setdefault(key, list(default) if isinstance(default, list) else default)
     return state
 
 
@@ -271,7 +300,7 @@ class LoopGuardrails:
         return False
 
     # ------------------------------------------------------------------
-    # Bash → acp_terminal pivot hint
+    # Shell (bash / powershell) → acp_terminal pivot hint
     # ------------------------------------------------------------------
 
     def observe_tool_results(
@@ -280,7 +309,9 @@ class LoopGuardrails:
         """Check tool results for patterns suggesting the agent should switch tools.
 
         Returns a hint string to inject as an internal user message, or None.
-        Currently detects repeated bash failures when acp_terminal is available.
+        Currently detects repeated ``bash`` / ``powershell`` failures when
+        acp_terminal is available; both tools share one counter (the state
+        keys keep their ``bash`` names so persisted sessions still load).
         """
         state = _get_state(session)
 
@@ -292,27 +323,44 @@ class LoopGuardrails:
         if state["bash_pivot_hinted"]:
             return None
 
-        # Count bash failures in this batch
-        bash_failed = any(
-            r.tool_name == "bash"
-            and r.is_error
-            and any(pat in r.output for pat in _BASH_FAILURE_PATTERNS)
-            for r in results
-        )
+        # Count shell failures in this batch
+        failed = {r.tool_name for r in results if _is_shell_env_failure(r)}
 
-        if bash_failed:
+        if failed:
             state["consecutive_bash_failures"] += 1
-        else:
-            # Reset on any successful bash call or non-bash results
-            has_bash = any(r.tool_name == "bash" for r in results)
-            if has_bash:
-                state["consecutive_bash_failures"] = 0
+            state["shell_failure_tools"] = sorted(set(state["shell_failure_tools"]) | failed)
+        elif any(r.tool_name in _SHELL_TOOLS for r in results):
+            # A shell call that did not fail resets the streak; other tools don't.
+            state["consecutive_bash_failures"] = 0
+            state["shell_failure_tools"] = []
 
         if state["consecutive_bash_failures"] >= self.config.bash_failure_threshold:
             state["bash_pivot_hinted"] = True
-            return _ACP_TERMINAL_HINT
+            return _acp_terminal_hint(set(state["shell_failure_tools"]))
 
         return None
+
+
+def _is_shell_env_failure(result: ToolResult) -> bool:
+    """A ``bash`` / ``powershell`` result that failed in an environment-shaped way.
+
+    Failed means an error result or a non-zero exit code; environment-shaped
+    means the output matches one of ``_SHELL_FAILURE_PATTERNS``.
+    """
+    if result.tool_name not in _SHELL_TOOLS:
+        return False
+    if not (result.is_error or _NONZERO_EXIT_RE.search(result.output)):
+        return False
+    return any(pat in result.output for pat in _SHELL_FAILURE_PATTERNS)
+
+
+def _acp_terminal_hint(failed_tools: set[str]) -> str:
+    """The pivot hint for the shell tool(s) whose failures triggered it."""
+    if failed_tools == {"powershell"}:
+        return _ACP_TERMINAL_HINT_POWERSHELL
+    if "powershell" in failed_tools:
+        return _ACP_TERMINAL_HINT_SHELLS
+    return _ACP_TERMINAL_HINT
 
 
 def _tool_signature(tool_calls: list[ToolCall]) -> str:

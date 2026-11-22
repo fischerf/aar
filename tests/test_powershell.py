@@ -43,6 +43,7 @@ from agent.safety.sandbox import (
 )
 from agent.tools.builtin import powershell as ps
 from agent.tools.builtin import shell
+from agent.tools.builtin.acp_terminal import acp_terminal_guidelines, register_acp_terminal_tool
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
@@ -723,6 +724,81 @@ class TestExecuteProgramPosix:
 
 
 # ---------------------------------------------------------------------------
+# acp_terminal knows which shell tool(s) it competes with
+# ---------------------------------------------------------------------------
+
+
+def _acp_text(shell_tools) -> str:
+    return " ".join(acp_terminal_guidelines(shell_tools))
+
+
+class TestAcpTerminalShellAwareness:
+    def test_bash_only_on_windows(self, windows_host):
+        text = _acp_text({"bash"})
+        assert "prefer acp_terminal over bash." in text
+        assert "WSL" in text and "powershell" not in text
+
+    def test_bash_only_elsewhere(self, posix_host):
+        text = _acp_text({"bash"})
+        assert "prefer acp_terminal over bash." in text
+        assert "WSL" not in text and "powershell" not in text
+
+    def test_powershell_only(self, windows_host):
+        text = _acp_text({"powershell"})
+        assert "prefer acp_terminal over powershell." in text
+        assert "powershell runs in aar's own subprocess" in text
+        assert "Use powershell only when" in text
+        assert "bash" not in text and "WSL" not in text
+
+    def test_both(self, windows_host):
+        text = _acp_text({"powershell", "bash"})
+        assert "prefer acp_terminal over bash and powershell." in text
+        assert "bash routes through WSL" in text and "powershell runs in" in text
+        assert "Use bash only" in text and "Use powershell only" in text
+
+    def test_no_shell_tool(self, windows_host):
+        text = _acp_text(set())
+        assert "prefer" not in text
+        assert "bash" not in text and "powershell" not in text
+
+    def test_unknown_names_either(self):
+        text = _acp_text(None)
+        assert "bash or powershell, whichever is available" in text
+
+    def test_registration_defaults_to_neutral_text(self):
+        reg = ToolRegistry()
+        register_acp_terminal_tool(reg, conn=object(), session_id="s")
+        assert reg.get("acp_terminal").prompt_guidelines == acp_terminal_guidelines(None)
+
+    @pytest.mark.parametrize(
+        "bash_on_path, enabled, expected",
+        [
+            (False, ["read_file", "bash"], "over powershell."),
+            (True, ["read_file", "bash"], "over bash."),
+            (True, ["read_file", "bash", "powershell"], "over bash and powershell."),
+        ],
+    )
+    def test_agent_rewords_for_registered_shells(
+        self, windows_host, bash_on_path, enabled, expected
+    ):
+        from agent.core.agent import Agent
+        from tests.conftest import MockProvider
+
+        if bash_on_path:
+            windows_host["bash"] = r"C:\Program Files\Git\bin\bash.exe"
+        reg = ToolRegistry()
+        register_acp_terminal_tool(reg, conn=object(), session_id="s")
+        agent = Agent(
+            config=AgentConfig(tools=_tools(enabled)), provider=MockProvider(), registry=reg
+        )
+        text = " ".join(agent.registry.get("acp_terminal").prompt_guidelines)
+        assert f"prefer acp_terminal {expected}" in text
+        assert f"prefer acp_terminal {expected}" in agent.config.system_prompt
+        if "bash" not in agent.registry.names():
+            assert "bash" not in text
+
+
+# ---------------------------------------------------------------------------
 # Real PowerShell — Windows Sandbox (AAR_SANDBOX=1) or --live only
 # ---------------------------------------------------------------------------
 
@@ -914,6 +990,49 @@ class TestWindowsLive:
             assert not child.exists(), "child survived the timeout"
         finally:
             await sb.close()
+
+    async def test_acp_terminal_hint_after_real_powershell_failures(self):
+        """Two real 'not recognized' failures nudge the model to acp_terminal."""
+        from agent.core.agent import Agent
+        from agent.core.guardrails import _ACP_TERMINAL_HINT_POWERSHELL
+        from tests.conftest import MockProvider
+
+        reg = ToolRegistry()
+        register_acp_terminal_tool(reg, conn=object(), session_id="s")
+        provider = MockProvider()
+        for i in (1, 2):
+            provider.enqueue_tool_call(
+                "powershell", {"command": "Invoke-AarGibtEsNicht -Wert ä"}, tool_call_id=f"t{i}"
+            )
+        provider.enqueue_text("fertig")
+
+        async def approve(spec, tc):
+            return ApprovalResult.APPROVED
+
+        cfg = AgentConfig(tools=_tools(["read_file", "powershell"]))
+        agent = Agent(config=cfg, provider=provider, registry=reg, approval_callback=approve)
+        guidelines = " ".join(agent.registry.get("acp_terminal").prompt_guidelines)
+        assert "prefer acp_terminal over powershell" in guidelines
+        assert "bash" not in guidelines
+        assert "prefer acp_terminal over powershell" in agent.config.system_prompt
+
+        session = await agent.run("los")
+        from agent.core.events import ToolResult
+
+        outputs = [
+            e.output
+            for e in session.events
+            if isinstance(e, ToolResult) and e.tool_name == "powershell"
+        ]
+        # Windows PowerShell 5.1 localises the message, not the exception name.
+        assert len(outputs) == 2, outputs
+        assert all("CommandNotFoundException" in o or "is not recognized" in o for o in outputs)
+        assert all("Exit code: 1" in o for o in outputs), outputs
+        hints = [
+            e for e in session.events if getattr(e, "data", {}).get("reason") == "bash_pivot_hint"
+        ]
+        assert len(hints) == 1
+        assert hints[0].content == _ACP_TERMINAL_HINT_POWERSHELL
 
     def test_default_config_on_this_pc(self):
         from agent.core.agent import Agent

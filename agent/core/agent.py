@@ -15,6 +15,7 @@ from agent.core.state import AgentState
 from agent.extensions.manager import ExtensionManager
 from agent.providers.base import Provider
 from agent.safety.permissions import ApprovalCallback
+from agent.tools.builtin.acp_terminal import adapt_acp_terminal_tool
 from agent.tools.builtin.filesystem import register_filesystem_tools
 from agent.tools.builtin.shell import SHELL_TOOL_NAMES, register_configured_shell_tools
 from agent.tools.execution import ToolExecutor
@@ -135,6 +136,10 @@ class Agent:
         newly_added = set(self.registry.names()) - pre_existing
         for name in newly_added - enabled - shell_registered:
             self.registry.unregister(name)
+
+        # The ACP transport registers acp_terminal before the shell tools exist;
+        # word its guidelines for the ones that do now.
+        adapt_acp_terminal_tool(self.registry, SHELL_TOOL_NAMES & set(self.registry.names()))
 
         # Registered last, and only when configured: it is the one built-in
         # whose capability is defined by config rather than by its own code.
