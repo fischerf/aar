@@ -379,7 +379,7 @@ Windows has no equivalent of Landlock. The `windows` mode layers two mechanisms:
 - The subprocess runs at Windows Mandatory Integrity Level *Low* (the same level as IE Protected Mode and sandboxed browser tabs)
 - A Low-integrity process **cannot write to** Medium/High-integrity locations: user profile (`C:\Users\<you>`), `C:\Program Files`, registry
 - The workspace is stamped as Low-integrity-writable via `icacls /setintegritylevel Low` so the subprocess *can* write there
-- If the integrity-level helper fails (rare: policy, UAC edge cases), the sandbox falls back to Job Object only and logs a warning
+- Fails closed: if the helper cannot lower its token, the command is not run (exit code 1, `aar sandbox: could not lower the integrity level`) — for `bash` and `powershell` alike. Only when the helper cannot be started at all (no Python executable) does the sandbox fall back to Job Object only, logging a warning
 
 **`icacls` role clarification**: `icacls` here is used correctly — it grants the Low-integrity subprocess write access *to the workspace*, not to restrict it. The restriction comes from the Low Integrity token.
 
@@ -803,11 +803,14 @@ then starts PowerShell, which inherits both). `wsl` and `linux` run every
 command inside their sandbox, so `powershell` is not registered there rather
 than escaping it. Timeouts kill the whole process tree in both modes.
 
-In `windows` mode the `powershell` path fails closed: if the helper cannot
-lower its token to Low integrity, the command is not run (exit code 1,
-`aar sandbox: could not lower the integrity level`). The check is verified by
-the Windows integration tests (`whoami /groups` shows `S-1-16-4096`, a write to
-`%USERPROFILE%` is refused, a write to the workspace succeeds).
+In `windows` mode both the `bash` and the `powershell` path fail closed: if the
+helper cannot lower its token to Low integrity, the command is not run (exit
+code 1, `aar sandbox: could not lower the integrity level`). Before this was
+fixed, the `bash` path used an untyped ctypes call whose failure was ignored, so
+`bash` silently kept the agent's own integrity level. The check is verified by
+the Windows integration tests for both tools (`whoami /groups` shows
+`S-1-16-4096`, a write to `%USERPROFILE%` is refused, a write to the workspace
+succeeds, a timeout kills the process tree).
 
 ## Path normalization
 

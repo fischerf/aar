@@ -141,12 +141,14 @@ helper PID to it:
       v
   helper.py  [still at Medium IL]
       |
-      | SetTokenInformation(TokenIntegrityLevel, LOW_RID)
-      | (self-demote to Low IL)
+      | OpenProcessToken + SetTokenInformation(TokenIntegrityLevel, LOW_RID)
+      | (self-demote to Low IL; typed ctypes calls, result checked —
+      |  on failure: exit 1, "could not lower the integrity level", cmd never runs)
       v
   helper.py  [now at Low IL]
       |
       | subprocess.run(["bash", "-c", cmd])
+      | (powershell: helper.py --exec <pwsh argv>, same lowering)
       v
   bash -c cmd           [Low IL — inherits from helper]
       |
@@ -166,7 +168,7 @@ helper PID to it:
 | Memory cap | Job Object `ProcessMemoryLimit` = `windows.max_memory_mb` |
 | Process count cap | Job Object `ActiveProcessLimit` = `windows.max_processes` |
 | Cleanup | `KILL_ON_JOB_CLOSE` — orphans killed when agent exits |
-| Fallback | Low-IL helper fails → Job Object only (warning logged) |
+| Fallback | Helper cannot lower its token → command not run (fails closed). Helper cannot be started → Job Object only (warning logged) |
 
 > **WSL interop:** Both the normal path and the fallback path call `bash -c <cmd>`.
 > On Windows, `bash` is the WSL interop binary, so the shell runs inside the
@@ -345,7 +347,9 @@ because the agent runs as root with full `/mnt/` access.
     undone with `icacls <workspace> /setintegritylevel Medium`.
   - Low IL only restricts Windows-host writes. **WSL-internal paths** inside the
     user's default distro (e.g. `~/.ssh` inside WSL) remain fully writable.
-  - Low-IL fallback path is silent if ctypes helpers fail.
+  - If the helper process cannot be started at all, commands run under the
+    Job Object only (a warning is logged). A helper that starts but cannot
+    lower its token refuses to run the command.
 - `wsl`:
   - `/mnt/` defeats filesystem isolation for anything on the Windows host —
     the agent runs as **root** and can write to any file your Windows user owns,

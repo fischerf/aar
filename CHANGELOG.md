@@ -113,8 +113,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while
   an extension panel is still visible in it.
+- **`acp_terminal` and the pivot guardrail know about `powershell`.** The
+  tool's prompt guidelines name the shell tools actually registered ("prefer
+  acp_terminal over bash", "… over powershell", "… over bash and powershell")
+  with the right reason for each, instead of always talking about bash and
+  WSL. The guardrail that nudges the model toward `acp_terminal` counts
+  `powershell` failures like `bash` failures (shared counter, hint worded for
+  the tool that failed), recognises `is not recognized as`,
+  `CommandNotFoundException` and `Cannot find path`, and now also counts a
+  shell result that failed with a non-zero `Exit code: N` — the shell tools
+  never set `is_error` for a failed command, so the hint could only fire on
+  timeouts/exceptions before.
 
 ### Fixed
+- **`bash` in `windows` sandbox mode really runs at Low integrity.** The
+  helper's shell path used untyped ctypes calls whose failure was ignored, so
+  `bash` kept the agent's own integrity level and could write to
+  `%USERPROFILE%` (verified in Windows Sandbox: S-1-16-12288, write
+  succeeded). It now uses the same typed lowering as `powershell` and fails
+  closed: if lowering fails the command is not run (exit code 1,
+  `aar sandbox: could not lower the integrity level`) instead of running
+  unprotected.
+- **`tests/test_safety.py::TestLinuxSandbox` no longer breaks the test run.**
+  One test called the Landlock `preexec_fn` in the pytest process itself,
+  restricting pytest to read-only, so every later test failed to create its
+  temp dir (a full run on Linux showed hundreds of errors). The closure now
+  runs where the sandbox runs it, in a child via `preexec_fn`. The fallback
+  test hidden behind it asserted the wrong log wording and is fixed too.
 - **Failed MCP tool calls are reported as failures.** A result the server
   marked `isError` used to come back as ordinary output; the bridge now
   raises `MCPToolError` with the server's message, so the call shows up as a
@@ -140,8 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pricing entries added for Claude Opus 5, Sonnet 5, Fable 5 and 5.1. Opus 4.7
   and 4.8 had no entry and fell through to the `claude-opus-4` prefix, which
   over-reported their cost threefold.
-
-### Fixed
 
 ---
 

@@ -164,33 +164,43 @@ message and the last ten events must contain at least one failing
 `ToolResult`. This catches the "silent give-up" failure mode without
 triggering on a legitimate "task complete" finish.
 
-### 5. Bash → `acp_terminal` pivot hint
+### 5. Shell (`bash` / `powershell`) → `acp_terminal` pivot hint
 
 | Config key | Default | Effect |
 |---|---|---|
-| `bash_failure_threshold` | `2` | Consecutive `bash` failures (`command not found`, `ImportError`, `ModuleNotFoundError`, `No such file or directory`, `SyntaxError`) before a one-shot hint is injected |
+| `bash_failure_threshold` | `2` | Consecutive `bash` or `powershell` failures (`command not found`, `ImportError`, `ModuleNotFoundError`, `No such file or directory`, `SyntaxError`, `is not recognized as`, `CommandNotFoundException`, `Cannot find path`) before a one-shot hint is injected |
+
+A call counts as failed when its result is an error or its output ends in a
+non-zero `Exit code: N` (how both shell tools report a failed command), and the
+output contains one of the patterns. `bash` and `powershell` share one counter.
 
 **Behaviour:**
 
 ```
 Each tool result batch:
   acp_terminal registered AND not already hinted?
-    bash call failed with one of the known patterns?
-      YES → consecutive_bash_failures += 1
-      NO  → reset (on any successful bash call)
+    bash / powershell call failed with one of the known patterns?
+      YES → consecutive_bash_failures += 1, remember which tool failed
+      NO  → reset (on any bash / powershell call that did not fail)
 
     consecutive_bash_failures ≥ bash_failure_threshold?
-      YES → inject one-shot internal user message:
+      YES → inject one-shot internal user message, worded for the tool(s)
+            that failed, e.g. for bash:
             "[System hint: The bash tool runs inside WSL which has a
              different environment from the Windows host. The
              acp_terminal tool is available and runs commands in the
              native Windows host environment …]"
+            or for powershell:
+            "[System hint: The powershell tool runs in aar's own subprocess
+             with a filtered environment (no PowerShell profile, no
+             activated virtualenv). The acp_terminal tool is available …]"
             mark bash_pivot_hinted = True
 ```
 
 Fires at most **once per session** so the model is not nagged. Only
 activates when the ACP transport has registered the `acp_terminal`
-tool — invisible in non-ACP runs.
+tool — invisible in non-ACP runs. The state keys keep their `bash` names so
+sessions saved by older versions still load.
 
 ### 6. Read-only loop nudge
 
@@ -236,7 +246,7 @@ a read-loop and needs to commit to a plan.
   "max_premature_end_recoveries": 2,    // re-prompt on empty end_turn with failing tool output
   "reserve_tokens":               512,  // near_budget() token headroom
   "reserve_cost_fraction":        0.1,  // near_budget() cost headroom (fraction of cost_limit)
-  "bash_failure_threshold":       2,    // consecutive bash failures before acp_terminal hint (ACP only)
+  "bash_failure_threshold":       2,    // consecutive bash/powershell failures before acp_terminal hint (ACP only)
   "read_only_loop_threshold":     8     // consecutive read-only steps before read-loop nudge
 }
 ```

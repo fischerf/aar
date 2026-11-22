@@ -82,6 +82,11 @@ On Windows `bash -c` needs WSL (or Git Bash). On a Windows PC that has
 neither, `powershell` is registered in its place (see below), so a config
 written for a WSL machine still gets a working shell.
 
+In `windows` sandbox mode `bash` runs at Low integrity through the same helper
+as `powershell`; if the helper cannot lower its token the command is not run
+(exit code 1, `aar sandbox: could not lower the integrity level`) — see
+[safety.md](safety.md#windows--windows-job-objects--low-integrity-recommended-for-windows).
+
 ### `powershell`
 
 Source: `agent/tools/builtin/powershell.py`
@@ -139,6 +144,20 @@ Which shell tools are registered:
 
 A fresh config (`aar init`, or no `tools` section) enables `bash` — except on
 a Windows PC without bash, where the default list has `powershell` instead.
+
+### `acp_terminal`
+
+Source: `agent/tools/builtin/acp_terminal.py` — registered only by the ACP
+transport, when the editor advertises terminal support. Runs the command in
+the editor's terminal (the user's own environment) instead of a local
+subprocess; parameters `command`, `args`, `cwd`, `env`, `timeout` (default
+60 s). Its prompt guidelines name the shell tools actually registered — "prefer
+acp_terminal over bash", "… over powershell" or "… over bash and powershell" —
+with the reason for each, and drop the comparison when neither is registered.
+Repeated environment-shaped failures of `bash` or `powershell` trigger a
+one-shot hint toward it (`guardrails.bash_failure_threshold`, see
+[agent_loop.md](agent_loop.md#5-shell-bash--powershell--acp_terminal-pivot-hint)).
+See [acp.md](acp.md#acp-terminal-tool).
 
 ---
 

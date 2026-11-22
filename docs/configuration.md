@@ -60,7 +60,7 @@ config = AgentConfig(
         max_premature_end_recoveries=2,            # re-prompt the model when it stops with empty content while recent tool results contain errors
         reserve_tokens=512,                        # budget proximity threshold
         reserve_cost_fraction=0.1,                 # cost proximity fraction
-        bash_failure_threshold=2,                  # consecutive bash failures before nudging the model toward `acp_terminal` (ACP only)
+        bash_failure_threshold=2,                  # consecutive bash/powershell failures before nudging the model toward `acp_terminal` (ACP only)
         read_only_loop_threshold=8,                # consecutive read-only tool calls before nudging the model to act
     ),
     compaction=CompactionConfig(                   # opt-in LLM-based context compaction
@@ -504,7 +504,7 @@ config = AgentConfig(
 | `max_premature_end_recoveries` | `2` | How many times the loop re-prompts when the model emits an empty `end_turn` while recent tool outputs contain errors. Set to `0` to disable. |
 | `reserve_tokens` | `512` | Token budget proximity threshold — the loop reports "near budget" below this margin. |
 | `reserve_cost_fraction` | `0.1` | Cost proximity — fraction of `cost_limit` that triggers "near budget". |
-| `bash_failure_threshold` | `2` | Consecutive `bash` failures (e.g. `command not found`, `ImportError`) before injecting a one-shot hint suggesting `acp_terminal`. Only fires when `acp_terminal` is registered (ACP transport). |
+| `bash_failure_threshold` | `2` | Consecutive `bash` or `powershell` failures (e.g. `command not found`, `is not recognized as`, `ImportError`) before injecting a one-shot hint suggesting `acp_terminal`. Only fires when `acp_terminal` is registered (ACP transport). |
 | `read_only_loop_threshold` | `8` | Consecutive read-only tool calls (e.g. `read_file`, `grep`, `list_directory`) before nudging the model to plan and act. The nudge fires at most once per session. |
 
 See [`docs/agent_loop.md`](agent_loop.md) for the behavioural details of each guardrail.
