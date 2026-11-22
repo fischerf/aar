@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,13 @@ from agent.safety.sandbox import (
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
+
+# LocalSandbox / WindowsSubprocessSandbox run commands through bash; a Windows
+# PC without WSL or Git Bash (e.g. Windows Sandbox) has none.
+needs_bash = pytest.mark.skipif(
+    sys.platform == "win32" and shutil.which("bash") is None,
+    reason="needs bash (not installed on this Windows)",
+)
 
 # ===========================================================================
 # Policy tests
@@ -1208,6 +1216,7 @@ class TestS2AutoApprovePattern:
 class TestLocalSandbox:
     """12.3: timeouts respected."""
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_simple(self):
         sb = LocalSandbox()
@@ -1216,12 +1225,14 @@ class TestLocalSandbox:
         assert result.exit_code == 0
         assert not result.timed_out
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_with_exit_code(self):
         sb = LocalSandbox()
         result = await sb.execute("exit 42")
         assert result.exit_code == 42
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_timeout(self):
         sb = LocalSandbox()
@@ -1229,12 +1240,14 @@ class TestLocalSandbox:
         assert result.timed_out
         assert result.exit_code == -1
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_stderr(self):
         sb = LocalSandbox()
         result = await sb.execute("echo error >&2")
         assert "error" in result.stderr
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_output_property(self):
         sb = LocalSandbox()
@@ -1244,6 +1257,7 @@ class TestLocalSandbox:
         assert "STDERR" in output
         assert "Exit code: 1" in output
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_no_output(self):
         sb = LocalSandbox()
@@ -1423,6 +1437,7 @@ class TestWindowsSubprocessSandbox:
         sb._stamp_workspace_integrity()  # second call is a no-op
         assert sb._workspace_stamped is True
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_simple_no_low_integrity(self, tmp_path):
         """With use_low_integrity=False, execution goes through _execute_with_job_object."""
@@ -1434,12 +1449,14 @@ class TestWindowsSubprocessSandbox:
         assert "windows_ok" in result.stdout
         assert result.exit_code == 0
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_timeout_no_low_integrity(self, tmp_path):
         sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=False)
         result = await sb.execute("sleep 60", timeout=1)
         assert result.timed_out
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_low_integrity_falls_back_on_failure(self, tmp_path, monkeypatch):
         """When the helper script fails, fallback to plain subprocess."""
@@ -1843,6 +1860,7 @@ class TestC2TimeoutProcessTree:
     """C2: ``proc.kill(); await proc.communicate()`` hangs forever when the
     command backgrounded a child that still holds the output pipe."""
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_timeout_returns_despite_background_child(self):
         """The classic hang: a backgrounded grandchild inherits stdout."""
