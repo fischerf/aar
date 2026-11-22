@@ -48,6 +48,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from contextlib import AsyncExitStack
@@ -55,8 +56,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agent.core.events import ImageURLBlock
+from agent.core.multimodal import base64_size, format_size, image_block_from_base64
 from agent.tools.registry import ToolRegistry
-from agent.tools.schema import SideEffect, ToolSpec
+from agent.tools.schema import SideEffect, ToolOutput, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -296,8 +299,13 @@ class MCPClient:
             logger.debug("Discovered MCP tool %r from server %r", local_name, self.config.name)
         return specs
 
-    async def call_tool(self, mcp_tool_name: str, arguments: dict[str, Any]) -> str:
-        """Call a named tool on the MCP server and return its output as a string.
+    async def call_tool(self, mcp_tool_name: str, arguments: dict[str, Any]) -> str | ToolOutput:
+        """Call a named tool on the MCP server and return its output.
+
+        Returns a string, or a :class:`ToolOutput` when the result contains
+        images (``ImageContent`` or an image blob resource): its text keeps an
+        ``[image: ...]`` placeholder per image and its images carry the data,
+        which the agent passes to vision models.
 
         Raises :class:`MCPToolError` (carrying the server's message) when the
         server marks the result ``isError``, so the executor reports a failed
@@ -305,9 +313,9 @@ class MCPClient:
         """
         self._assert_connected()
         result = await self._session.call_tool(mcp_tool_name, arguments)
-        output = _content_to_str(result.content)
+        output = _content_to_output(result.content)
         if getattr(result, "isError", False) is True:
-            raise MCPToolError(output or f"MCP tool {mcp_tool_name!r} failed")
+            raise MCPToolError(str(output) or f"MCP tool {mcp_tool_name!r} failed")
         return output
 
     def _assert_connected(self) -> None:
@@ -441,7 +449,7 @@ def _side_effects_for(tool: Any) -> list[SideEffect]:
 def _make_tool_handler(client: MCPClient, mcp_tool_name: str):
     """Return an async handler that delegates to the MCP server."""
 
-    async def handler(**kwargs: Any) -> str:
+    async def handler(**kwargs: Any) -> str | ToolOutput:
         return await client.call_tool(mcp_tool_name, kwargs)
 
     handler.__name__ = mcp_tool_name
@@ -475,3 +483,47 @@ def _content_to_str(content: list[Any]) -> str:
         else:
             parts.append(str(block))
     return "\n".join(parts)
+
+
+def _content_to_output(content: list[Any]) -> str | ToolOutput:
+    """Like :func:`_content_to_str`, but keep image data for vision models.
+
+    Returns a plain string when the result has no images. Otherwise each image
+    becomes an ``[image: <mime>, <size>]`` placeholder in the text plus an
+    entry in ``ToolOutput.images``.
+    """
+    parts: list[str] = []
+    images: list[ImageURLBlock] = []
+    for block in content:
+        image = _image_of(block)
+        if image is None:
+            parts.append(_content_to_str([block]))
+            continue
+        mime, data = image
+        parts.append(f"[image: {mime}, {format_size(base64_size(data))}]")
+        images.append(image_block_from_base64(data, mime))
+    text = "\n".join(parts)
+    return ToolOutput(text=text, images=images) if images else text
+
+
+def _image_of(block: Any) -> tuple[str, str] | None:
+    """Return ``(mime, base64)`` for an ``ImageContent`` or image blob resource."""
+    if hasattr(block, "resource"):
+        resource = block.resource
+        mime = getattr(resource, "mimeType", None)
+        blob = getattr(resource, "blob", None)
+        if isinstance(mime, str) and mime.startswith("image/") and blob:
+            return mime, _as_base64(blob)
+        return None
+    if hasattr(block, "data") and hasattr(block, "mimeType"):
+        mime, data = block.mimeType, block.data
+        if isinstance(mime, str) and data:
+            return mime, _as_base64(data)
+    return None
+
+
+def _as_base64(data: str | bytes) -> str:
+    # MCP sends base64 text; tolerate raw bytes from non-conforming servers.
+    if isinstance(data, (bytes, bytearray)):
+        return base64.b64encode(bytes(data)).decode("ascii")
+    return data

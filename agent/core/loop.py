@@ -37,6 +37,8 @@ from agent.core.session import (
     Session,
     compact_to_token_budget,
     estimate_token_count,
+    prune_tool_result_images,
+    strip_tool_result_images,
     trim_to_token_budget,
     truncate_old_tool_results,
 )
@@ -141,6 +143,11 @@ async def run_loop(
                     keep_recent=config.compaction.truncate_keep_recent,
                     max_chars=config.compaction.truncate_max_chars,
                 )
+
+            # Tool-result images only go to a model that can see them; the
+            # others get the text placeholder plus a note.
+            if not provider.supports_vision:
+                messages = strip_tool_result_images(messages)
 
             # Emit a context-window fill event so the UI can show a live indicator.
             # Fired unconditionally when a context window is configured so the bar
@@ -387,6 +394,8 @@ async def run_loop(
 
                 for tr in results:
                     emit(session, on_event, tr)
+                if any(tr.images for tr in results):
+                    prune_tool_result_images(session.events, config.tools.keep_recent_images)
 
                 # --- Guardrail: bash→acp_terminal pivot hint ---
                 hint = guardrails.observe_tool_results(

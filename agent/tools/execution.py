@@ -10,7 +10,8 @@ import sys
 import time
 
 from agent.core.config import SafetyConfig, ToolConfig
-from agent.core.events import ToolCall, ToolResult
+from agent.core.events import ImageURLBlock, ToolCall, ToolResult
+from agent.core.multimodal import check_tool_image
 from agent.safety.permissions import ApprovalCallback, PermissionManager
 from agent.safety.policy import PolicyConfig, PolicyDecision, SafetyPolicy
 from agent.safety.sandbox import (
@@ -21,7 +22,7 @@ from agent.safety.sandbox import (
     WslDistroSandbox,
 )
 from agent.tools.registry import ToolRegistry
-from agent.tools.schema import SideEffect
+from agent.tools.schema import SideEffect, ToolOutput
 
 logger = logging.getLogger(__name__)
 
@@ -167,13 +168,18 @@ class ToolExecutor:
                     asyncio.to_thread(spec.handler, **tc.arguments),
                     timeout=timeout,
                 )
+            images = list(output.images) if isinstance(output, ToolOutput) else []
             output_str = str(output)
             if len(output_str) > self.tool_config.max_output_chars:
                 output_str = output_str[: self.tool_config.max_output_chars] + "\n... (truncated)"
+            images, notes = _guard_images(images, self.tool_config.max_image_bytes)
+            if notes:
+                output_str = "\n".join([output_str, *notes]) if output_str else "\n".join(notes)
             return ToolResult(
                 tool_call_id=tc.tool_call_id,
                 tool_name=tc.tool_name,
                 output=output_str,
+                images=images,
                 duration_ms=(time.monotonic() - t_start) * 1000,
             )
         except asyncio.TimeoutError:
@@ -226,6 +232,21 @@ def _error_result(
     if duration_ms is not None:
         kwargs["duration_ms"] = duration_ms
     return ToolResult(**kwargs)
+
+
+def _guard_images(
+    images: list[ImageURLBlock], max_bytes: int
+) -> tuple[list[ImageURLBlock], list[str]]:
+    """Keep the images a model can take; explain each dropped one in a note."""
+    kept: list[ImageURLBlock] = []
+    notes: list[str] = []
+    for block in images:
+        reason = check_tool_image(block, max_bytes)
+        if reason is None:
+            kept.append(block)
+        else:
+            notes.append(f"[image omitted: {reason}]")
+    return kept, notes
 
 
 def _allows_null(prop: dict) -> bool:

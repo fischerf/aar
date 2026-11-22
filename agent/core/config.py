@@ -305,6 +305,14 @@ class ToolConfig(BaseModel):
     # Individual tools may override it with ``ToolSpec.timeout_s``.
     command_timeout: int = 300
     max_output_chars: int = 50_000
+    # Images returned by tools (e.g. an MCP ``screenshot``) go to vision models.
+    # Only the images of the ``keep_recent_images`` most recent tool results
+    # that returned any keep their data in the session (context and saved
+    # JSONL); older ones shrink to their text placeholder. 0 sends none.
+    keep_recent_images: int = 3
+    # Largest tool image (decoded bytes) passed on; bigger ones are dropped with
+    # a note. The default keeps the base64 payload under Anthropic's 5 MB limit.
+    max_image_bytes: int = 3_750_000
     powershell: PowerShellToolConfig = Field(default_factory=PowerShellToolConfig)
 
 

@@ -7,6 +7,23 @@ from typing import Any, Callable, Coroutine
 
 from pydantic import BaseModel, Field
 
+from agent.core.events import ImageURLBlock
+
+
+class ToolOutput(BaseModel):
+    """A tool result with images, for handlers that return more than text.
+
+    ``text`` is what every model sees and should mention each image (the MCP
+    bridge writes ``[image: image/png, 120 KB]``). ``images`` reach the model
+    only when the active provider supports vision.
+    """
+
+    text: str = ""
+    images: list[ImageURLBlock] = Field(default_factory=list)
+
+    def __str__(self) -> str:
+        return self.text
+
 
 class SideEffect(str, Enum):
     NONE = "none"

@@ -25,6 +25,7 @@ from agent.core.events import (
     ToolResult,
     UserMessage,
 )
+from agent.core.multimodal import split_data_uri
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.extensions.api import tool_result_notes
@@ -849,6 +850,7 @@ class AarAcpAgent:
             AgentThoughtChunk,
             ContentToolCallContent,
             Cost,
+            ImageContentBlock,
             SessionInfoUpdate,
             TextContentBlock,
             ToolCallLocation,
@@ -1008,6 +1010,18 @@ class AarAcpAgent:
                             type="content", content=TextContentBlock(type="text", text=_note)
                         )
                     )
+                # Tool-returned images (e.g. an MCP screenshot) as ACP image blocks.
+                for _img in event.images:
+                    _parsed = split_data_uri(_img.image_url.url)
+                    if _parsed:
+                        _content.append(
+                            ContentToolCallContent(
+                                type="content",
+                                content=ImageContentBlock(
+                                    type="image", mime_type=_parsed[0], data=_parsed[1]
+                                ),
+                            )
+                        )
                 _push(
                     ToolCallProgress(
                         title=event.tool_name,
