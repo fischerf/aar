@@ -165,56 +165,14 @@ def _collapse_windows(p) -> str:
 # this helper, so it also runs at Low integrity and inherits the Job Object
 # assigned to the helper's PID.
 _WINDOWS_INTEGRITY_HELPER = """\
-import sys, ctypes, ctypes.wintypes as wt, subprocess
-
-def _set_low_integrity():
-    ADVAPI32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    class SID_IDENTIFIER_AUTHORITY(ctypes.Structure):
-        _fields_ = [("Value", ctypes.c_byte * 6)]
-
-    class SID_AND_ATTRIBUTES(ctypes.Structure):
-        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wt.DWORD)]
-
-    class TOKEN_MANDATORY_LABEL(ctypes.Structure):
-        _fields_ = [("Label", SID_AND_ATTRIBUTES)]
-
-    MANDATORY_LABEL_AUTH = SID_IDENTIFIER_AUTHORITY(
-        Value=(ctypes.c_byte * 6)(0, 0, 0, 0, 0, 16)
-    )
-    SECURITY_MANDATORY_LOW_RID = 0x1000
-    SE_GROUP_INTEGRITY = 0x00000020
-    TOKEN_ADJUST_DEFAULT = 0x0080
-    TokenIntegrityLevel = 25
-
-    sid = ctypes.c_void_p()
-    if not ADVAPI32.AllocateAndInitializeSid(
-        ctypes.byref(MANDATORY_LABEL_AUTH), 1, SECURITY_MANDATORY_LOW_RID,
-        0, 0, 0, 0, 0, 0, 0, ctypes.byref(sid)
-    ):
-        return
-    try:
-        label = TOKEN_MANDATORY_LABEL()
-        label.Label.Sid = sid.value
-        label.Label.Attributes = SE_GROUP_INTEGRITY
-        token = wt.HANDLE()
-        if ADVAPI32.OpenProcessToken(
-            KERNEL32.GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, ctypes.byref(token)
-        ):
-            try:
-                ADVAPI32.GetLengthSid.restype = wt.DWORD
-                size = ctypes.sizeof(TOKEN_MANDATORY_LABEL) + ADVAPI32.GetLengthSid(sid)
-                ADVAPI32.SetTokenInformation(token, TokenIntegrityLevel, ctypes.byref(label), size)
-            finally:
-                KERNEL32.CloseHandle(token)
-    finally:
-        ADVAPI32.FreeSid(sid)
+import sys, ctypes, subprocess
 
 def _lower_integrity_checked():
-    # Same as _set_low_integrity, with declared ctypes signatures (without
-    # them the GetCurrentProcess pseudo-handle is truncated to a 32-bit int
-    # and every call fails silently) and a result: True once the token is Low.
+    # Lower this process's token to Low integrity; True once it is Low.
+    # Every ctypes signature is declared: without them the GetCurrentProcess
+    # pseudo-handle is truncated to a 32-bit int, OpenProcessToken fails and
+    # the process silently stays at its original level.
+    import ctypes.wintypes as wt
     ADVAPI32 = ctypes.WinDLL("advapi32", use_last_error=True)
     KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     PSID = ctypes.c_void_p
@@ -262,14 +220,22 @@ def _lower_integrity_checked():
     finally:
         ADVAPI32.FreeSid(sid)
 
-if len(sys.argv) > 2 and sys.argv[1] == "--exec":
-    # Fail closed: a program that asked for Low integrity never runs above it.
-    if not _lower_integrity_checked():
+def _lower_or_exit():
+    # Fail closed: nothing that asked for Low integrity runs above it.
+    try:
+        lowered = _lower_integrity_checked()
+    except Exception as exc:
+        sys.stderr.write("aar sandbox: could not lower the integrity level (%s)\\n" % exc)
+        sys.exit(1)
+    if not lowered:
         sys.stderr.write(
             "aar sandbox: could not lower the integrity level (error %d)\\n"
             % ctypes.get_last_error()
         )
         sys.exit(1)
+
+_lower_or_exit()
+if len(sys.argv) > 2 and sys.argv[1] == "--exec":
     # Run an argv directly (no shell). CREATE_NO_WINDOW keeps a console
     # program from opening a window when the helper itself has no console.
     # The std handles are passed explicitly: without STARTF_USESTDHANDLES a
@@ -283,7 +249,8 @@ if len(sys.argv) > 2 and sys.argv[1] == "--exec":
             pass
     result = subprocess.run(sys.argv[2:], creationflags=0x08000000, **_std)
 else:
-    _set_low_integrity()
+    # The shell path (the bash tool): <shell> -c <command>, inheriting the
+    # helper's handles and console.
     _shell = sys.argv[1] if len(sys.argv) > 1 else "bash"
     _cmd = sys.argv[2] if len(sys.argv) > 2 else ""
     result = subprocess.run([_shell, "-c", _cmd])
@@ -1108,7 +1075,12 @@ class WindowsSubprocessSandbox(Sandbox):
         work_dir: str,
         proc_env: dict[str, str],
     ) -> SandboxResult | None:
-        """Run command via the Low Integrity helper. Returns None if unavailable."""
+        """Run command via the Low Integrity helper.
+
+        Returns None only if the helper cannot be started.  A helper that
+        starts but cannot lower its token exits 1 without running *command*;
+        that comes back as a failed result, never as a Job-Object-only rerun.
+        """
         try:
             helper = self._get_helper_path()
             proc = await asyncio.create_subprocess_exec(
