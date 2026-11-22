@@ -61,6 +61,10 @@ from agent.tools.schema import SideEffect, ToolSpec
 logger = logging.getLogger(__name__)
 
 
+class MCPToolError(RuntimeError):
+    """An MCP server reported that a tool call failed (``isError`` result)."""
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -285,7 +289,7 @@ class MCPClient:
                 name=local_name,
                 description=tool.description or "",
                 input_schema=tool.inputSchema or {"type": "object", "properties": {}},
-                side_effects=[SideEffect.EXTERNAL],
+                side_effects=_side_effects_for(tool),
                 handler=_make_tool_handler(self, tool.name),
             )
             specs.append(spec)
@@ -293,10 +297,18 @@ class MCPClient:
         return specs
 
     async def call_tool(self, mcp_tool_name: str, arguments: dict[str, Any]) -> str:
-        """Call a named tool on the MCP server and return its output as a string."""
+        """Call a named tool on the MCP server and return its output as a string.
+
+        Raises :class:`MCPToolError` (carrying the server's message) when the
+        server marks the result ``isError``, so the executor reports a failed
+        tool call instead of an ordinary result.
+        """
         self._assert_connected()
         result = await self._session.call_tool(mcp_tool_name, arguments)
-        return _content_to_str(result.content)
+        output = _content_to_str(result.content)
+        if getattr(result, "isError", False) is True:
+            raise MCPToolError(output or f"MCP tool {mcp_tool_name!r} failed")
+        return output
 
     def _assert_connected(self) -> None:
         if self._session is None:
@@ -407,6 +419,23 @@ def _require_mcp() -> None:
             "dependencies is missing or broken. Try: "
             "pip install -U 'aar-agent[mcp]'"
         ) from exc
+
+
+def _side_effects_for(tool: Any) -> list[SideEffect]:
+    """Map MCP tool annotations onto aar side effects.
+
+    Every MCP tool is ``EXTERNAL``. A tool whose server *explicitly* declares
+    that it changes things — ``readOnlyHint=False``, or ``destructiveHint=True``
+    without ``readOnlyHint=True`` — also gets ``EXECUTE``, so the safety policy
+    asks for approval in review mode (``require_approval_for_execute``) and
+    denies it in read-only mode. Unannotated tools keep the previous behaviour.
+    """
+    annotations = getattr(tool, "annotations", None)
+    read_only = getattr(annotations, "readOnlyHint", None)
+    destructive = getattr(annotations, "destructiveHint", None)
+    if read_only is False or (destructive is True and read_only is not True):
+        return [SideEffect.EXTERNAL, SideEffect.EXECUTE]
+    return [SideEffect.EXTERNAL]
 
 
 def _make_tool_handler(client: MCPClient, mcp_tool_name: str):
