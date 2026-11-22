@@ -1381,23 +1381,20 @@ class AarAcpAgent:
             try:
                 from agent.tools.builtin.filesystem import register_filesystem_tools
                 from agent.tools.builtin.search import register_search_tools
-                from agent.tools.builtin.shell import register_shell_tools
+                from agent.tools.builtin.shell import register_configured_shell_tools
                 from agent.tools.registry import ToolRegistry as TR
 
                 tmp_reg = TR()
                 enabled = set(cfg.tools.enabled_builtins)
                 if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
                     register_filesystem_tools(tmp_reg)
-                if "bash" in enabled:
-                    register_shell_tools(
-                        tmp_reg,
-                        default_timeout=cfg.tools.bash_default_timeout,
-                        hard_cap=cfg.tools.command_timeout,
-                    )
+                shell_registered = register_configured_shell_tools(
+                    tmp_reg, cfg.tools, cfg.safety.sandbox.mode
+                )
                 if enabled & {"grep", "find_files"}:
                     register_search_tools(tmp_reg)
                 for name in list(tmp_reg.names()):
-                    if name not in enabled:
+                    if name not in enabled and name not in shell_registered:
                         tmp_reg.unregister(name)
                 # Merge — skip any built-in whose name already exists in MCP registry
                 for t in tmp_reg.list_tools():

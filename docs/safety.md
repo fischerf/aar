@@ -59,6 +59,10 @@ These substring patterns block dangerous shell commands:
 
 Both lists can be extended via configuration (CLI flags, config files, or programmatic API) but not reduced below the defaults through CLI flags alone.
 
+The `powershell` tool is checked against these lists too, plus a PowerShell
+deny-list of its own (`safety.denied_powershell_patterns`, see
+[Command deny-list](#command-deny-list)).
+
 ### Command audit log
 
 `PolicyConfig.log_all_commands` (default **`false`**) controls whether every
@@ -657,6 +661,13 @@ Environment variables passed programmatically to `Sandbox.execute(env=...)` come
 from the host application rather than the model, so they are merged in
 unfiltered.
 
+The `powershell` tool's process additionally keeps a few non-secret Windows
+folder and machine names (`APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`,
+`ProgramFiles*`, `CommonProgramFiles*`, `PUBLIC`, `ALLUSERSPROFILE`,
+`HOMEDRIVE`, `HOMEPATH`, `COMPUTERNAME`, `USERDOMAIN`, `OS` —
+`agent.safety.sandbox.PROGRAM_ENV_VARS`); the deny-list still applies. The
+`bash` tool's environment is unchanged.
+
 ### Command deny-list
 
 `denied_commands` is matched structurally, not by substring:
@@ -682,6 +693,39 @@ raw command line). The defaults cover download-and-execute (`curl … | sh`,
 |-------|------|---------|-------------|
 | `safety.denied_commands` | `list[str] \| None` | `None` (→ built-in list) | Token patterns; a list **replaces** the defaults, `[]` disables them |
 | `safety.denied_command_patterns` | `list[str] \| None` | `None` (→ built-in list) | Regexes against the raw command line; `[]` disables them |
+| `safety.denied_powershell_patterns` | `list[str] \| None` | `None` (→ built-in list) | Extra regexes for the `powershell` tool only; `[]` disables them, a list replaces them |
+
+#### PowerShell
+
+The `powershell` tool goes through the same checks as `bash` — read-only
+denies it, review mode asks for approval (ACP tool kind `execute`, so the
+desktop widget shows the prompt), `denied_commands` and
+`denied_command_patterns` apply, and so does the forced approval under
+`allowed_paths` in non-isolating modes. Two differences:
+
+- `denied_commands` tokenises the command with `\` as an ordinary character
+  (a Windows path separator, not a POSIX escape), so `"C:\Temp\"` does not
+  push the check into raw substring matching.
+- `safety.denied_powershell_patterns` adds case-insensitive regexes for
+  PowerShell / `cmd.exe` shapes that token matching cannot express (aliases,
+  abbreviated parameters like `-r` for `-Recurse`). They apply to the
+  `powershell` tool only, so `bash` behaves exactly as before. The defaults
+  (`agent.safety.policy.POWERSHELL_DENIED_COMMAND_PATTERNS`) block:
+
+| Category | Examples |
+|----------|----------|
+| Recursive deletes of drive roots, system folders, user profiles | `Remove-Item -Recurse -Force C:\`, `ri $env:USERPROFILE -r`, `Remove-Item $HOME\Documents -Recurse`, `rd /s /q C:\`, `del /s C:\*`, `gci C:\ -r \| Remove-Item` |
+| Registry hives and their top-level keys | `Remove-Item HKLM:\SOFTWARE -Recurse`, `Remove-Item HKCU:\ -Recurse`, `reg delete HKLM\SOFTWARE /f` |
+| Machine-wide execution policy | `Set-ExecutionPolicy Unrestricted`, `… -Scope LocalMachine` (`-Scope Process` / `CurrentUser` stay allowed) |
+| Disks and volumes | `Format-Volume`, `Clear-Disk`, `Initialize-Disk`, `Remove-Partition`, `diskpart`, `format d:` |
+| Power state | `Stop-Computer`, `Restart-Computer`, `shutdown /s` / `/r` |
+| Download and execute | `irm … \| iex`, `iwr … \| Invoke-Expression`, `iex (New-Object Net.WebClient).DownloadString(…)` |
+| Hidden commands | `powershell -EncodedCommand <base64>` |
+| Recovery, Defender, logs | `vssadmin delete shadows`, `wbadmin delete`, `bcdedit /set`, `Set-MpPreference -Disable…`, `Add-MpPreference -Exclusion…`, `Clear-EventLog`, `wevtutil cl` |
+
+Deleting a project folder (`Remove-Item -Recurse .\build`,
+`C:\Users\me\project\dist`), an app key (`HKCU:\Software\MyApp`) or a single
+file stays allowed — subject to approval.
 
 **This is a guardrail, not a boundary.** A verb hidden inside a non-shell
 interpreter (`python -c '…'`, `perl -e '…'`) or assembled at runtime from string
@@ -750,6 +794,20 @@ an isolating sandbox mode, if you need a real limit.
 The sandbox is applied to **all shell commands** — both the built-in `bash` tool and any commands spawned by subprocesses. The `bash` tool handler delegates execution to `sandbox.execute()`, which applies the platform-appropriate isolation before the process is spawned.
 
 This means `mode: "local"` is the only setting that provides no isolation. All other modes enforce their restrictions even for one-liner `bash` tool calls.
+
+The `powershell` tool starts its executable directly through
+`sandbox.execute_program()` (no shell in between, script on stdin). Only
+backends that run host programs implement it: `local` (plain subprocess) and
+`windows` (Job Object + Low Integrity — the helper lowers its integrity level,
+then starts PowerShell, which inherits both). `wsl` and `linux` run every
+command inside their sandbox, so `powershell` is not registered there rather
+than escaping it. Timeouts kill the whole process tree in both modes.
+
+In `windows` mode the `powershell` path fails closed: if the helper cannot
+lower its token to Low integrity, the command is not run (exit code 1,
+`aar sandbox: could not lower the integrity level`). The check is verified by
+the Windows integration tests (`whoami /groups` shows `S-1-16-4096`, a write to
+`%USERPROFILE%` is refused, a write to the workspace succeeds).
 
 ## Path normalization
 

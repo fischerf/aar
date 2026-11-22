@@ -27,6 +27,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readOnlyHint: true`) now carries `SideEffect.EXECUTE` in addition to
   `EXTERNAL`, so review mode asks before running it and read-only mode blocks
   it. Read-only and unannotated MCP tools behave as before.
+- **`powershell` built-in tool** — runs commands natively on Windows, no WSL
+  needed (`agent/tools/builtin/powershell.py`). `pwsh` if installed, else
+  Windows PowerShell 5.1; `-NoProfile -NonInteractive -ExecutionPolicy Bypass`
+  (process scope), script on UTF-8 stdin with UTF-8 console output so umlauts
+  survive, `CREATE_NO_WINDOW`, process-tree kill on timeout, same output
+  format and truncation as `bash`. Its description tells the model to write
+  PowerShell, not bash. Same safety as `bash`: approval in review mode (ACP
+  tool kind `execute`), denied in `read_only`, `denied_commands` /
+  `denied_command_patterns`, forced approval under `allowed_paths` in `local`
+  mode, plus a new PowerShell-only regex deny-list
+  `safety.denied_powershell_patterns` (recursive deletes of drive roots /
+  system folders / user profiles, registry hive deletes, machine-wide
+  `Set-ExecutionPolicy`, `Format-Volume`, `Clear-Disk`, `Stop-Computer`,
+  `irm … | iex`, `-EncodedCommand`, …). Registered under the `local` and
+  `windows` sandbox modes only (new `Sandbox.execute_program`); never under
+  `wsl` / `linux`. Configure via `tools.powershell.executable` (`"auto"`) and
+  `tools.powershell.fallback_for_bash`. A fresh config on a Windows PC without
+  bash (`aar init`) enables `powershell` instead of `bash`; an existing config
+  that enables `bash` there gets `powershell` in its place. Everywhere bash
+  works (Linux, macOS, Windows with WSL) nothing changes. In `windows` mode
+  the PowerShell process really runs at Low integrity (typed ctypes calls in
+  the helper's new `--exec` path; it fails closed if lowering fails).
 - **Skills are auto-readable** — discovered skills (under `~/.aar/skills/`,
   `.agent/skills/`, or `skills_dirs`) now work even when `allowed_paths`
   restricts file tools to the workspace. The agent adds each skill's directory

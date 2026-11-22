@@ -32,6 +32,7 @@ ApprovalCallback = Callable[[ToolSpec, ToolCall], Awaitable[ApprovalResult]]
 # This table restores the originally-intended targeting per known tool.
 _LEGACY_ARG_FOR_TOOL: dict[str, str] = {
     "bash": "command",
+    "powershell": "command",
     "acp_terminal": "command",
     "read_file": "path",
     "write_file": "path",

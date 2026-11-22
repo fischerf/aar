@@ -82,6 +82,8 @@ class ToolExecutor:
             policy_kwargs["denied_commands"] = sc.denied_commands
         if sc.denied_command_patterns is not None:
             policy_kwargs["denied_command_patterns"] = sc.denied_command_patterns
+        if sc.denied_powershell_patterns is not None:
+            policy_kwargs["denied_powershell_patterns"] = sc.denied_powershell_patterns
         policy_cfg = PolicyConfig(**policy_kwargs)
         self.policy = SafetyPolicy(policy_cfg)
         self.permissions = PermissionManager(approval_callback)
