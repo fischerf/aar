@@ -123,6 +123,7 @@ def _build_config(
     allowed_paths: str = "",
     log_level: Optional[str] = None,
     log_file: Optional[str] = None,
+    context_window: Optional[int] = None,
 ) -> AgentConfig:
     """Build an AgentConfig with layered precedence.
 
@@ -154,6 +155,8 @@ def _build_config(
         cfg.provider.model = model
     if base_url:
         cfg.provider.base_url = base_url
+    if context_window:
+        cfg.provider.context_window = context_window
     if max_steps is not None:
         cfg.max_steps = max_steps
 
@@ -1294,6 +1297,11 @@ def acp(
         "--approval",
         help="HTTP mode only — tool approval: deny (default) | auto.",
     ),
+    context_window: Optional[int] = typer.Option(
+        None,
+        "--context-window",
+        help="Model context size in tokens (Ollama: sent as num_ctx unless the profile sets it)",
+    ),
 ) -> None:
     """Start an ACP agent (Agent Communication Protocol).
 
@@ -1317,6 +1325,7 @@ def acp(
         read_only=read_only,
         log_level=log_level,
         log_file=log_file,
+        context_window=context_window,
     )
     _apply_logging(config)
 

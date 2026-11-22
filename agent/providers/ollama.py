@@ -60,6 +60,16 @@ class OllamaProvider(Provider):
         # False unconditionally; the config flag is kept for forward compat.
         return False
 
+    def _apply_context_window(self, options: dict[str, Any]) -> None:
+        """Ask Ollama for ``context_window`` tokens unless ``extra.num_ctx`` says otherwise.
+
+        Without ``num_ctx`` Ollama picks its own default, which is only 4096
+        tokens on machines with little VRAM: less than aar's system prompt plus
+        a dozen tool schemas, so the prompt gets cut silently.
+        """
+        if "num_ctx" not in options and self.config.context_window:
+            options["num_ctx"] = int(self.config.context_window)
+
     @translate_provider_errors
     async def complete(
         self,
@@ -104,6 +114,7 @@ class OllamaProvider(Provider):
         for k, v in self.config.extra.items():
             if k not in _SKIP:
                 payload["options"][k] = v
+        self._apply_context_window(payload["options"])
 
         resp = await self._client.post("/api/chat", json=payload)
         resp.raise_for_status()
@@ -214,6 +225,7 @@ class OllamaProvider(Provider):
         for k, v in self.config.extra.items():
             if k not in _SKIP:
                 payload["options"][k] = v
+        self._apply_context_window(payload["options"])
 
         # Accumulators for tool calls (streamed models may return them in the final chunk)
         tool_acc: list[dict[str, Any]] = []
