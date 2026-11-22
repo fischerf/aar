@@ -380,6 +380,7 @@ Windows has no equivalent of Landlock. The `windows` mode layers two mechanisms:
 - A Low-integrity process **cannot write to** Medium/High-integrity locations: user profile (`C:\Users\<you>`), `C:\Program Files`, registry
 - The workspace is stamped as Low-integrity-writable via `icacls /setintegritylevel Low` so the subprocess *can* write there
 - Fails closed: if the helper cannot lower its token, the command is not run (exit code 1, `aar sandbox: could not lower the integrity level`) — for `bash` and `powershell` alike. Only when the helper cannot be started at all (no Python executable) does the sandbox fall back to Job Object only, logging a warning
+- Verified with PowerShell and Git for Windows' bash. **Not yet verified with WSL's `bash.exe`:** before this fix, bash in `windows` mode never actually ran at Low integrity. If WSL refuses Low-integrity callers on your machine, bash commands fail instead of running unprotected — use `sandbox.mode: "wsl"` for WSL bash, or set `windows.use_low_integrity: false` to keep only the Job Object limits
 
 **`icacls` role clarification**: `icacls` here is used correctly — it grants the Low-integrity subprocess write access *to the workspace*, not to restrict it. The restriction comes from the Low Integrity token.
 
