@@ -335,7 +335,7 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 - ACP transport: `agent-client-protocol >= 0.10, < 1.0`
 - MCP bridge: `mcp >= 1.28.1, < 2.0`
 
-### Windows — `bash` tool
+### Windows — `bash` and `powershell` tools
 
 The `bash` built-in tool requires **WSL** (Windows Subsystem for Linux). Install it once:
 
@@ -344,6 +344,12 @@ wsl --install
 ```
 
 > Not required if you do not enable the `bash` built-in tool.
+
+Without WSL, use the native `powershell` built-in tool (`pwsh` if installed, else the Windows
+PowerShell 5.1 that ships with Windows). On a Windows PC without bash, `aar init` enables it
+instead of `bash`, and an existing config that enables `bash` gets `powershell` in its place.
+It has the same approval, read-only and deny-list handling as `bash`; see
+[Configuration — Windows without WSL](docs/configuration.md#windows-without-wsl-powershell).
 
 For strong process isolation, use the built-in `wsl` sandbox mode — it routes all agent shell
 commands through a dedicated, disposable Alpine distro instead of your main WSL environment:
@@ -378,7 +384,7 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
-| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash, spawn_agent |
+| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash, powershell, spawn_agent |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
 | [Image generation & editing](docs/image-generation.md) | Driving the qwen-image sidecar from `aar run` / `chat` / `tui` — generate, edit, transparency (checking and cleaning alpha), GPU sharing with the chat model, troubleshooting |
 | [Sprite sheet workflow](docs/sprite-sheet-workflow.md) | Recipe — generate a transparent sprite sheet with the qwen-image sub-agent and build a game around it; two-GPU pinning, timeouts |
