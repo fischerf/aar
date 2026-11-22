@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Windows desktop MCP server** (`tools/windows_mcp/`, config
+  `tools/mcp_windows.json`) — lets the agent operate ordinary Windows
+  programs through the UI Automation accessibility tree: `list_windows`,
+  `focus_window`, `launch_app`, `close_window`, `get_ui_tree`,
+  `click_element`, `set_text`, `send_keys`, `read_text`, `screenshot`.
+  Controls are addressed by short ids from the latest `get_ui_tree`
+  (`e12`) or by selectors (`name=Save`, `type=Button;name=OK`).
+  `launch_app` finds programs on `PATH`, in the registry's App Paths and in
+  the Start menu (Store apps). Keys and clicks are only sent once the target
+  window is really in the foreground. New optional extra
+  `aar-agent[windows]` (`uiautomation`, Windows only; also part of `all`).
+  See [docs/mcp.md](docs/mcp.md#bundled-server-windows-desktop-automation).
+- **MCP tool annotations drive approvals** — a tool whose server declares
+  `readOnlyHint: false` (or `destructiveHint: true` without
+  `readOnlyHint: true`) now carries `SideEffect.EXECUTE` in addition to
+  `EXTERNAL`, so review mode asks before running it and read-only mode blocks
+  it. Read-only and unannotated MCP tools behave as before.
 - **Skills are auto-readable** — discovered skills (under `~/.aar/skills/`,
   `.agent/skills/`, or `skills_dirs`) now work even when `allowed_paths`
   restricts file tools to the workspace. The agent adds each skill's directory
@@ -76,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an extension panel is still visible in it.
 
 ### Fixed
+- **Failed MCP tool calls are reported as failures.** A result the server
+  marked `isError` used to come back as ordinary output; the bridge now
+  raises `MCPToolError` with the server's message, so the call shows up as a
+  tool error (`is_error=True`) in the TUIs, over ACP and to the model.
 - ACP HTTP `GET /runs/{run_id}/events` returned 404 for every run — the
   generic `GET /runs/{run_id}` branch matched first and rejected the path.
 - **Provider refusals are no longer mistaken for the model giving up.** A

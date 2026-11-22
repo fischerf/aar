@@ -354,11 +354,14 @@ Replace `/path/to/aar` with your actual clone path.
 }
 ```
 
-> **Tip:** You can also load any of the bundled servers directly from the Aar CLI using the `--mcp`
-> flag instead of wiring them through Zed:
+> **Tip:** You can also load any of the bundled servers directly from the Aar CLI using the
+> `--mcp-config` flag instead of wiring them through Zed:
 > ```bash
-> aar chat --mcp tools/mcp_web.json
+> aar chat --mcp-config tools/mcp_web.json
 > ```
+>
+> For the Windows desktop server (`tools/windows_mcp`, Windows only) see
+> [MCP — Windows desktop automation](mcp.md#enable-it-over-acp-zed).
 
 ### Model selection
 

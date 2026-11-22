@@ -22,8 +22,9 @@ Aar requires **`mcp>=1.28.1,<2.0`**.
   the cap is required until the bridge grows a compatibility layer. The SDK
   itself recommends pinning `mcp<2` to keep v1 client code running.
 
-Note that Aar's MCP tests mock the SDK, so they pass on any version — the
-constraint above comes from round-trip testing against a real server.
+Note that most of Aar's MCP tests mock the SDK, so they pass on any version —
+the constraint above comes from round-trip testing against a real server
+(`tests/test_windows_mcp.py` also runs one real stdio round trip).
 
 The MCP bridge keeps the server connections **alive for the full lifetime of the session** — across every turn in an interactive chat, across every tool call in a multi-step task. Connections are cleanly closed when the bridge context exits.
 
@@ -210,6 +211,31 @@ Without `prefix_tools`, a name collision raises `ValueError` immediately — it 
 > registry without network access. Prefer `npx --prefer-offline` once the package is cached, or
 > invoke `node <path-to-index.js>` directly to bypass the registry check entirely.
 
+## Tool annotations and approvals
+
+MCP servers can describe each tool with
+[annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations).
+Aar uses `readOnlyHint` / `destructiveHint` to decide whether a tool call needs
+the user's approval:
+
+| Server declares | Aar side effects | `review` mode (default) | `auto` mode | `read-only` mode |
+|---|---|---|---|---|
+| nothing (no annotations) | `external` | runs | runs | runs |
+| `readOnlyHint: true` | `external` | runs | runs | runs |
+| `readOnlyHint: false`, or `destructiveHint: true` without `readOnlyHint: true` | `external`, `execute` | **asks first** | runs ¹ | blocked |
+
+¹ Like `bash`: while `allowed_paths` is active and the sandbox mode does not
+enforce it at the OS level (the default `local`), Aar cannot verify what the
+call touches and still asks.
+
+The question goes through the normal approval path — the terminal prompt in
+`chat`/`tui`, the editor's permission dialog over ACP — and a denied call never
+reaches the server. Unannotated tools keep the old behaviour, so check what a
+third-party server declares before relying on it.
+
+A result the server marks `isError` is reported as a failed tool call
+(`Error [exception]: MCPToolError: <server message>`), not as normal output.
+
 ## MCP content types
 
 MCP tool results can contain mixed content. Aar serializes all blocks to a plain string for the LLM:
@@ -220,6 +246,132 @@ MCP tool results can contain mixed content. Aar serializes all blocks to a plain
 | `ImageContent` | `[image: mime/type]` |
 | `EmbeddedResource` (text) | The text value |
 | `EmbeddedResource` (blob) | `[blob resource: uri]` |
+
+## Bundled server: Windows desktop automation
+
+`tools/windows_mcp/` lets the agent operate ordinary Windows programs — Notepad,
+Excel, Word, Explorer, settings dialogs — the way a screen reader sees them: it
+reads the window's accessibility tree (Windows UI Automation), then presses
+buttons, fills in fields and reads text by element, not by guessing screen
+coordinates. Keystrokes and screenshots are fallbacks for programs that expose
+little to UI Automation.
+
+### Requirements
+
+- Windows 10 or 11, and an **interactive desktop session**: the server must run
+  as the signed-in user whose windows it operates (not as a service, over SSH or
+  in a locked session).
+- Python 3.12+ with `pip install -e ".[windows]"` from the repo root (pulls `mcp`
+  and `uiautomation`/`comtypes`; on other systems the extra installs nothing
+  Windows-specific). `tools/windows_mcp/requirements.txt` has the same two
+  packages for a server-only environment.
+- Programs running as administrator cannot be controlled from a server that is
+  not elevated (Windows blocks that on purpose).
+
+### Enable it in the CLI
+
+Run from the repo root (the config adds `tools/` to `sys.path`):
+
+```bash
+aar chat --mcp-config tools/mcp_windows.json
+aar tui  --mcp-config tools/mcp_windows.json
+aar tools --mcp-config tools/mcp_windows.json   # shows windows__list_windows, ...
+```
+
+To have it in every session, put the server entry into `~/.aar/mcp_servers.json`
+with an absolute path instead of `'tools'`. The tools are registered with the
+prefix `windows__` (`prefix_tools: true`).
+
+### Enable it over ACP (Zed)
+
+Add a context server; Zed forwards it to Aar when it opens a session (see
+[ACP — MCP servers from the editor](acp.md#mcp-servers-from-the-editor)). Use
+the `python.exe` of the environment where `aar-agent[windows]` is installed and
+an absolute path to `tools`:
+
+```json
+{
+  "context_servers": {
+    "aar-windows": {
+      "command": "C:/path/to/aar/.venv/Scripts/python.exe",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, 'C:/path/to/aar/tools'); from windows_mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+### Tools
+
+| Tool | What it does | Approval in `review` mode |
+|---|---|---|
+| `list_windows` | Visible windows: handle, program, pid, title | no |
+| `focus_window` | Bring a window to the front (restore if minimized) | no |
+| `get_ui_tree` | The window's controls as a compact list with ids (`e12`), types, names, values and states | no |
+| `read_text` | Text/value of one control, or all visible text of a window | no |
+| `screenshot` | PNG of a window or the screen | no |
+| `launch_app` | Start a program or open a document; returns the new window(s) | **yes** |
+| `click_element` | Press a button, toggle a checkbox, select an item, open a menu (or a real click) | **yes** |
+| `set_text` | Replace the text of a field or document | **yes** |
+| `send_keys` | Press keys and shortcuts (`{Ctrl}s`, `{Alt}{F4}`, `{Enter}`) | **yes** |
+| `close_window` | Close a window like clicking X (a save prompt may appear) | **yes** |
+
+A window is addressed by its handle from `list_windows` or by part of its title
+(`"Notepad"`); an element by its id from the **latest** `get_ui_tree` of that
+window or by a selector — `name=Save`, `automation_id=SaveButton`,
+`type=Button;name=OK`. Example tree:
+
+```text
+Window "Untitled - Notepad"
+e1 MenuBar #MenuBar
+  e2 MenuItem "File" [collapsed]
+  e3 MenuItem "Edit" [collapsed]
+e4 Document "Text editor" value="Hello"
+e5 Button "Close"
+```
+
+`launch_app` accepts the name from the Start menu (`"Excel"`, `"Calculator"`),
+an exe name (`"notepad"`, `"winword"`), a full path or a document; it searches
+`PATH`, the registry's App Paths and the Start menu (which covers Store apps).
+
+### Safety
+
+- Every tool carries MCP annotations: the five that only look are
+  `readOnlyHint: true`; the five that change something are `readOnlyHint: false`
+  (`destructiveHint: true`, except `launch_app`, which only adds a window). In
+  `review` mode Aar therefore asks before each change and shows the call (for
+  example `windows__set_text` with the window, element and text); in `read-only`
+  mode changes are blocked; see [the table above](#tool-annotations-and-approvals).
+- The read-only tools are **not** prompted, and they can see whatever is on the
+  screen (documents, mail, chat windows). Values of password fields are never
+  returned.
+- `send_keys` can do anything a keyboard can (including `{Win}r` and typing a
+  command), so treat its approval like a shell command.
+- Keys and clicks are only sent once the target window really is in the
+  foreground, and a click is refused when another window covers the element —
+  nothing is typed into the wrong window. If Windows refuses to switch, the tool
+  says so and asks the user to click the window.
+- Errors are short and tell the model what to do next ("Unknown element id …
+  Call get_ui_tree again.", "Could not find a program called …").
+- `screenshot` returns a real image, but Aar's bridge hands the model only text
+  (`[image: image/png]` plus the size). In Aar, `get_ui_tree` and `read_text`
+  are what the model can actually use; the image helps in hosts that forward
+  images.
+
+### Tests
+
+```bash
+# any OS: core logic, the server on a fake backend, a real stdio round trip
+# through the Aar bridge and approval path
+pytest tests/test_windows_mcp.py tests/test_mcp.py
+
+# Windows only: drives Notepad and System Information (msinfo32) on the real desktop.
+# Needs --live and AAR_DESKTOP_TESTS=1 (or AAR_SANDBOX=1); best run in Windows Sandbox.
+AAR_DESKTOP_TESTS=1 pytest tests/live/test_windows_mcp_live.py --live
+```
 
 ## MCP tools and the web server
 

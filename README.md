@@ -334,6 +334,7 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 - Provider SDK as needed: `anthropic`, `openai`, `google-genai`
 - ACP transport: `agent-client-protocol >= 0.10, < 1.0`
 - MCP bridge: `mcp >= 1.28.1, < 2.0`
+- Windows desktop MCP server (optional, `pip install -e ".[windows]"`): `uiautomation >= 2.0.20` — see [MCP](docs/mcp.md#bundled-server-windows-desktop-automation)
 
 ### Windows — `bash` tool
 
@@ -371,7 +372,7 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Gemini, Generic setup and options |
 | [Gemini provider](docs/providers_gemini.md) | Gemini SDK mode, HTTP mode, thinking/reasoning, `extra` key reference |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
-| [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
+| [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, annotation-based approvals, bundled Windows desktop server, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
 | [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut reference |
 | [Extensions](docs/extensions.md) | Extension API, creating extensions, event hooks, tools, commands, auto-discovery, publishing to PyPI |
