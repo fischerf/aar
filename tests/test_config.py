@@ -23,6 +23,11 @@ class TestDefaultSystemPrompt:
         assert "Operating system:" in prompt
         assert "Working directory:" in prompt
 
+    def test_contains_current_date(self):
+        from datetime import date
+
+        assert f"Current date: {date.today().isoformat()}" in _default_system_prompt()
+
     def test_contains_assistant_preamble(self):
         prompt = _default_system_prompt()
         assert "You are a helpful assistant" in prompt
