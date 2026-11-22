@@ -16,7 +16,7 @@ from agent.extensions.manager import ExtensionManager
 from agent.providers.base import Provider
 from agent.safety.permissions import ApprovalCallback
 from agent.tools.builtin.filesystem import register_filesystem_tools
-from agent.tools.builtin.shell import register_shell_tools
+from agent.tools.builtin.shell import SHELL_TOOL_NAMES, register_configured_shell_tools
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 
@@ -112,7 +112,6 @@ class Agent:
 
         enabled = set(self.config.tools.enabled_builtins)
         fs_tools = {"read_file", "write_file", "edit_file", "list_directory"}
-        shell_tools = {"bash"}
         search_tools = {"grep", "find_files"}
 
         # Track pre-existing tools (e.g. MCP) so we don't prune them
@@ -120,19 +119,21 @@ class Agent:
 
         if enabled & fs_tools:
             register_filesystem_tools(self.registry)
-        if enabled & shell_tools:
-            register_shell_tools(
-                self.registry,
-                sandbox=self.executor.sandbox,
-                default_timeout=self.config.tools.bash_default_timeout,
-                hard_cap=self.config.tools.command_timeout,
-            )
+        # bash / powershell — which of them depends on the host and sandbox
+        # mode; a powershell that stands in for a missing bash must survive
+        # the prune below.
+        shell_registered = register_configured_shell_tools(
+            self.registry,
+            self.config.tools,
+            self.config.safety.sandbox.mode,
+            sandbox=self.executor.sandbox,
+        )
         if enabled & search_tools:
             register_search_tools(self.registry)
 
         # Only prune builtins we just added that weren't explicitly enabled
         newly_added = set(self.registry.names()) - pre_existing
-        for name in newly_added - enabled:
+        for name in newly_added - enabled - shell_registered:
             self.registry.unregister(name)
 
         # Registered last, and only when configured: it is the one built-in
@@ -201,6 +202,7 @@ class Agent:
             tool_snippets=self.registry.get_prompt_snippets() or None,
             tool_guidelines=self.registry.get_prompt_guidelines() or None,
             skills_text=skills_text,
+            shell_tools=sorted(SHELL_TOOL_NAMES & set(self.registry.names())),
         )
 
     def on_event(self, callback: Callable[[Event], Any]) -> None:

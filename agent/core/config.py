@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +14,47 @@ from pydantic import BaseModel, Field, model_validator
 
 from agent.core.guardrails import GuardrailsConfig
 
+_WINDOWS_BASH_SHELL_LINE = (
+    "Shell: commands run via WSL (bash -c). Standard bash/Unix commands work"
+    " (ls, cat, grep, find, pwd, …)."
+)
+
+
+def _windows_shell_lines(shell_tools: Sequence[str] | None) -> list[str]:
+    """Describe the shell tool(s) on a Windows host outside the WSL sandbox.
+
+    *shell_tools* is the set of shell tools actually registered; ``None``
+    (not known yet, e.g. the prompt built at config load) keeps the bash text.
+    """
+    if shell_tools is None:
+        return [_WINDOWS_BASH_SHELL_LINE]
+    tools = set(shell_tools)
+    if {"bash", "powershell"} <= tools:
+        return [
+            (
+                "Shell: two shell tools. `powershell` runs commands natively on Windows"
+                " (PowerShell syntax: Get-ChildItem, Get-Content, Select-String, $env:NAME)."
+                " `bash` runs bash -c through WSL or Git Bash (Unix commands)."
+            ),
+        ]
+    if "powershell" in tools:
+        return [
+            (
+                "Shell: the `powershell` tool runs commands natively on Windows in PowerShell."
+                " There is no bash or WSL: use PowerShell cmdlets and syntax (Get-ChildItem,"
+                " Get-Content, Select-String, Copy-Item, $env:NAME), not Unix commands."
+            ),
+        ]
+    if "bash" in tools:
+        return [_WINDOWS_BASH_SHELL_LINE]
+    return []
+
 
 def _default_system_prompt(
     sandbox_mode: str = "",
     wsl_distro: str = "",
     system_prompt_hint: str = "",
+    shell_tools: Sequence[str] | None = None,
 ) -> str:
     """Generate a base system prompt with OS, cwd, and shell context."""
     os_name = platform.system()  # "Windows", "Linux", "Darwin"
@@ -44,7 +82,7 @@ def _default_system_prompt(
         else:
             lines += [
                 "",
-                "Shell: commands run via WSL (bash -c). Standard bash/Unix commands work (ls, cat, grep, find, pwd, …).",
+                *_windows_shell_lines(shell_tools),
                 "File paths: use Windows-style paths for file tools, e.g. .\\file.py or subdirectory\\file.py.",
                 f"When creating files, place them inside the working directory ({cwd}) unless told otherwise.",
                 "Do NOT use Unix-style absolute paths like /file.py — on Windows they resolve to the drive root, not the project.",
@@ -76,6 +114,7 @@ def _collect_layers(
     tool_snippets: dict[str, str] | None = None,  # deprecated — ignored
     tool_guidelines: list[str] | None = None,
     skills_text: str | None = None,
+    shell_tools: Sequence[str] | None = None,
 ) -> list[PromptLayer]:
     """Return all prompt layers in assembly order, including missing ones."""
     layers: list[PromptLayer] = []
@@ -84,6 +123,7 @@ def _collect_layers(
         sandbox_mode=sandbox_mode,
         wsl_distro=wsl_distro,
         system_prompt_hint=system_prompt_hint,
+        shell_tools=shell_tools,
     )
     layers.append(PromptLayer("aar-system", "[built-in]", None, base_text, True))
 
@@ -157,8 +197,13 @@ def build_system_prompt(
     tool_snippets: dict[str, str] | None = None,  # deprecated — kept for back-compat
     tool_guidelines: list[str] | None = None,
     skills_text: str | None = None,
+    shell_tools: Sequence[str] | None = None,
 ) -> str:
     """Assemble the system prompt from base + global rules + project rules.
+
+    *shell_tools* names the registered shell tools (``bash``, ``powershell``)
+    so the base layer describes the shell the model actually has; ``None``
+    keeps the historical per-OS text.
 
     Layers (all optional except base):
       1. Base             — runtime facts (OS, cwd, shell)
@@ -178,6 +223,7 @@ def build_system_prompt(
         tool_snippets=tool_snippets,
         tool_guidelines=tool_guidelines,
         skills_text=skills_text,
+        shell_tools=shell_tools,
     )
 
     return "\n---\n".join(layer.text for layer in layers if layer.loaded)
@@ -198,31 +244,68 @@ class ProviderConfig(BaseModel):
     extra: dict = Field(default_factory=dict)
 
 
+class PowerShellToolConfig(BaseModel):
+    """Settings for the built-in ``powershell`` tool (native Windows shell, no WSL).
+
+    The tool is registered when ``"powershell"`` is in ``enabled_builtins`` (or
+    stands in for a missing bash, see ``fallback_for_bash``), an executable
+    resolves, and the sandbox mode runs host programs (``local``, ``windows``;
+    not ``wsl`` or ``linux``).
+    """
+
+    # "auto" → on Windows ``pwsh`` (PowerShell 7) if on PATH, else Windows
+    # PowerShell 5.1 (``powershell.exe``); elsewhere nothing, so the tool only
+    # appears on Linux/macOS when set explicitly. Otherwise a program name
+    # looked up on PATH ("pwsh", "powershell") or an absolute path.
+    executable: str = "auto"
+    # On Windows, when "bash" is enabled but no bash is installed (no WSL, no
+    # Git Bash) and the sandbox mode is not "wsl", register powershell in its
+    # place, so configs written for WSL machines still get a working shell.
+    fallback_for_bash: bool = True
+
+
+def _default_shell_builtin() -> str:
+    """The shell tool a fresh config enables on this host.
+
+    ``bash`` wherever it can run — Linux, macOS, and Windows with WSL or Git
+    Bash — so existing setups are unchanged; ``powershell`` on a Windows PC
+    with no bash at all (a typical office PC without WSL).
+    """
+    if os.name == "nt" and shutil.which("bash") is None:
+        return "powershell"
+    return "bash"
+
+
+def _default_enabled_builtins() -> list[str]:
+    return [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_directory",
+        _default_shell_builtin(),
+        "grep",
+        "find_files",
+    ]
+
+
 class ToolConfig(BaseModel):
-    enabled_builtins: list[str] = Field(
-        default_factory=lambda: [
-            "read_file",
-            "write_file",
-            "edit_file",
-            "list_directory",
-            "bash",
-            "grep",
-            "find_files",
-        ]
-    )
+    # The shell entry is ``bash``, or ``powershell`` on Windows without bash
+    # (see ``_default_shell_builtin``). Both may be listed.
+    enabled_builtins: list[str] = Field(default_factory=_default_enabled_builtins)
     # Allowlist for tools contributed by extensions. ``None`` (the default)
     # keeps every extension tool; a list keeps only those names; ``[]`` keeps
     # none. ``enabled_builtins`` does not cover these — an installed extension
     # registers into every agent in the process, sub-agents included.
     enabled_extension_tools: list[str] | None = None
-    # Default timeout (seconds) for bash commands when the model omits the timeout argument.
-    # Set higher for long-running tasks (package installs, builds, docker pulls, etc.).
+    # Default timeout (seconds) for bash and powershell commands when the model omits the
+    # timeout argument. Set higher for long-running tasks (package installs, builds, etc.).
     bash_default_timeout: int = 120
     # Hard outer timeout (seconds) applied by the executor regardless of what the model requests.
     # Should be >= bash_default_timeout; 0 disables the outer guard.
     # Individual tools may override it with ``ToolSpec.timeout_s``.
     command_timeout: int = 300
     max_output_chars: int = 50_000
+    powershell: PowerShellToolConfig = Field(default_factory=PowerShellToolConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +497,10 @@ class SafetyConfig(BaseModel):
     # fork bombs — shapes that token matching can't express). ``None`` uses
     # ``PolicyConfig.denied_command_patterns``' defaults; ``[]`` disables them.
     denied_command_patterns: list[str] | None = None
+    # Extra regex deny-list for the ``powershell`` tool only (Remove-Item -Recurse
+    # C:\, Format-Volume, Stop-Computer, registry hive deletes, …). ``None`` uses
+    # ``PolicyConfig.denied_powershell_patterns``' defaults; ``[]`` disables them.
+    denied_powershell_patterns: list[str] | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     log_all_commands: bool = True
     acp_approval_timeout: float = (

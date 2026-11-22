@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
-from agent.safety.sandbox import LocalSandbox, Sandbox
+import logging
+import shutil
+from typing import TYPE_CHECKING
+
+from agent.safety.sandbox import (
+    PROGRAM_EXEC_MODES,
+    LocalSandbox,
+    Sandbox,
+    resolve_sandbox_mode,
+)
+from agent.tools.builtin import powershell as _ps
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
+
+if TYPE_CHECKING:
+    from agent.core.config import ToolConfig
+
+logger = logging.getLogger(__name__)
+
+# Built-in names that ``register_configured_shell_tools`` owns.
+SHELL_TOOL_NAMES = frozenset({"bash", "powershell"})
 
 # M1 — Absolute upper bound for the model-supplied ``timeout`` when the caller
 # gives no executor-derived cap. Without a bound the model can request
@@ -84,3 +102,87 @@ def register_shell_tools(
             handler=bash,
         )
     )
+
+
+def bash_available(sandbox_mode: str) -> bool:
+    """Whether the ``bash`` tool can run under *sandbox_mode* on this host.
+
+    Off Windows there is always a shell; the ``wsl`` mode brings its own.
+    Elsewhere on Windows ``bash -c`` needs WSL's ``bash.exe`` or Git Bash on
+    ``PATH`` — an office PC typically has neither.
+    """
+    if not _ps.is_windows_host() or resolve_sandbox_mode(sandbox_mode) == "wsl":
+        return True
+    return shutil.which("bash") is not None
+
+
+def register_configured_shell_tools(
+    registry: ToolRegistry,
+    tools_config: ToolConfig,
+    sandbox_mode: str,
+    sandbox: Sandbox | None = None,
+) -> set[str]:
+    """Register ``bash`` and/or ``powershell`` as configured; return the names added.
+
+    - ``bash`` is registered exactly as before whenever it is enabled and can
+      run here.
+    - ``powershell`` is added when it is in ``enabled_builtins``, an executable
+      resolves (``tools.powershell.executable``) and the sandbox runs host
+      programs (``local``, ``windows`` — not ``wsl`` / ``linux``).
+    - With ``tools.powershell.fallback_for_bash`` (default), a Windows host
+      whose config enables ``bash`` but has no bash gets ``powershell`` in its
+      place. If ``powershell`` cannot be registered either, ``bash`` is
+      registered anyway (the historical behaviour).
+    - Under ``wsl`` / ``linux`` a config that enables only ``powershell`` gets
+      ``bash`` — the sandbox's own shell — instead of no shell at all.
+
+    *sandbox* is the live backend when there is one (the agent); prompt and
+    ``/tools`` listings pass ``None`` and the decision follows *sandbox_mode*.
+    The returned names may differ from ``enabled_builtins`` — callers that
+    prune to ``enabled_builtins`` must keep them.
+    """
+    enabled = set(tools_config.enabled_builtins)
+    want_bash = "bash" in enabled
+    bash_ok = want_bash and bash_available(sandbox_mode)
+    ps_cfg = tools_config.powershell
+    want_ps = "powershell" in enabled or (want_bash and not bash_ok and ps_cfg.fallback_for_bash)
+
+    if sandbox is not None:
+        program_exec = sandbox.supports_program_exec
+        ps_sandbox = sandbox
+    else:
+        program_exec = resolve_sandbox_mode(sandbox_mode) in PROGRAM_EXEC_MODES
+        ps_sandbox = LocalSandbox()  # listings only need the spec, never run it
+
+    registered: set[str] = set()
+    if want_ps:
+        exe = _ps.resolve_powershell_executable(ps_cfg.executable) if program_exec else None
+        if not program_exec:
+            logger.info(
+                "powershell tool skipped: sandbox mode %r runs no host programs", sandbox_mode
+            )
+        elif exe is None:
+            logger.info("powershell tool skipped: no executable for %r", ps_cfg.executable)
+        elif _ps.register_powershell_tool(
+            registry,
+            sandbox=ps_sandbox,
+            executable=exe,
+            default_timeout=tools_config.bash_default_timeout,
+            hard_cap=tools_config.command_timeout,
+        ):
+            registered.add("powershell")
+            if want_bash and not bash_ok:
+                logger.info("bash not found on this Windows host; using the powershell tool")
+
+    stand_in = not want_bash and "powershell" in enabled and not program_exec
+    if stand_in:
+        logger.info("sandbox mode %r runs shell commands only; using the bash tool", sandbox_mode)
+    if (want_bash and (bash_ok or "powershell" not in registered)) or stand_in:
+        register_shell_tools(
+            registry,
+            sandbox=sandbox,
+            default_timeout=tools_config.bash_default_timeout,
+            hard_cap=tools_config.command_timeout,
+        )
+        registered.add("bash")
+    return registered
