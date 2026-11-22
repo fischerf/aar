@@ -354,6 +354,8 @@ an absolute path to `tools`:
 | `click_element` | Press a button, toggle a checkbox, select an item, open a menu (or a real click) | **yes** |
 | `set_text` | Replace the text of a field or document | **yes** |
 | `send_keys` | Press keys and shortcuts (`{Ctrl}s`, `{Alt}{F4}`, `{Enter}`) | **yes** |
+| `click_at` | Real click at a position inside an element or the window (canvas, map, slider track) | **yes** |
+| `drag` | Hold the mouse button and move through a path: draw on a canvas, move a slider, drag and drop | **yes** |
 | `close_window` | Close a window like clicking X (a save prompt may appear) | **yes** |
 
 A window is addressed by its handle from `list_windows` or by part of its title
@@ -370,6 +372,19 @@ e4 Document "Text editor" value="Hello"
 e5 Button "Close"
 ```
 
+`click_at` and `drag` take positions as **fractions** of the element (or of the
+window's client area when no element is given): `[0, 0]` is the top-left corner,
+`[1, 1]` the bottom-right, `[0.5, 0.5]` the centre. This works for any window
+size or DPI and needs no screenshot. Example — a sunset in Paint, using only its
+toolbar (all buttons and colours are in the tree) and the canvas element
+(`automation_id=image`): `click_element "Füllen"` + colour + `click_at` fills
+the canvas; `"Linie"` + `drag [[0, 0.6], [1, 0.6]]` draws the horizon;
+`"Oval"` + `drag [[0.44, 0.45], [0.56, 0.75]]` the sun; the brush with a
+multi-point `drag` draws freehand waves. The server sends real mouse input
+(`SendInput`, with intermediate moves so freehand strokes keep their shape) and
+runs per-monitor DPI aware, so element rectangles and the mouse agree on scaled
+monitors.
+
 `launch_app` accepts the name from the Start menu (`"Excel"`, `"Calculator"`),
 an exe name (`"notepad"`, `"winword"`), a full path or a document; it searches
 `PATH`, the registry's App Paths and the Start menu (which covers Store apps).
@@ -377,7 +392,7 @@ an exe name (`"notepad"`, `"winword"`), a full path or a document; it searches
 ### Safety
 
 - Every tool carries MCP annotations: the five that only look are
-  `readOnlyHint: true`; the five that change something are `readOnlyHint: false`
+  `readOnlyHint: true`; the seven that change something are `readOnlyHint: false`
   (`destructiveHint: true`, except `launch_app`, which only adds a window). In
   `review` mode Aar therefore asks before each change and shows the call (for
   example `windows__set_text` with the window, element and text); in `read-only`
@@ -385,6 +400,7 @@ an exe name (`"notepad"`, `"winword"`), a full path or a document; it searches
 - The read-only tools are **not** prompted, and they can see whatever is on the
   screen (documents, mail, chat windows). Values of password fields are never
   returned.
+- `click_at` and `drag` refuse positions covered by another window, like clicks.
 - `send_keys` can do anything a keyboard can (including `{Win}r` and typing a
   command), so treat its approval like a shell command.
 - Keys and clicks are only sent once the target window really is in the

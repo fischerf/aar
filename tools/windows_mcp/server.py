@@ -25,18 +25,33 @@ from pydantic import Field
 
 try:
     from . import uia
-    from .core import WinMcpError
+    from .core import POINT_HELP, WinMcpError
 except ImportError:  # executed as a plain script
     import uia  # type: ignore[no-redef]
-    from core import WinMcpError  # type: ignore[no-redef]
+    from core import POINT_HELP, WinMcpError  # type: ignore[no-redef]
 
 mcp = FastMCP(
     name="windows-desktop",
     instructions=(
+        "These tools control the user's Windows desktop: you can start programs, click "
+        "their controls, type and draw with the mouse. When the user asks for something "
+        "in a program (e.g. 'paint a sunset in Paint', 'write a letter in Word'), do it "
+        "with these tools instead of explaining how. "
         "Operate Windows programs through their accessibility tree. Typical flow: "
         "list_windows (or launch_app) -> get_ui_tree(window) -> click_element / set_text "
         "with the element ids (e.g. 'e12') from the latest tree -> read_text to check the "
         "result. Prefer these over send_keys; use screenshot only if the tree is empty. "
+        "For canvases, maps and sliders use click_at / drag with positions as fractions "
+        "(0..1) of an element. Drawing in a paint program: get_ui_tree, find the canvas "
+        "element and always pass it as element; pick a tool and a colour with "
+        "click_element, then click_at with the fill tool to fill an area, or drag with a "
+        "shape tool (Line, Oval, Rectangle: corner to corner) or the brush (many points). "
+        "Paint big areas first (fill the sky, draw the horizon line and fill the ground or "
+        "sea below it), then shapes (sun, house, tree: shape outline, then fill inside), "
+        "then details; finally take a screenshot of the window and fix what is missing. "
+        "Web pages in Edge or Chrome: set_text on the address bar ('Adress- und Suchleiste' / "
+        "'Address and search bar') with press_enter=true to open a page or search; then "
+        "read_text(window) returns the page text; click links with click_element. "
         "Never type passwords or confirm payments, deletions or sending on the user's "
         "behalf unless they asked for exactly that."
     ),
@@ -157,10 +172,16 @@ def click_element(
 @mcp.tool(annotations=_change("Replace the text in a field"))
 @_quiet
 def set_text(
-    window: Window, element: Element, text: Annotated[str, Field(description="New text")]
+    window: Window,
+    element: Element,
+    text: Annotated[str, Field(description="New text")],
+    press_enter: Annotated[
+        bool, Field(description="Press Enter afterwards: open an address, start a search")
+    ] = False,
 ) -> str:
-    """Replace the text of an edit field or document."""
-    return uia.set_text(uia.window(window).handle, element, text)
+    """Replace the text of an edit field or document. For a browser's address bar or a
+    search box set press_enter=true to go to the page or search."""
+    return uia.set_text(uia.window(window).handle, element, text, press_enter)
 
 
 @mcp.tool(annotations=_change("Press keys or shortcuts"))
@@ -183,6 +204,51 @@ def send_keys(
     return uia.send_keys(uia.window(window).handle, keys, element)
 
 
+Area = Annotated[
+    str | None,
+    Field(
+        description="Element the positions refer to (id from get_ui_tree or selector, e.g. "
+        "the canvas); omit for the whole window"
+    ),
+]
+Fraction = Annotated[float, Field(description="0 = left/top edge .. 1 = right/bottom edge")]
+
+
+@mcp.tool(annotations=_change("Click at a position"))
+@_quiet
+def click_at(
+    window: Window,
+    x: Fraction,
+    y: Fraction,
+    element: Area = None,
+    action: Annotated[str, Field(description="click, double_click or right_click")] = "click",
+) -> str:
+    """Click at a position inside an element or the window, for places without their own
+    control: a spot on a canvas (e.g. with a fill tool), a map, a slider track."""
+    return uia.click_at(uia.window(window).handle, x, y, element, action)
+
+
+@mcp.tool(annotations=_change("Drag the mouse"))
+@_quiet
+def drag(
+    window: Window,
+    points: Annotated[
+        list[list[float]],
+        Field(
+            description="Path as [[x, y], ...], at least two points. "
+            + POINT_HELP
+            + " Two points draw a line, rectangle or oval (corner to corner) with a shape "
+            "tool; more points draw a freehand stroke with a pencil or brush."
+        ),
+    ],
+    element: Area = None,
+    button: Annotated[str, Field(description="left, right or middle")] = "left",
+) -> str:
+    """Press the mouse button, move through the points and release: draw on a canvas,
+    move a slider, drag and drop."""
+    return uia.drag(uia.window(window).handle, points, element, button)
+
+
 @mcp.tool(annotations=_read("Read text from a window"))
 @_quiet
 def read_text(
@@ -190,10 +256,14 @@ def read_text(
     element: Annotated[
         str | None, Field(description="Element id or selector; omit to read the whole window")
     ] = None,
-    max_chars: Annotated[int, Field(description="Maximum characters to return")] = 4000,
+    max_chars: Annotated[int, Field(description="Maximum characters to return")] = 6000,
+    offset: Annotated[
+        int, Field(description="Start at this character, to read on after a truncated result")
+    ] = 0,
 ) -> str:
-    """Read the text or value of a control, or all visible text of a window."""
-    return uia.read_text(uia.window(window).handle, element, max(1, max_chars))
+    """Read the text or value of a control, or a window's text. For a browser or document
+    window (no element) this is the page / document text in reading order."""
+    return uia.read_text(uia.window(window).handle, element, max(1, max_chars), max(0, offset))
 
 
 @mcp.tool(annotations=_read("Take a screenshot"), structured_output=False)
