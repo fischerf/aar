@@ -63,6 +63,10 @@ from agent.tools.schema import SideEffect, ToolOutput, ToolSpec
 
 logger = logging.getLogger(__name__)
 
+# Server instructions go into every system prompt; keep a misbehaving server
+# from flooding the context.
+_MAX_INSTRUCTIONS = 2000
+
 
 class MCPToolError(RuntimeError):
     """An MCP server reported that a tool call failed (``isError`` result)."""
@@ -132,6 +136,9 @@ class MCPClient:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
         self._session: Any = None
+        # ``instructions`` from the server's InitializeResult (MCP: hosts may put
+        # them in the system prompt); attached to the tools as a prompt guideline.
+        self.instructions = ""
         # Lifetime plumbing — created in ``__aenter__``, cleared in ``__aexit__``.
         self._stop_event: asyncio.Event | None = None
         self._ready: asyncio.Future[Any] | None = None
@@ -223,7 +230,8 @@ class MCPClient:
                     )
 
                 session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
+                init = await session.initialize()
+                self.instructions = str(getattr(init, "instructions", None) or "").strip()
                 logger.info(
                     "Connected to MCP server %r (%s)",
                     self.config.name,
@@ -283,6 +291,11 @@ class MCPClient:
         """Discover available tools from this server and return them as ToolSpecs."""
         self._assert_connected()
         response = await self._session.list_tools()
+        guidelines = (
+            [f"MCP server {self.config.name!r}: {self.instructions[:_MAX_INSTRUCTIONS]}"]
+            if self.instructions
+            else []
+        )
         specs = []
         for tool in response.tools:
             local_name = (
@@ -294,6 +307,7 @@ class MCPClient:
                 input_schema=tool.inputSchema or {"type": "object", "properties": {}},
                 side_effects=_side_effects_for(tool),
                 handler=_make_tool_handler(self, tool.name),
+                prompt_guidelines=list(guidelines),
             )
             specs.append(spec)
             logger.debug("Discovered MCP tool %r from server %r", local_name, self.config.name)
