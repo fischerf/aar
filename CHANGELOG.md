@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window is really in the foreground. New optional extra
   `aar-agent[windows]` (`uiautomation`, Windows only; also part of `all`).
   See [docs/mcp.md](docs/mcp.md#bundled-server-windows-desktop-automation).
+- **Images from MCP tools reach vision models** — `ImageContent` (and
+  `image/*` blob resources) in an MCP result are passed on as images instead
+  of only the `[image: image/png]` placeholder, e.g. the Windows
+  `screenshot`. Anthropic gets them inside the `tool_result`, Gemini as
+  `inlineData` parts after the function responses, OpenAI / generic / Ollama
+  as a user message right after the tool messages. Models without
+  `supports_vision` get the placeholder plus a "not shown" note. New
+  `tools.keep_recent_images` (default 3; older images shrink to their
+  placeholder in context and saved session) and `tools.max_image_bytes`
+  (default 3 750 000; larger images are dropped with a note). Over ACP the
+  image appears on the tool-call card. Own tools can return
+  `agent.tools.schema.ToolOutput(text, images)`. Gemini now also receives
+  `@file` image attachments, which it silently dropped before.
+  See [docs/mcp.md](docs/mcp.md#images).
 - **MCP tool annotations drive approvals** — a tool whose server declares
   `readOnlyHint: false` (or `destructiveHint: true` without
   `readOnlyHint: true`) now carries `SideEffect.EXECUTE` in addition to

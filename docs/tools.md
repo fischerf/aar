@@ -314,6 +314,8 @@ In `config.json`:
     "bash_default_timeout": 120,
     "command_timeout": 300,
     "max_output_chars": 50000,
+    "keep_recent_images": 3,
+    "max_image_bytes": 3750000,
     "powershell": {
       "executable": "auto",
       "fallback_for_bash": true
@@ -321,6 +323,10 @@ In `config.json`:
   }
 }
 ```
+
+`keep_recent_images` and `max_image_bytes` apply to images a tool returns (an
+MCP `screenshot`, or a `ToolOutput` from your own tool); see
+[MCP images](mcp.md#images).
 
 On Windows, list `"powershell"` (instead of, or next to, `"bash"`) to get the
 native shell; see [`powershell`](#powershell).
