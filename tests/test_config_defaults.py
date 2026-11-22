@@ -340,3 +340,8 @@ class TestBuildConfigProviderFlag:
         cfg = _build_config(provider="openai", config_file=str(self._write_config(tmp_path)))
         assert cfg.provider.name == "openai"
         assert cfg.provider.model == "qwen3.8:latest"
+
+
+def test_context_window_flag_sets_the_provider(fake_home):
+    assert _build_config().provider.context_window is None
+    assert _build_config(context_window=16384).provider.context_window == 16384

@@ -543,6 +543,10 @@ extra={"num_ctx": 65_536}   # large codebases or long chat sessions
 extra={"num_ctx": 131_072}  # maximum practical on ≥ 24 GB VRAM
 ```
 
+When a profile sets `context_window` (or `aar acp --context-window N` is used)
+but no `num_ctx`, Aar sends `num_ctx = context_window` to Ollama. An explicit
+`extra.num_ctx` always wins.
+
 > **Memory note:** every doubling of `num_ctx` roughly doubles KV-cache VRAM. Start at
 > 32 768 and increase only if you actually need the context.
 
