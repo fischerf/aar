@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,9 @@ def _default_system_prompt(
         "",
         f"Operating system: {os_name}",
         f"Working directory: {cwd}",
+        # Models only know their training cutoff; reports, letters and searches
+        # need today's date ("Stand: …", "Erstellt am …").
+        f"Current date: {date.today().isoformat()}",
     ]
 
     if os.name == "nt":
