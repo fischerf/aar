@@ -14,7 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from agent.core.agent import Agent
-from agent.core.config import AgentConfig, load_config
+from agent.core.config import AgentConfig, ProviderConfig, load_config
 from agent.core.events import (
     AssistantMessage,
     AudioBlock,
@@ -145,12 +145,15 @@ def _build_config(
 
     # Provider settings — only override when explicitly passed.  A key from the
     # config's ``providers`` selects that whole profile (model, base_url, extra);
-    # anything else is a provider type applied to the default profile.
+    # anything else is a provider type. The same type as the default profile
+    # keeps that profile's settings; another type starts from fresh defaults,
+    # since an Ollama profile's address and options (num_ctx, top_k, …) would
+    # break e.g. the Anthropic API.
     if provider is not None:
         if provider in cfg.providers:
             cfg.provider = cfg.providers[provider].model_copy(deep=True)
-        else:
-            cfg.provider.name = provider
+        elif provider != cfg.provider.name:
+            cfg.provider = ProviderConfig(name=provider)
     if model is not None:
         cfg.provider.model = model
     if base_url:

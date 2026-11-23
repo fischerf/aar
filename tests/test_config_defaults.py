@@ -336,10 +336,27 @@ class TestBuildConfigProviderFlag:
         # a copy — later CLI overrides must not leak into the providers table
         assert cfg.provider is not cfg.providers["small"]
 
-    def test_provider_type_still_overrides_default_profile(self, fake_home, tmp_path):
-        cfg = _build_config(provider="openai", config_file=str(self._write_config(tmp_path)))
-        assert cfg.provider.name == "openai"
-        assert cfg.provider.model == "qwen3.8:latest"
+    def test_same_provider_type_keeps_default_profile(self, fake_home, tmp_path):
+        cfg = _build_config(
+            provider="ollama", model="m2", config_file=str(self._write_config(tmp_path))
+        )
+        assert cfg.provider.name == "ollama"
+        assert cfg.provider.model == "m2"
+
+    def test_other_provider_type_starts_fresh(self, fake_home, tmp_path):
+        path = self._write_config(tmp_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["providers"]["big"].update(
+            base_url="http://localhost:11434", extra={"num_ctx": 32768, "top_k": 20}
+        )
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = _build_config(provider="anthropic", model="claude-x", config_file=str(path))
+        assert cfg.provider.name == "anthropic"
+        assert cfg.provider.model == "claude-x"
+        assert cfg.provider.base_url == ""
+        assert cfg.provider.extra == {}
+        # the profile itself is untouched
+        assert cfg.providers["big"].extra["num_ctx"] == 32768
 
 
 def test_context_window_flag_sets_the_provider(fake_home):
