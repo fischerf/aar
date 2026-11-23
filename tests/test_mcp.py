@@ -582,7 +582,7 @@ class TestMCPBridge:
                 await bridge.register_all(registry)
 
     @pytest.mark.asyncio
-    async def test_skip_failed_keeps_first_server_on_collision(self, monkeypatch):
+    async def test_skip_failed_prefixes_colliding_tools(self, monkeypatch):
         tools = [_make_fake_tool("echo", "Echo")]
         mods, _ = _make_mcp_sys_modules(tools=tools)
         for key, mod in mods.items():
@@ -598,9 +598,10 @@ class TestMCPBridge:
 
         async with MCPBridge(cfgs, skip_failed=True) as bridge:
             count = await bridge.register_all(registry)
-        assert count == 1
-        assert "echo" in registry
-        assert bridge.failures == [("b", "tool 'echo' already exists")]
+            assert await registry.get("b__echo").handler(message="hi") == "ok"
+        assert count == 2
+        assert "echo" in registry and "b__echo" in registry
+        assert bridge.failures == []
 
     @pytest.mark.asyncio
     async def test_skip_failed_skips_server_that_cannot_start(self, monkeypatch):

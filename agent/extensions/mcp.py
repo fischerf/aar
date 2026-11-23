@@ -352,10 +352,11 @@ class MCPBridge:
     """
 
     def __init__(self, configs: list[MCPServerConfig], *, skip_failed: bool = False) -> None:
-        """*skip_failed*: a server that cannot start, cannot list its tools or
-        brings a tool name that already exists is skipped (and recorded in
-        :attr:`failures`) instead of failing the whole bridge — so one broken
-        user-configured server does not take the working ones down with it."""
+        """*skip_failed*: a server that cannot start or cannot list its tools is
+        skipped (and recorded in :attr:`failures`) instead of failing the whole
+        bridge — so one broken user-configured server does not take the working
+        ones down with it. A tool whose name is already taken is registered as
+        ``<server>__<tool>`` instead."""
         self._configs = configs
         self._clients: list[MCPClient] = []
         self._exit_stack = AsyncExitStack()
@@ -401,8 +402,19 @@ class MCPBridge:
                 continue
             for spec in specs:
                 if spec.name in registry and self._skip_failed:
-                    self._skip(client.config.name, f"tool {spec.name!r} already exists")
-                    continue
+                    # Different servers often share tool names ("screenshot",
+                    # "click"): keep the tool under "<server>__<name>".
+                    prefixed = f"{client.config.name}__{spec.name}"
+                    if prefixed in registry:
+                        self._skip(client.config.name, f"tool {spec.name!r} already exists")
+                        continue
+                    logger.info(
+                        "MCP tool %r of server %r renamed to %r (name already taken)",
+                        spec.name,
+                        client.config.name,
+                        prefixed,
+                    )
+                    spec = spec.model_copy(update={"name": prefixed})
                 if spec.name in registry:
                     raise ValueError(
                         f"MCP tool name collision: {spec.name!r} already exists in the "
