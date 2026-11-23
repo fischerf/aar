@@ -357,6 +357,19 @@ AAR_TRUST_PROJECT_EXTENSIONS=1 aar run "…"  # CI
 { "trust_project_extensions": true }
 ```
 
+### Switching extensions off
+
+An installed extension can be disabled without uninstalling it — in any tier:
+
+```json
+// ~/.aar/config.json
+{ "disabled_extensions": ["git_checkpoint", "observability"] }
+```
+
+`AAR_DISABLED_EXTENSIONS=git_checkpoint,observability` does the same for one
+process (front-ends such as Aar Desktop use it). Names are matched
+case-insensitively and `-` equals `_`, so `git-checkpoint` works too.
+
 Loaded extensions and their source tier are logged at INFO
 (`Extension active: <name> (<tier>)`); `aar extensions list` shows the same
 information as a table.

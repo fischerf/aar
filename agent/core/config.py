@@ -595,6 +595,10 @@ class AgentConfig(BaseModel):
     # C3 — Execute ``.agent/extensions/*.py`` from the CWD without prompting.
     # Off by default: those files arrive with ``git clone`` and run as you.
     trust_project_extensions: bool = False
+    # Extensions that are installed but must not be loaded (entry-point, user or
+    # project tier). Names are compared case-insensitively with ``-`` == ``_``.
+    # ``$AAR_DISABLED_EXTENSIONS`` (comma-separated) adds to this list.
+    disabled_extensions: list[str] = Field(default_factory=list)
     skills_dirs: list[str] = Field(default_factory=list)  # extra skill discovery paths
     skills_enabled: bool = True  # set to False to disable skill loading
     max_steps: int = 50
