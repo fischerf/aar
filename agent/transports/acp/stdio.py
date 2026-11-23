@@ -41,7 +41,7 @@ from .common import (
     _build_mode_state,
     _build_tool_result_content,
     _extract_locations,
-    _extract_text,
+    _prompt_content,
     _load_default_config,
     _map_stop_reason,
     _OLLAMA_REASONING_EFFORTS,
@@ -248,7 +248,7 @@ class AarAcpAgent:
             agent_capabilities=AgentCapabilities(
                 load_session=True,
                 mcp_capabilities=McpCapabilities(http=True, sse=False),
-                prompt_capabilities=PromptCapabilities(embedded_context=True),
+                prompt_capabilities=PromptCapabilities(embedded_context=True, image=True),
                 session_capabilities=SessionCapabilities(**session_caps_kwargs),
             ),
             agent_info=Implementation(name="aar", title="Aar Agent", version="0.4.0"),
@@ -860,7 +860,11 @@ class AarAcpAgent:
         )
 
         validate_session_id(session_id)
-        text = _extract_text(prompt)
+        # Images in the prompt go to the model (vision); text alone stays a str.
+        cfg_for_images = self._session_configs.get(session_id, self._config)
+        text, user_content, image_problems = _prompt_content(
+            prompt, max_image_bytes=cfg_for_images.tools.max_image_bytes
+        )
 
         message_id: str | None = kwargs.get("message_id")
         _resp_extra: dict[str, Any] = {}
@@ -929,6 +933,12 @@ class AarAcpAgent:
                 update_tasks.append(task)
 
         _tc_args: dict[str, dict[str, Any]] = {}
+        if image_problems:
+            _push(
+                update_agent_message(
+                    text_block("Image not sent to the model: " + "; ".join(image_problems))
+                )
+            )
 
         def on_event(event: Event) -> None:
             nonlocal streamed_chunks, title_sent, _ctx_window_size
@@ -1120,7 +1130,7 @@ class AarAcpAgent:
         aar_agent = self._make_aar_agent(session_id=session_id, approval_callback=_approval_cb)
         aar_agent.on_event(on_event)
 
-        run_task = asyncio.create_task(aar_agent.run(text, session, cancel_event=cancel_event))
+        run_task = asyncio.create_task(aar_agent.run(user_content, session, cancel_event=cancel_event))
         self._run_tasks[session_id] = run_task
 
         try:
