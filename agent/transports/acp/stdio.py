@@ -1492,7 +1492,9 @@ class AarAcpAgent:
             if not configs:
                 return
 
-            bridge = MCPBridge(configs)
+            # One broken server (e.g. a user-added one) must not take the
+            # others down: skip it and tell the user which one failed.
+            bridge = MCPBridge(configs, skip_failed=True)
             await bridge.__aenter__()
             count = await bridge.register_all(registry)
             self._mcp_bridges[session_id] = bridge
@@ -1500,14 +1502,21 @@ class AarAcpAgent:
             logger.info(
                 "ACP: registered %d MCP tool(s) from %d server(s) for session %s",
                 count,
-                len(configs),
+                len(configs) - len({name for name, _ in bridge.failures}),
                 session_id,
             )
+            if bridge.failures:
+                self._notify_mcp_failure(
+                    session_id,
+                    "; ".join(
+                        f"MCP server '{name}' unavailable ({why})" for name, why in bridge.failures
+                    ),
+                )
         except Exception as exc:
             logger.error("ACP: MCP setup failed for session %s: %s", session_id, exc, exc_info=True)
-            self._notify_mcp_failure(session_id, exc)
+            self._notify_mcp_failure(session_id, f"MCP setup failed for this session: {exc}")
 
-    def _notify_mcp_failure(self, session_id: str, exc: BaseException) -> None:
+    def _notify_mcp_failure(self, session_id: str, msg: str) -> None:
         """Push a visible error to the client so the user sees MCP setup failed."""
         if self._conn is None:
             return
@@ -1515,7 +1524,6 @@ class AarAcpAgent:
             from acp import text_block, update_agent_message
         except ImportError:
             return
-        msg = f"MCP setup failed for this session: {exc}"
         self._spawn(
             self._conn.session_update(
                 session_id=session_id,

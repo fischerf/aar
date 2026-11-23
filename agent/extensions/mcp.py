@@ -351,14 +351,31 @@ class MCPBridge:
             count = await bridge.register_all(registry)
     """
 
-    def __init__(self, configs: list[MCPServerConfig]) -> None:
+    def __init__(self, configs: list[MCPServerConfig], *, skip_failed: bool = False) -> None:
+        """*skip_failed*: a server that cannot start, cannot list its tools or
+        brings a tool name that already exists is skipped (and recorded in
+        :attr:`failures`) instead of failing the whole bridge — so one broken
+        user-configured server does not take the working ones down with it."""
         self._configs = configs
         self._clients: list[MCPClient] = []
         self._exit_stack = AsyncExitStack()
+        self._skip_failed = skip_failed
+        #: ``(server name, reason)`` for everything *skip_failed* skipped.
+        self.failures: list[tuple[str, str]] = []
+
+    def _skip(self, server: str, reason: str) -> None:
+        logger.warning("MCP server %r skipped: %s", server, reason)
+        self.failures.append((server, reason))
 
     async def __aenter__(self) -> MCPBridge:
         for cfg in self._configs:
-            client = await self._exit_stack.enter_async_context(MCPClient(cfg))
+            try:
+                client = await self._exit_stack.enter_async_context(MCPClient(cfg))
+            except Exception as exc:
+                if not self._skip_failed:
+                    raise
+                self._skip(cfg.name, f"could not start: {exc or type(exc).__name__}")
+                continue
             self._clients.append(client)
         return self
 
@@ -370,13 +387,22 @@ class MCPBridge:
         """Discover tools from all servers and register them into *registry*.
 
         Returns the total number of tools registered. Raises ``ValueError`` on
-        name collisions — set ``prefix_tools=True`` on the conflicting server to
-        namespace its tools.
+        name collisions (unless *skip_failed*) — set ``prefix_tools=True`` on the
+        conflicting server to namespace its tools.
         """
         count = 0
         for client in self._clients:
-            specs = await client.list_tools()
+            try:
+                specs = await client.list_tools()
+            except Exception as exc:
+                if not self._skip_failed:
+                    raise
+                self._skip(client.config.name, f"could not list tools: {exc or type(exc).__name__}")
+                continue
             for spec in specs:
+                if spec.name in registry and self._skip_failed:
+                    self._skip(client.config.name, f"tool {spec.name!r} already exists")
+                    continue
                 if spec.name in registry:
                     raise ValueError(
                         f"MCP tool name collision: {spec.name!r} already exists in the "
