@@ -143,6 +143,56 @@ def _extract_text(prompt_blocks: list) -> str:
     return "\n".join(parts)
 
 
+def _extract_images(prompt_blocks: list) -> list[tuple[str, str]]:
+    """``(mime, base64 data)`` of the inline image blocks of an ACP prompt."""
+    images: list[tuple[str, str]] = []
+    for block in prompt_blocks:
+        if isinstance(block, dict):
+            btype = block.get("type", "")
+            data = block.get("data")
+            mime = block.get("mimeType") or block.get("mime_type")
+        else:
+            btype = getattr(block, "type", "") or ""
+            data = getattr(block, "data", None)
+            mime = getattr(block, "mime_type", None)
+        if btype == "image" and isinstance(data, str) and data and isinstance(mime, str):
+            images.append((mime, data))
+    return images
+
+
+def _prompt_content(prompt_blocks: list, *, max_image_bytes: int) -> tuple[str, Any, list[str]]:
+    """Text, agent input and problems for an ACP prompt.
+
+    Without images the agent input is the plain text (as before). With images
+    it is ``[ImageURLBlock…, TextBlock]`` – images first, which vision models
+    handle best – so they reach the model instead of an ``[image]`` placeholder.
+    Images of another type or above *max_image_bytes* are left out and
+    reported in the third element.
+    """
+    from agent.core.events import TextBlock
+    from agent.core.multimodal import check_tool_image, image_block_from_base64
+
+    text_parts = [b for b in prompt_blocks if not _is_image_block(b)]
+    text = _extract_text(text_parts)
+    blocks: list[Any] = []
+    problems: list[str] = []
+    for mime, data in _extract_images(prompt_blocks):
+        block = image_block_from_base64(data, mime)
+        why = check_tool_image(block, max_image_bytes)
+        if why:
+            problems.append(why)
+            continue
+        blocks.append(block)
+    if not blocks:
+        return text, text, problems
+    return text, [*blocks, TextBlock(text=text or "Describe the image.")], problems
+
+
+def _is_image_block(block: Any) -> bool:
+    btype = block.get("type", "") if isinstance(block, dict) else getattr(block, "type", "")
+    return btype == "image"
+
+
 def _map_stop_reason(state: AgentState) -> str:
     """Map Aar ``AgentState`` to an ACP ``StopReason`` string.
 
