@@ -582,6 +582,60 @@ class TestMCPBridge:
                 await bridge.register_all(registry)
 
     @pytest.mark.asyncio
+    async def test_skip_failed_keeps_first_server_on_collision(self, monkeypatch):
+        tools = [_make_fake_tool("echo", "Echo")]
+        mods, _ = _make_mcp_sys_modules(tools=tools)
+        for key, mod in mods.items():
+            monkeypatch.setitem(sys.modules, key, mod)
+
+        from agent.extensions.mcp import MCPBridge, MCPServerConfig
+
+        cfgs = [
+            MCPServerConfig(name="a", transport="stdio", command="x"),
+            MCPServerConfig(name="b", transport="stdio", command="y"),
+        ]
+        registry = ToolRegistry()
+
+        async with MCPBridge(cfgs, skip_failed=True) as bridge:
+            count = await bridge.register_all(registry)
+        assert count == 1
+        assert "echo" in registry
+        assert bridge.failures == [("b", "tool 'echo' already exists")]
+
+    @pytest.mark.asyncio
+    async def test_skip_failed_skips_server_that_cannot_start(self, monkeypatch):
+        tools = [_make_fake_tool("echo", "Echo")]
+        mods, _ = _make_mcp_sys_modules(tools=tools)
+        for key, mod in mods.items():
+            monkeypatch.setitem(sys.modules, key, mod)
+
+        from agent.extensions.mcp import MCPBridge, MCPClient, MCPServerConfig
+
+        real_enter = MCPClient.__aenter__
+
+        async def enter(self_):
+            if self_.config.name == "broken":
+                raise OSError("no such program")
+            return await real_enter(self_)
+
+        monkeypatch.setattr(MCPClient, "__aenter__", enter)
+        cfgs = [
+            MCPServerConfig(name="broken", transport="stdio", command="missing"),
+            MCPServerConfig(name="ok", transport="stdio", command="x"),
+        ]
+        registry = ToolRegistry()
+
+        async with MCPBridge(cfgs, skip_failed=True) as bridge:
+            count = await bridge.register_all(registry)
+            assert [c.config.name for c in bridge.clients] == ["ok"]
+        assert count == 1
+        assert bridge.failures == [("broken", "could not start: no such program")]
+
+        with pytest.raises(OSError):
+            async with MCPBridge(cfgs):
+                pass
+
+    @pytest.mark.asyncio
     async def test_prefix_tools_avoids_collision(self, monkeypatch):
         """prefix_tools=True should namespace tools and prevent collisions."""
         tools = [_make_fake_tool("echo", "Echo")]
