@@ -354,11 +354,14 @@ Replace `/path/to/aar` with your actual clone path.
 }
 ```
 
-> **Tip:** You can also load any of the bundled servers directly from the Aar CLI using the `--mcp`
-> flag instead of wiring them through Zed:
+> **Tip:** You can also load any of the bundled servers directly from the Aar CLI using the
+> `--mcp-config` flag instead of wiring them through Zed:
 > ```bash
-> aar chat --mcp tools/mcp_web.json
+> aar chat --mcp-config tools/mcp_web.json
 > ```
+>
+> For the Windows desktop server (`tools/windows_mcp`, Windows only) see
+> [MCP — Windows desktop automation](mcp.md#enable-it-over-acp-zed).
 
 ### Model selection
 
@@ -487,9 +490,16 @@ Benefits:
 - A `timeout` argument (default 60s) caps the wait; timeouts trigger `terminal/kill` + `terminal/release`
   so the editor never leaks PTYs
 
+Its prompt guidelines tell the model to prefer it over the local shell tool(s) actually registered —
+`bash`, `powershell`, or both — and say why for each (bash on Windows routes through WSL; powershell
+runs in Aar's own subprocess with a filtered environment). After repeated environment-shaped
+failures of either shell tool (`command not found`, `is not recognized as`, `ModuleNotFoundError`, …)
+the loop injects a one-shot hint toward `acp_terminal` (see
+[agent_loop.md](agent_loop.md#5-shell-bash--powershell--acp_terminal-pivot-hint)).
+
 If the client does **not** advertise terminal support, `acp_terminal` is not registered — the agent
-falls back to the local `bash` tool (which still honors Aar's sandbox and deny-list). This avoids
-issuing `terminal/*` calls to a peer that would reject them.
+falls back to the local `bash` / `powershell` tool (which still honors Aar's sandbox and deny-list).
+This avoids issuing `terminal/*` calls to a peer that would reject them.
 
 ---
 

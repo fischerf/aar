@@ -334,8 +334,9 @@ See [`docs/architecture.md`](docs/architecture.md) for a detailed walkthrough.
 - Provider SDK as needed: `anthropic`, `openai`, `google-genai`
 - ACP transport: `agent-client-protocol >= 0.10, < 1.0`
 - MCP bridge: `mcp >= 1.28.1, < 2.0`
+- Windows desktop MCP server (optional, `pip install -e ".[windows]"`): `uiautomation >= 2.0.20` — see [MCP](docs/mcp.md#bundled-server-windows-desktop-automation)
 
-### Windows — `bash` tool
+### Windows — `bash` and `powershell` tools
 
 The `bash` built-in tool requires **WSL** (Windows Subsystem for Linux). Install it once:
 
@@ -344,6 +345,12 @@ wsl --install
 ```
 
 > Not required if you do not enable the `bash` built-in tool.
+
+Without WSL, use the native `powershell` built-in tool (`pwsh` if installed, else the Windows
+PowerShell 5.1 that ships with Windows). On a Windows PC without bash, `aar init` enables it
+instead of `bash`, and an existing config that enables `bash` gets `powershell` in its place.
+It has the same approval, read-only and deny-list handling as `bash`; see
+[Configuration — Windows without WSL](docs/configuration.md#windows-without-wsl-powershell).
 
 For strong process isolation, use the built-in `wsl` sandbox mode — it routes all agent shell
 commands through a dedicated, disposable Alpine distro instead of your main WSL environment:
@@ -371,14 +378,14 @@ See [Safety — `wsl` sandbox mode](docs/safety.md#wsl--dedicated-wsl2-distro) f
 | [Providers](docs/providers.md) | Anthropic, OpenAI, Ollama, Gemini, Generic setup and options |
 | [Gemini provider](docs/providers_gemini.md) | Gemini SDK mode, HTTP mode, thinking/reasoning, `extra` key reference |
 | [Safety](docs/safety.md) | Deny lists, path restrictions, sandbox modes, approval callbacks |
-| [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, reference tables |
+| [MCP](docs/mcp.md) | MCP host integration — CLI config, programmatic API, transports, annotation-based approvals, bundled Windows desktop server, reference tables |
 | [Web API](docs/web-api.md) | HTTP endpoints, SSE streaming, ASGI embedding, per-request safety |
 | [Themes & Layout](docs/themes.md) | Built-in themes, custom themes, layout sections, full-screen fixed-bar mode, keyboard shortcut reference |
 | [Extensions](docs/extensions.md) | Extension API, creating extensions, event hooks, tools, commands, auto-discovery, publishing to PyPI |
 | [Development](docs/development.md) | Programmatic usage, image input, custom tools, events, sessions, cancellation, observability, testing |
 | [Architecture](docs/architecture.md) | Component walkthrough, core loop, event flow, provider internals |
 | [Agent Loop & Guardrails](docs/agent_loop.md) | Core loop flow diagram, guardrail mechanics, state transitions, config tuning |
-| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash, spawn_agent |
+| [Tools](docs/tools.md) | Built-in tool reference — grep, find_files, read_file, write_file, edit_file, list_directory, bash, powershell, spawn_agent |
 | [Prompting](docs/prompting.md) | System prompt design, provider-specific tips, tool guidance |
 | [Image generation & editing](docs/image-generation.md) | Driving the qwen-image sidecar from `aar run` / `chat` / `tui` — generate, edit, transparency (checking and cleaning alpha), GPU sharing with the chat model, troubleshooting |
 | [Sprite sheet workflow](docs/sprite-sheet-workflow.md) | Recipe — generate a transparent sprite sheet with the qwen-image sub-agent and build a game around it; two-GPU pinning, timeouts |

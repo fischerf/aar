@@ -6,7 +6,7 @@ Aar is configured via `AgentConfig` — either in code or through a JSON config 
 
 ```python
 from agent import AgentConfig, GuardrailsConfig, ProviderConfig, SafetyConfig, ToolConfig
-from agent.core.config import SandboxConfig, TUIConfig
+from agent.core.config import PowerShellToolConfig, SandboxConfig, TUIConfig
 
 config = AgentConfig(
     provider=ProviderConfig(
@@ -27,9 +27,16 @@ config = AgentConfig(
     },
     tools=ToolConfig(
         enabled_builtins=["read_file", "write_file", "edit_file", "list_directory", "bash", "grep", "find_files"],
-        bash_default_timeout=120,                  # default seconds when the model omits `timeout` on a bash call
+                                                   # default: "powershell" instead of "bash" on a Windows PC without bash
+        bash_default_timeout=120,                  # default seconds when the model omits `timeout` on a bash / powershell call
         command_timeout=300,                       # hard outer per-tool execution limit in seconds; 0 = no limit
         max_output_chars=50_000,
+        keep_recent_images=3,                      # tool-result images (e.g. MCP screenshots) kept with data; 0 = none sent (docs/mcp.md#images)
+        max_image_bytes=3_750_000,                 # bigger tool images are dropped with a note
+        powershell=PowerShellToolConfig(           # the native Windows shell tool (see docs/tools.md#powershell)
+            executable="auto",                     # "auto" = pwsh if on PATH, else powershell.exe (Windows only); or a name / path
+            fallback_for_bash=True,                # Windows without bash: register powershell in place of an enabled bash
+        ),
     ),
     safety=SafetyConfig(
         read_only=False,                           # block all writes
@@ -38,6 +45,7 @@ config = AgentConfig(
         denied_paths=["**/.env", "**/*.key"],      # glob patterns (see docs/safety.md for defaults)
         denied_commands=None,                      # None = policy defaults; a list replaces them (see docs/safety.md#command-deny-list)
         denied_command_patterns=None,              # None = policy defaults (curl|sh, fork bomb); [] disables the regex deny-list
+        denied_powershell_patterns=None,           # powershell tool only: None = defaults (Remove-Item -Recurse C:\, Format-Volume, …); [] disables
         allowed_paths=["<cwd>/**"],                # hard path boundary; <cwd> expands to Path.cwd() at startup
                                                    # empty list = allow all non-denied paths
                                                    # discovered skill dirs are auto-added as read-only
@@ -54,7 +62,7 @@ config = AgentConfig(
         max_premature_end_recoveries=2,            # re-prompt the model when it stops with empty content while recent tool results contain errors
         reserve_tokens=512,                        # budget proximity threshold
         reserve_cost_fraction=0.1,                 # cost proximity fraction
-        bash_failure_threshold=2,                  # consecutive bash failures before nudging the model toward `acp_terminal` (ACP only)
+        bash_failure_threshold=2,                  # consecutive bash/powershell failures before nudging the model toward `acp_terminal` (ACP only)
         read_only_loop_threshold=8,                # consecutive read-only tool calls before nudging the model to act
     ),
     compaction=CompactionConfig(                   # opt-in LLM-based context compaction
@@ -66,6 +74,7 @@ config = AgentConfig(
         truncate_max_chars=500,                    # cap on truncated output length
     ),
     trust_project_extensions=False,                # True executes .agent/extensions/*.py from the CWD without prompting
+    disabled_extensions=[],                        # installed extensions not to load (also $AAR_DISABLED_EXTENSIONS)
     skills_dirs=[],                                # extra directories searched for skill bundles
     skills_enabled=True,                           # set False to disable skill auto-discovery (see docs/development.md)
     max_steps=50,
@@ -244,6 +253,72 @@ from agent import Agent
 config = load_config(Path("~/.aar/config.json").expanduser())
 agent = Agent(config=config)
 ```
+
+## Windows without WSL (PowerShell)
+
+The `bash` tool needs WSL (or Git Bash) on Windows. Office PCs usually have
+neither, so Aar ships a native [`powershell`](tools.md#powershell) tool:
+
+- **New configs:** on a Windows PC where no `bash` is found, `aar init` (and a
+  config without a `tools` section) enables `powershell` instead of `bash`.
+  Everywhere else the default stays `bash`.
+- **Existing configs:** nothing changes where `bash` works (Linux, macOS,
+  Windows with WSL). If a config enables `bash` on a Windows PC without bash,
+  `powershell` is registered in its place (`tools.powershell.fallback_for_bash`,
+  default `true`; set `false` to keep the old, non-working `bash`).
+- **Both shells:** on a Windows machine with WSL, list both `"bash"` and
+  `"powershell"`; the system prompt then tells the model which one is which.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `tools.powershell.executable` | `"auto"` | `"auto"`: `pwsh` (PowerShell 7) if on `PATH`, else Windows PowerShell 5.1 (`powershell.exe`); resolves to nothing off Windows. Otherwise a program name on `PATH` (`"pwsh"`, `"powershell"`) or a full path. |
+| `tools.powershell.fallback_for_bash` | `true` | On Windows without bash (and not in `wsl` mode), register `powershell` in place of an enabled `bash`. |
+| `safety.denied_powershell_patterns` | `null` | Extra regex deny-list for the `powershell` tool only. `null` = built-in defaults (see [safety.md](safety.md#command-deny-list)); `[]` disables them; a list replaces them. |
+
+The tool runs under the `local` and `windows` sandbox modes (never `wsl` /
+`linux`, whose commands run inside the sandbox) and shares `bash`'s
+safety: approval in review mode, denied in `read_only`, deny-lists, forced
+approval under `allowed_paths` in `local` mode, `bash_default_timeout` /
+`command_timeout`, `max_output_chars`.
+
+Example `~/.aar/config.json` for a Windows end user without WSL — local Ollama
+model, native PowerShell, every write and command reviewed, Job Object + Low
+Integrity sandbox:
+
+```json
+{
+  "provider": "gemma",
+  "providers": {
+    "gemma": {
+      "name": "ollama",
+      "model": "gemma4:e4b",
+      "base_url": "http://localhost:11434",
+      "context_window": 32768,
+      "extra": { "num_ctx": 32768, "supports_tools": true }
+    }
+  },
+  "tools": {
+    "enabled_builtins": [
+      "read_file", "write_file", "edit_file", "list_directory",
+      "powershell", "grep", "find_files"
+    ],
+    "bash_default_timeout": 120,
+    "command_timeout": 300,
+    "powershell": { "executable": "auto" }
+  },
+  "safety": {
+    "read_only": false,
+    "require_approval_for_writes": true,
+    "require_approval_for_execute": true,
+    "allowed_paths": ["<cwd>/**"],
+    "sandbox": { "mode": "windows" }
+  }
+}
+```
+
+`"mode": "local"` works as well (no OS isolation; with `allowed_paths` set,
+every command is then forced through approval). Set `"executable": "pwsh"` to
+require PowerShell 7, or `"powershell"` to pin Windows PowerShell 5.1.
 
 ## Approval behaviour by mode
 
@@ -432,7 +507,7 @@ config = AgentConfig(
 | `max_premature_end_recoveries` | `2` | How many times the loop re-prompts when the model emits an empty `end_turn` while recent tool outputs contain errors. Set to `0` to disable. |
 | `reserve_tokens` | `512` | Token budget proximity threshold — the loop reports "near budget" below this margin. |
 | `reserve_cost_fraction` | `0.1` | Cost proximity — fraction of `cost_limit` that triggers "near budget". |
-| `bash_failure_threshold` | `2` | Consecutive `bash` failures (e.g. `command not found`, `ImportError`) before injecting a one-shot hint suggesting `acp_terminal`. Only fires when `acp_terminal` is registered (ACP transport). |
+| `bash_failure_threshold` | `2` | Consecutive `bash` or `powershell` failures (e.g. `command not found`, `is not recognized as`, `ImportError`) before injecting a one-shot hint suggesting `acp_terminal`. Only fires when `acp_terminal` is registered (ACP transport). |
 | `read_only_loop_threshold` | `8` | Consecutive read-only tool calls (e.g. `read_file`, `grep`, `list_directory`) before nudging the model to plan and act. The nudge fires at most once per session. |
 
 See [`docs/agent_loop.md`](agent_loop.md) for the behavioural details of each guardrail.

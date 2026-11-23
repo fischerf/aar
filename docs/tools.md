@@ -78,6 +78,87 @@ sandbox when one is configured.
 
 **Side effects:** EXECUTE
 
+On Windows `bash -c` needs WSL (or Git Bash). On a Windows PC that has
+neither, `powershell` is registered in its place (see below), so a config
+written for a WSL machine still gets a working shell.
+
+In `windows` sandbox mode `bash` runs at Low integrity through the same helper
+as `powershell`; if the helper cannot lower its token the command is not run
+(exit code 1, `aar sandbox: could not lower the integrity level`) — see
+[safety.md](safety.md#windows--windows-job-objects--low-integrity-recommended-for-windows).
+
+### `powershell`
+
+Source: `agent/tools/builtin/powershell.py`
+
+Run a PowerShell command or script natively on Windows — no WSL needed. A
+separate tool rather than a mode of `bash`: a model handed a tool named `bash`
+writes bash, so the description tells it to use PowerShell syntax
+(`Get-ChildItem`, `Select-String`, `$env:NAME`; on Windows PowerShell 5.1 also
+"no `&&`").
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `command` | string | yes | — | PowerShell command or script |
+| `timeout` | integer | no | 120 | Timeout in seconds (`tools.bash_default_timeout`, clamped to `tools.command_timeout`) |
+
+**Side effects:** EXECUTE — the same approval, read-only, deny-list and
+`allowed_paths` handling as `bash`; ACP tool kind `execute`.
+
+- **Executable:** `tools.powershell.executable` — `"auto"` (default) picks
+  `pwsh` (PowerShell 7) if it is on `PATH`, else Windows PowerShell 5.1
+  (`powershell.exe`). `"auto"` resolves to nothing off Windows, so the tool
+  only appears on Linux/macOS when an executable is set explicitly.
+- **Invocation:** `<exe> -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+  -OutputFormat Text -Command <bootstrap>`, with the script on stdin. The
+  execution policy override is process-scoped. The bootstrap reads stdin as
+  UTF-8 and sets `[Console]::OutputEncoding` / `$OutputEncoding` to UTF-8, so
+  umlauts survive Windows PowerShell's OEM code page in both directions. No
+  `-EncodedCommand`, so there is no 32 KB command-line limit.
+- **Process:** started directly (no `cmd.exe`), stdin never inherited,
+  `CREATE_NO_WINDOW` so no console window flashes from the desktop widget. It
+  starts in the workspace (cwd) and gets the same restricted environment as
+  `bash`, plus a few non-secret Windows folder names (`APPDATA`,
+  `LOCALAPPDATA`, `ProgramFiles`, `COMPUTERNAME`, …).
+- **Result:** stdout, then `STDERR:` and `Exit code: N` like `bash`. The exit
+  code follows the last statement (`0` if it succeeded, else the last native
+  `$LASTEXITCODE`, else `1`; `exit N` wins). Output is formatted at 4096
+  columns and right-trimmed, CRLF becomes LF, and `max_output_chars` truncates
+  it like any tool result.
+- **Timeout:** the whole process tree is killed (`taskkill /T`, and the Job
+  Object in `windows` mode).
+- **Sandbox modes:** registered under `local` and `windows` (Job Object + Low
+  Integrity, the PowerShell process included). Never under `wsl` or `linux` —
+  a host process would escape the sandbox; a config that enables only
+  `powershell` gets `bash` (the sandbox's own shell) there instead.
+
+Which shell tools are registered:
+
+| Host / mode | `enabled_builtins` | Registered |
+|---|---|---|
+| Linux, macOS | `bash` | `bash` (unchanged) |
+| Windows with WSL or Git Bash, `local` / `windows` | `bash` | `bash` (unchanged) |
+| Windows without bash, `local` / `windows` | `bash` | `powershell` (`tools.powershell.fallback_for_bash`) |
+| Windows, `local` / `windows` | `bash`, `powershell` | both (bash only if it exists) |
+| any, `wsl` / `linux` | `bash` and/or `powershell` | `bash` |
+
+A fresh config (`aar init`, or no `tools` section) enables `bash` — except on
+a Windows PC without bash, where the default list has `powershell` instead.
+
+### `acp_terminal`
+
+Source: `agent/tools/builtin/acp_terminal.py` — registered only by the ACP
+transport, when the editor advertises terminal support. Runs the command in
+the editor's terminal (the user's own environment) instead of a local
+subprocess; parameters `command`, `args`, `cwd`, `env`, `timeout` (default
+60 s). Its prompt guidelines name the shell tools actually registered — "prefer
+acp_terminal over bash", "… over powershell" or "… over bash and powershell" —
+with the reason for each, and drop the comparison when neither is registered.
+Repeated environment-shaped failures of `bash` or `powershell` trigger a
+one-shot hint toward it (`guardrails.bash_failure_threshold`, see
+[agent_loop.md](agent_loop.md#5-shell-bash--powershell--acp_terminal-pivot-hint)).
+See [acp.md](acp.md#acp-terminal-tool).
+
 ---
 
 ## Search tools
@@ -170,8 +251,8 @@ For efficient codebase navigation, prefer specialised tools over `bash`:
 | Find a function definition | `grep` | Paginated, READ-only, cross-platform |
 | Locate a config file | `find_files` | Structured results, no shell needed |
 | Read a specific function | `read_file` with line range | Avoids loading entire file into context |
-| Install a package | `bash` | Needs shell execution |
-| Run tests | `bash` | Needs shell execution |
+| Install a package | `bash` / `powershell` | Needs shell execution |
+| Run tests | `bash` / `powershell` | Needs shell execution |
 | View directory structure | `list_directory` | Cleaner than `ls` output |
 | Survey a large unfamiliar area of the codebase | `spawn_agent` | Keeps dozens of intermediate reads out of the main context; you get back only the conclusion |
 
@@ -251,10 +332,23 @@ In `config.json`:
     ],
     "bash_default_timeout": 120,
     "command_timeout": 300,
-    "max_output_chars": 50000
+    "max_output_chars": 50000,
+    "keep_recent_images": 3,
+    "max_image_bytes": 3750000,
+    "powershell": {
+      "executable": "auto",
+      "fallback_for_bash": true
+    }
   }
 }
 ```
+
+`keep_recent_images` and `max_image_bytes` apply to images a tool returns (an
+MCP `screenshot`, or a `ToolOutput` from your own tool); see
+[MCP images](mcp.md#images).
+
+On Windows, list `"powershell"` (instead of, or next to, `"bash"`) to get the
+native shell; see [`powershell`](#powershell).
 
 To disable a tool, remove it from `enabled_builtins`. For example, to create a
 read-only agent, keep only `["read_file", "list_directory", "grep", "find_files"]`.

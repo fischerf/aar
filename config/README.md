@@ -89,6 +89,14 @@ supplies the rootfs URL, checksum, packages, and prompt hint:
 Each profile carries a `rootfs_sha256`. Keep it — without a checksum the rootfs
 download is unverified, and `aar sandbox setup` will warn.
 
+### Windows without WSL
+
+`samples/config.json` enables `bash`, which needs WSL on Windows. On a PC
+without it, replace `"bash"` with `"powershell"` in `tools.enabled_builtins`
+(an enabled `bash` is swapped for `powershell` automatically anyway, see
+`tools.powershell.fallback_for_bash`). `aar init` does this for you. Full
+example: [docs/configuration.md](../docs/configuration.md#windows-without-wsl-powershell).
+
 ## Project Rules
 
 Place custom system prompts in `.agent/rules.md` to extend the agent's behavior.

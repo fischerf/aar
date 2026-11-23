@@ -14,7 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from agent.core.agent import Agent
-from agent.core.config import AgentConfig, load_config
+from agent.core.config import AgentConfig, ProviderConfig, load_config
 from agent.core.events import (
     AssistantMessage,
     AudioBlock,
@@ -85,29 +85,25 @@ def _harvest_tool_prompt_metadata(
     """
     from agent.tools.builtin.filesystem import register_filesystem_tools
     from agent.tools.builtin.search import register_search_tools
-    from agent.tools.builtin.shell import register_shell_tools
+    from agent.tools.builtin.shell import register_configured_shell_tools
     from agent.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
     enabled = set(config.tools.enabled_builtins)
     fs_tools = {"read_file", "write_file", "edit_file", "list_directory"}
-    shell_tools = {"bash"}
     search_tools = {"grep", "find_files"}
 
     if enabled & fs_tools:
         register_filesystem_tools(reg)
-    if enabled & shell_tools:
-        register_shell_tools(
-            reg,
-            default_timeout=config.tools.bash_default_timeout,
-            hard_cap=config.tools.command_timeout,
-        )
+    shell_registered = register_configured_shell_tools(
+        reg, config.tools, config.safety.sandbox.mode
+    )
     if enabled & search_tools:
         register_search_tools(reg)
 
     # Prune tools not explicitly enabled
     for name in list(reg.names()):
-        if name not in enabled:
+        if name not in enabled and name not in shell_registered:
             reg.unregister(name)
 
     return reg.get_prompt_snippets(), reg.get_prompt_guidelines()
@@ -127,6 +123,7 @@ def _build_config(
     allowed_paths: str = "",
     log_level: Optional[str] = None,
     log_file: Optional[str] = None,
+    context_window: Optional[int] = None,
 ) -> AgentConfig:
     """Build an AgentConfig with layered precedence.
 
@@ -148,16 +145,21 @@ def _build_config(
 
     # Provider settings — only override when explicitly passed.  A key from the
     # config's ``providers`` selects that whole profile (model, base_url, extra);
-    # anything else is a provider type applied to the default profile.
+    # anything else is a provider type. The same type as the default profile
+    # keeps that profile's settings; another type starts from fresh defaults,
+    # since an Ollama profile's address and options (num_ctx, top_k, …) would
+    # break e.g. the Anthropic API.
     if provider is not None:
         if provider in cfg.providers:
             cfg.provider = cfg.providers[provider].model_copy(deep=True)
-        else:
-            cfg.provider.name = provider
+        elif provider != cfg.provider.name:
+            cfg.provider = ProviderConfig(name=provider)
     if model is not None:
         cfg.provider.model = model
     if base_url:
         cfg.provider.base_url = base_url
+    if context_window:
+        cfg.provider.context_window = context_window
     if max_steps is not None:
         cfg.max_steps = max_steps
 
@@ -830,6 +832,9 @@ def prompt(
     # Build a temporary tool registry to harvest prompt snippets/guidelines
     # (mirrors what Agent.__init__ + _rebuild_system_prompt does).
     tool_snippets, tool_guidelines = _harvest_tool_prompt_metadata(config)
+    from agent.tools.builtin.shell import SHELL_TOOL_NAMES
+
+    shell_tools = sorted(SHELL_TOOL_NAMES & set(tool_snippets))
 
     # Harvest skills text (mirrors Agent._rebuild_system_prompt).
     skills_text: str | None = None
@@ -853,6 +858,7 @@ def prompt(
             tool_snippets=tool_snippets or None,
             tool_guidelines=tool_guidelines or None,
             skills_text=skills_text,
+            shell_tools=shell_tools,
         )
         console.print("\n[bold]System prompt layers[/] (assembled in order):\n")
         for i, layer in enumerate(layer_list, 1):
@@ -880,6 +886,7 @@ def prompt(
         tool_snippets=tool_snippets or None,
         tool_guidelines=tool_guidelines or None,
         skills_text=skills_text,
+        shell_tools=shell_tools,
     )
 
     if raw:
@@ -1293,6 +1300,11 @@ def acp(
         "--approval",
         help="HTTP mode only — tool approval: deny (default) | auto.",
     ),
+    context_window: Optional[int] = typer.Option(
+        None,
+        "--context-window",
+        help="Model context size in tokens (Ollama: sent as num_ctx unless the profile sets it)",
+    ),
 ) -> None:
     """Start an ACP agent (Agent Communication Protocol).
 
@@ -1316,6 +1328,7 @@ def acp(
         read_only=read_only,
         log_level=log_level,
         log_file=log_file,
+        context_window=context_window,
     )
     _apply_logging(config)
 

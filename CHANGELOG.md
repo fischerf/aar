@@ -10,6 +10,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Windows desktop MCP server** (`tools/windows_mcp/`, config
+  `tools/mcp_windows.json`) — lets the agent operate ordinary Windows
+  programs through the UI Automation accessibility tree: `list_windows`,
+  `focus_window`, `launch_app`, `close_window`, `get_ui_tree`,
+  `click_element`, `set_text`, `send_keys`, `read_text`, `screenshot`.
+  Controls are addressed by short ids from the latest `get_ui_tree`
+  (`e12`) or by selectors (`name=Save`, `type=Button;name=OK`).
+  `launch_app` finds programs on `PATH`, in the registry's App Paths and in
+  the Start menu (Store apps). Keys and clicks are only sent once the target
+  window is really in the foreground. New optional extra
+  `aar-agent[windows]` (`uiautomation`, Windows only; also part of `all`).
+  See [docs/mcp.md](docs/mcp.md#bundled-server-windows-desktop-automation).
+- **Images from MCP tools reach vision models** — `ImageContent` (and
+  `image/*` blob resources) in an MCP result are passed on as images instead
+  of only the `[image: image/png]` placeholder, e.g. the Windows
+  `screenshot`. Anthropic gets them inside the `tool_result`, Gemini as
+  `inlineData` parts after the function responses, OpenAI / generic / Ollama
+  as a user message right after the tool messages. Models without
+  `supports_vision` get the placeholder plus a "not shown" note. New
+  `tools.keep_recent_images` (default 3; older images shrink to their
+  placeholder in context and saved session) and `tools.max_image_bytes`
+  (default 3 750 000; larger images are dropped with a note). Over ACP the
+  image appears on the tool-call card. Own tools can return
+  `agent.tools.schema.ToolOutput(text, images)`. Gemini now also receives
+  `@file` image attachments, which it silently dropped before.
+  See [docs/mcp.md](docs/mcp.md#images).
+- **MCP tool annotations drive approvals** — a tool whose server declares
+  `readOnlyHint: false` (or `destructiveHint: true` without
+  `readOnlyHint: true`) now carries `SideEffect.EXECUTE` in addition to
+  `EXTERNAL`, so review mode asks before running it and read-only mode blocks
+  it. Read-only and unannotated MCP tools behave as before.
+- **`powershell` built-in tool** — runs commands natively on Windows, no WSL
+  needed (`agent/tools/builtin/powershell.py`). `pwsh` if installed, else
+  Windows PowerShell 5.1; `-NoProfile -NonInteractive -ExecutionPolicy Bypass`
+  (process scope), script on UTF-8 stdin with UTF-8 console output so umlauts
+  survive, `CREATE_NO_WINDOW`, process-tree kill on timeout, same output
+  format and truncation as `bash`. Its description tells the model to write
+  PowerShell, not bash. Same safety as `bash`: approval in review mode (ACP
+  tool kind `execute`), denied in `read_only`, `denied_commands` /
+  `denied_command_patterns`, forced approval under `allowed_paths` in `local`
+  mode, plus a new PowerShell-only regex deny-list
+  `safety.denied_powershell_patterns` (recursive deletes of drive roots /
+  system folders / user profiles, registry hive deletes, machine-wide
+  `Set-ExecutionPolicy`, `Format-Volume`, `Clear-Disk`, `Stop-Computer`,
+  `irm … | iex`, `-EncodedCommand`, …). Registered under the `local` and
+  `windows` sandbox modes only (new `Sandbox.execute_program`); never under
+  `wsl` / `linux`. Configure via `tools.powershell.executable` (`"auto"`) and
+  `tools.powershell.fallback_for_bash`. A fresh config on a Windows PC without
+  bash (`aar init`) enables `powershell` instead of `bash`; an existing config
+  that enables `bash` there gets `powershell` in its place. Everywhere bash
+  works (Linux, macOS, Windows with WSL) nothing changes. In `windows` mode
+  the PowerShell process really runs at Low integrity (typed ctypes calls in
+  the helper's new `--exec` path; it fails closed if lowering fails).
 - **Skills are auto-readable** — discovered skills (under `~/.aar/skills/`,
   `.agent/skills/`, or `skills_dirs`) now work even when `allowed_paths`
   restricts file tools to the workspace. The agent adds each skill's directory
@@ -74,8 +127,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UIPanel.describe(node, ctx)` (read-only detail text; `run_ui_describe`).
 - Hiding the thinking panel (`ctrl+k`) no longer collapses `#right-col` while
   an extension panel is still visible in it.
+- **`acp_terminal` and the pivot guardrail know about `powershell`.** The
+  tool's prompt guidelines name the shell tools actually registered ("prefer
+  acp_terminal over bash", "… over powershell", "… over bash and powershell")
+  with the right reason for each, instead of always talking about bash and
+  WSL. The guardrail that nudges the model toward `acp_terminal` counts
+  `powershell` failures like `bash` failures (shared counter, hint worded for
+  the tool that failed), recognises `is not recognized as`,
+  `CommandNotFoundException` and `Cannot find path`, and now also counts a
+  shell result that failed with a non-zero `Exit code: N` — the shell tools
+  never set `is_error` for a failed command, so the hint could only fire on
+  timeouts/exceptions before.
 
 ### Fixed
+- **`bash` in `windows` sandbox mode really runs at Low integrity.** The
+  helper's shell path used untyped ctypes calls whose failure was ignored, so
+  `bash` kept the agent's own integrity level and could write to
+  `%USERPROFILE%` (verified in Windows Sandbox: S-1-16-12288, write
+  succeeded). It now uses the same typed lowering as `powershell` and fails
+  closed: if lowering fails the command is not run (exit code 1,
+  `aar sandbox: could not lower the integrity level`) instead of running
+  unprotected.
+- **`tests/test_safety.py::TestLinuxSandbox` no longer breaks the test run.**
+  One test called the Landlock `preexec_fn` in the pytest process itself,
+  restricting pytest to read-only, so every later test failed to create its
+  temp dir (a full run on Linux showed hundreds of errors). The closure now
+  runs where the sandbox runs it, in a child via `preexec_fn`. The fallback
+  test hidden behind it asserted the wrong log wording and is fixed too.
+- **Failed MCP tool calls are reported as failures.** A result the server
+  marked `isError` used to come back as ordinary output; the bridge now
+  raises `MCPToolError` with the server's message, so the call shows up as a
+  tool error (`is_error=True`) in the TUIs, over ACP and to the model.
 - ACP HTTP `GET /runs/{run_id}/events` returned 404 for every run — the
   generic `GET /runs/{run_id}` branch matched first and rejected the path.
 - **Provider refusals are no longer mistaken for the model giving up.** A
@@ -97,8 +179,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pricing entries added for Claude Opus 5, Sonnet 5, Fable 5 and 5.1. Opus 4.7
   and 4.8 had no entry and fell through to the `claude-opus-4` prefix, which
   over-reported their cost threefold.
-
-### Fixed
 
 ---
 

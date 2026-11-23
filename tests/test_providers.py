@@ -638,6 +638,32 @@ class TestGeminiHttpCompatibility:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_window", "extra", "num_ctx"),
+    [
+        (None, {}, None),  # nothing configured: Ollama's own default
+        (16384, {}, 16384),  # --context-window / profile context_window
+        (16384, {"num_ctx": 8192}, 8192),  # an explicit num_ctx wins
+    ],
+)
+async def test_ollama_context_window_becomes_num_ctx(context_window, extra, num_ctx):
+    from agent.providers.ollama import OllamaProvider
+
+    provider = OllamaProvider(
+        ProviderConfig(name="ollama", model="m", extra=extra, context_window=context_window)
+    )
+    post = AsyncMock(
+        return_value=MagicMock(
+            json=lambda: {"message": {"role": "assistant", "content": "ok"}, "done": True},
+            raise_for_status=lambda: None,
+        )
+    )
+    provider._client.post = post
+    await provider.complete([{"role": "user", "content": "Hi"}])
+    assert post.call_args.kwargs["json"]["options"].get("num_ctx") == num_ctx
+
+
 class TestOllamaMessageConversion:
     def test_system_prompt(self):
         from agent.providers.ollama import _build_messages

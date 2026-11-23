@@ -48,6 +48,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from contextlib import AsyncExitStack
@@ -55,10 +56,20 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agent.core.events import ImageURLBlock
+from agent.core.multimodal import base64_size, format_size, image_block_from_base64
 from agent.tools.registry import ToolRegistry
-from agent.tools.schema import SideEffect, ToolSpec
+from agent.tools.schema import SideEffect, ToolOutput, ToolSpec
 
 logger = logging.getLogger(__name__)
+
+# Server instructions go into every system prompt; keep a misbehaving server
+# from flooding the context.
+_MAX_INSTRUCTIONS = 2000
+
+
+class MCPToolError(RuntimeError):
+    """An MCP server reported that a tool call failed (``isError`` result)."""
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +136,9 @@ class MCPClient:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
         self._session: Any = None
+        # ``instructions`` from the server's InitializeResult (MCP: hosts may put
+        # them in the system prompt); attached to the tools as a prompt guideline.
+        self.instructions = ""
         # Lifetime plumbing — created in ``__aenter__``, cleared in ``__aexit__``.
         self._stop_event: asyncio.Event | None = None
         self._ready: asyncio.Future[Any] | None = None
@@ -216,7 +230,8 @@ class MCPClient:
                     )
 
                 session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
+                init = await session.initialize()
+                self.instructions = str(getattr(init, "instructions", None) or "").strip()
                 logger.info(
                     "Connected to MCP server %r (%s)",
                     self.config.name,
@@ -276,6 +291,11 @@ class MCPClient:
         """Discover available tools from this server and return them as ToolSpecs."""
         self._assert_connected()
         response = await self._session.list_tools()
+        guidelines = (
+            [f"MCP server {self.config.name!r}: {self.instructions[:_MAX_INSTRUCTIONS]}"]
+            if self.instructions
+            else []
+        )
         specs = []
         for tool in response.tools:
             local_name = (
@@ -285,18 +305,32 @@ class MCPClient:
                 name=local_name,
                 description=tool.description or "",
                 input_schema=tool.inputSchema or {"type": "object", "properties": {}},
-                side_effects=[SideEffect.EXTERNAL],
+                side_effects=_side_effects_for(tool),
                 handler=_make_tool_handler(self, tool.name),
+                prompt_guidelines=list(guidelines),
             )
             specs.append(spec)
             logger.debug("Discovered MCP tool %r from server %r", local_name, self.config.name)
         return specs
 
-    async def call_tool(self, mcp_tool_name: str, arguments: dict[str, Any]) -> str:
-        """Call a named tool on the MCP server and return its output as a string."""
+    async def call_tool(self, mcp_tool_name: str, arguments: dict[str, Any]) -> str | ToolOutput:
+        """Call a named tool on the MCP server and return its output.
+
+        Returns a string, or a :class:`ToolOutput` when the result contains
+        images (``ImageContent`` or an image blob resource): its text keeps an
+        ``[image: ...]`` placeholder per image and its images carry the data,
+        which the agent passes to vision models.
+
+        Raises :class:`MCPToolError` (carrying the server's message) when the
+        server marks the result ``isError``, so the executor reports a failed
+        tool call instead of an ordinary result.
+        """
         self._assert_connected()
         result = await self._session.call_tool(mcp_tool_name, arguments)
-        return _content_to_str(result.content)
+        output = _content_to_output(result.content)
+        if getattr(result, "isError", False) is True:
+            raise MCPToolError(str(output) or f"MCP tool {mcp_tool_name!r} failed")
+        return output
 
     def _assert_connected(self) -> None:
         if self._session is None:
@@ -317,14 +351,32 @@ class MCPBridge:
             count = await bridge.register_all(registry)
     """
 
-    def __init__(self, configs: list[MCPServerConfig]) -> None:
+    def __init__(self, configs: list[MCPServerConfig], *, skip_failed: bool = False) -> None:
+        """*skip_failed*: a server that cannot start or cannot list its tools is
+        skipped (and recorded in :attr:`failures`) instead of failing the whole
+        bridge — so one broken user-configured server does not take the working
+        ones down with it. A tool whose name is already taken is registered as
+        ``<server>__<tool>`` instead."""
         self._configs = configs
         self._clients: list[MCPClient] = []
         self._exit_stack = AsyncExitStack()
+        self._skip_failed = skip_failed
+        #: ``(server name, reason)`` for everything *skip_failed* skipped.
+        self.failures: list[tuple[str, str]] = []
+
+    def _skip(self, server: str, reason: str) -> None:
+        logger.warning("MCP server %r skipped: %s", server, reason)
+        self.failures.append((server, reason))
 
     async def __aenter__(self) -> MCPBridge:
         for cfg in self._configs:
-            client = await self._exit_stack.enter_async_context(MCPClient(cfg))
+            try:
+                client = await self._exit_stack.enter_async_context(MCPClient(cfg))
+            except Exception as exc:
+                if not self._skip_failed:
+                    raise
+                self._skip(cfg.name, f"could not start: {exc or type(exc).__name__}")
+                continue
             self._clients.append(client)
         return self
 
@@ -336,13 +388,33 @@ class MCPBridge:
         """Discover tools from all servers and register them into *registry*.
 
         Returns the total number of tools registered. Raises ``ValueError`` on
-        name collisions — set ``prefix_tools=True`` on the conflicting server to
-        namespace its tools.
+        name collisions (unless *skip_failed*) — set ``prefix_tools=True`` on the
+        conflicting server to namespace its tools.
         """
         count = 0
         for client in self._clients:
-            specs = await client.list_tools()
+            try:
+                specs = await client.list_tools()
+            except Exception as exc:
+                if not self._skip_failed:
+                    raise
+                self._skip(client.config.name, f"could not list tools: {exc or type(exc).__name__}")
+                continue
             for spec in specs:
+                if spec.name in registry and self._skip_failed:
+                    # Different servers often share tool names ("screenshot",
+                    # "click"): keep the tool under "<server>__<name>".
+                    prefixed = f"{client.config.name}__{spec.name}"
+                    if prefixed in registry:
+                        self._skip(client.config.name, f"tool {spec.name!r} already exists")
+                        continue
+                    logger.info(
+                        "MCP tool %r of server %r renamed to %r (name already taken)",
+                        spec.name,
+                        client.config.name,
+                        prefixed,
+                    )
+                    spec = spec.model_copy(update={"name": prefixed})
                 if spec.name in registry:
                     raise ValueError(
                         f"MCP tool name collision: {spec.name!r} already exists in the "
@@ -409,10 +481,27 @@ def _require_mcp() -> None:
         ) from exc
 
 
+def _side_effects_for(tool: Any) -> list[SideEffect]:
+    """Map MCP tool annotations onto aar side effects.
+
+    Every MCP tool is ``EXTERNAL``. A tool whose server *explicitly* declares
+    that it changes things — ``readOnlyHint=False``, or ``destructiveHint=True``
+    without ``readOnlyHint=True`` — also gets ``EXECUTE``, so the safety policy
+    asks for approval in review mode (``require_approval_for_execute``) and
+    denies it in read-only mode. Unannotated tools keep the previous behaviour.
+    """
+    annotations = getattr(tool, "annotations", None)
+    read_only = getattr(annotations, "readOnlyHint", None)
+    destructive = getattr(annotations, "destructiveHint", None)
+    if read_only is False or (destructive is True and read_only is not True):
+        return [SideEffect.EXTERNAL, SideEffect.EXECUTE]
+    return [SideEffect.EXTERNAL]
+
+
 def _make_tool_handler(client: MCPClient, mcp_tool_name: str):
     """Return an async handler that delegates to the MCP server."""
 
-    async def handler(**kwargs: Any) -> str:
+    async def handler(**kwargs: Any) -> str | ToolOutput:
         return await client.call_tool(mcp_tool_name, kwargs)
 
     handler.__name__ = mcp_tool_name
@@ -446,3 +535,47 @@ def _content_to_str(content: list[Any]) -> str:
         else:
             parts.append(str(block))
     return "\n".join(parts)
+
+
+def _content_to_output(content: list[Any]) -> str | ToolOutput:
+    """Like :func:`_content_to_str`, but keep image data for vision models.
+
+    Returns a plain string when the result has no images. Otherwise each image
+    becomes an ``[image: <mime>, <size>]`` placeholder in the text plus an
+    entry in ``ToolOutput.images``.
+    """
+    parts: list[str] = []
+    images: list[ImageURLBlock] = []
+    for block in content:
+        image = _image_of(block)
+        if image is None:
+            parts.append(_content_to_str([block]))
+            continue
+        mime, data = image
+        parts.append(f"[image: {mime}, {format_size(base64_size(data))}]")
+        images.append(image_block_from_base64(data, mime))
+    text = "\n".join(parts)
+    return ToolOutput(text=text, images=images) if images else text
+
+
+def _image_of(block: Any) -> tuple[str, str] | None:
+    """Return ``(mime, base64)`` for an ``ImageContent`` or image blob resource."""
+    if hasattr(block, "resource"):
+        resource = block.resource
+        mime = getattr(resource, "mimeType", None)
+        blob = getattr(resource, "blob", None)
+        if isinstance(mime, str) and mime.startswith("image/") and blob:
+            return mime, _as_base64(blob)
+        return None
+    if hasattr(block, "data") and hasattr(block, "mimeType"):
+        mime, data = block.mimeType, block.data
+        if isinstance(mime, str) and data:
+            return mime, _as_base64(data)
+    return None
+
+
+def _as_base64(data: str | bytes) -> str:
+    # MCP sends base64 text; tolerate raw bytes from non-conforming servers.
+    if isinstance(data, (bytes, bytearray)):
+        return base64.b64encode(bytes(data)).decode("ascii")
+    return data

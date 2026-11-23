@@ -582,6 +582,61 @@ class TestMCPBridge:
                 await bridge.register_all(registry)
 
     @pytest.mark.asyncio
+    async def test_skip_failed_prefixes_colliding_tools(self, monkeypatch):
+        tools = [_make_fake_tool("echo", "Echo")]
+        mods, _ = _make_mcp_sys_modules(tools=tools)
+        for key, mod in mods.items():
+            monkeypatch.setitem(sys.modules, key, mod)
+
+        from agent.extensions.mcp import MCPBridge, MCPServerConfig
+
+        cfgs = [
+            MCPServerConfig(name="a", transport="stdio", command="x"),
+            MCPServerConfig(name="b", transport="stdio", command="y"),
+        ]
+        registry = ToolRegistry()
+
+        async with MCPBridge(cfgs, skip_failed=True) as bridge:
+            count = await bridge.register_all(registry)
+            assert await registry.get("b__echo").handler(message="hi") == "ok"
+        assert count == 2
+        assert "echo" in registry and "b__echo" in registry
+        assert bridge.failures == []
+
+    @pytest.mark.asyncio
+    async def test_skip_failed_skips_server_that_cannot_start(self, monkeypatch):
+        tools = [_make_fake_tool("echo", "Echo")]
+        mods, _ = _make_mcp_sys_modules(tools=tools)
+        for key, mod in mods.items():
+            monkeypatch.setitem(sys.modules, key, mod)
+
+        from agent.extensions.mcp import MCPBridge, MCPClient, MCPServerConfig
+
+        real_enter = MCPClient.__aenter__
+
+        async def enter(self_):
+            if self_.config.name == "broken":
+                raise OSError("no such program")
+            return await real_enter(self_)
+
+        monkeypatch.setattr(MCPClient, "__aenter__", enter)
+        cfgs = [
+            MCPServerConfig(name="broken", transport="stdio", command="missing"),
+            MCPServerConfig(name="ok", transport="stdio", command="x"),
+        ]
+        registry = ToolRegistry()
+
+        async with MCPBridge(cfgs, skip_failed=True) as bridge:
+            count = await bridge.register_all(registry)
+            assert [c.config.name for c in bridge.clients] == ["ok"]
+        assert count == 1
+        assert bridge.failures == [("broken", "could not start: no such program")]
+
+        with pytest.raises(OSError):
+            async with MCPBridge(cfgs):
+                pass
+
+    @pytest.mark.asyncio
     async def test_prefix_tools_avoids_collision(self, monkeypatch):
         """prefix_tools=True should namespace tools and prevent collisions."""
         tools = [_make_fake_tool("echo", "Echo")]
@@ -740,3 +795,196 @@ class TestRegisterBuiltinsPreservesExternal:
         assert "mcp_external_tool" in agent.registry
         # Built-in tools should also be present
         assert "read_file" in agent.registry
+
+
+# ---------------------------------------------------------------------------
+# Tool annotations -> side effects -> approval
+# ---------------------------------------------------------------------------
+
+_ABSENT = object()
+
+
+def _annotated_tool(name: str, read_only=_ABSENT, destructive=_ABSENT):
+    """A fake MCP tool; ``_ABSENT`` for both hints means no annotations at all."""
+    from types import SimpleNamespace
+
+    tool = _make_fake_tool(name, f"{name} tool", {"type": "object", "properties": {}})
+    if read_only is _ABSENT and destructive is _ABSENT:
+        tool.annotations = None
+    else:
+        tool.annotations = SimpleNamespace(
+            readOnlyHint=None if read_only is _ABSENT else read_only,
+            destructiveHint=None if destructive is _ABSENT else destructive,
+        )
+    return tool
+
+
+_EXT = [SideEffect.EXTERNAL]
+_EXT_EXEC = [SideEffect.EXTERNAL, SideEffect.EXECUTE]
+
+
+class TestAnnotationSideEffects:
+    @pytest.mark.parametrize(
+        "read_only, destructive, expected",
+        [
+            (_ABSENT, _ABSENT, _EXT),  # unannotated: unchanged behaviour
+            (True, _ABSENT, _EXT),
+            (True, True, _EXT),  # readOnlyHint wins (destructiveHint is meaningless then)
+            (None, None, _EXT),
+            (False, _ABSENT, _EXT_EXEC),
+            (False, False, _EXT_EXEC),  # additive but still a change
+            (None, True, _EXT_EXEC),
+        ],
+    )
+    def test_mapping(self, read_only, destructive, expected):
+        from agent.extensions.mcp import _side_effects_for
+
+        assert _side_effects_for(_annotated_tool("t", read_only, destructive)) == expected
+
+    def test_mock_attributes_are_not_hints(self):
+        # A MagicMock (or any truthy non-bool) must not be mistaken for a hint.
+        from agent.extensions.mcp import _side_effects_for
+
+        assert _side_effects_for(_make_fake_tool("t", "t")) == _EXT
+
+    @pytest.mark.parametrize(
+        "read_only_hint, mode, expected",
+        [
+            (False, "review", "ask"),
+            (True, "review", "allow"),
+            (None, "review", "allow"),
+            (False, "auto", "allow"),
+            (False, "read-only", "deny"),
+            (True, "read-only", "allow"),
+        ],
+    )
+    def test_policy_decision(self, read_only_hint, mode, expected):
+        from agent.extensions.mcp import _side_effects_for
+        from agent.safety.policy import PolicyConfig, SafetyPolicy
+        from agent.tools.schema import ToolSpec
+
+        flags = {
+            "review": {"require_approval_for_writes": True, "require_approval_for_execute": True},
+            "auto": {},
+            "read-only": {"read_only": True},
+        }[mode]
+        spec = ToolSpec(
+            name="windows__click_element",
+            description="",
+            side_effects=_side_effects_for(_annotated_tool("t", read_only_hint)),
+        )
+        policy = SafetyPolicy(PolicyConfig(**flags))
+        assert policy.check_tool(spec, {"window": "Notepad", "element": "e3"}).value == expected
+
+    async def test_list_tools_uses_annotations(self, monkeypatch):
+        mods, _ = _make_mcp_sys_modules(
+            tools=[_annotated_tool("click", False, True), _annotated_tool("look", True)]
+        )
+        for name, mod in mods.items():
+            monkeypatch.setitem(sys.modules, name, mod)
+        from agent.extensions.mcp import MCPClient, MCPServerConfig
+
+        cfg = MCPServerConfig(name="srv", transport="stdio", command="python")
+        async with MCPClient(cfg) as client:
+            click, look = await client.list_tools()
+        assert click.side_effects == _EXT_EXEC
+        assert look.side_effects == _EXT
+
+
+class TestApprovalEndToEnd:
+    """MCP bridge -> registry -> ToolExecutor -> SafetyPolicy -> approval callback."""
+
+    @staticmethod
+    async def _run(monkeypatch, tool_name, *, safety=None, answer=None, is_error=False):
+        from agent.core.config import SafetyConfig, ToolConfig
+        from agent.core.events import ToolCall
+        from agent.extensions.mcp import MCPBridge, MCPServerConfig
+        from agent.safety.permissions import ApprovalResult
+        from agent.tools.execution import ToolExecutor
+
+        mods, session = _make_mcp_sys_modules(
+            tools=[
+                _annotated_tool("click_element", False, True),
+                _annotated_tool("read_text", True),
+            ],
+            call_result_content=[_make_fake_text_content("server says hi")],
+        )
+        session.call_tool.return_value.isError = is_error
+        for name, mod in mods.items():
+            monkeypatch.setitem(sys.modules, name, mod)
+
+        asked: list[str] = []
+
+        async def approve(spec, tc):
+            asked.append(spec.name)
+            return answer or ApprovalResult.APPROVED
+
+        cfg = MCPServerConfig(name="windows", command="python", prefix_tools=True)
+        async with MCPBridge([cfg]) as bridge:
+            registry = ToolRegistry()
+            await bridge.register_all(registry)
+            executor = ToolExecutor(
+                registry, ToolConfig(), safety or SafetyConfig(), approval_callback=approve
+            )
+            (result,) = await executor.execute(
+                [ToolCall(tool_name=f"windows__{tool_name}", arguments={})]
+            )
+        return result, asked, session
+
+    async def test_review_mode_asks_before_a_change(self, monkeypatch):
+        result, asked, session = await self._run(monkeypatch, "click_element")
+        assert asked == ["windows__click_element"]
+        assert not result.is_error and result.output == "server says hi"
+        session.call_tool.assert_awaited_once_with("click_element", {})
+
+    async def test_denied_change_never_reaches_the_server(self, monkeypatch):
+        from agent.safety.permissions import ApprovalResult
+
+        result, asked, session = await self._run(
+            monkeypatch, "click_element", answer=ApprovalResult.DENIED
+        )
+        assert asked == ["windows__click_element"]
+        assert result.is_error and "denied by user" in result.output
+        session.call_tool.assert_not_awaited()
+
+    async def test_read_only_tool_runs_without_asking(self, monkeypatch):
+        result, asked, _ = await self._run(monkeypatch, "read_text")
+        assert asked == []
+        assert result.output == "server says hi"
+
+    async def test_auto_mode_does_not_ask(self, monkeypatch):
+        from agent.core.config import SafetyConfig
+
+        auto = SafetyConfig(
+            require_approval_for_writes=False, require_approval_for_execute=False, allowed_paths=[]
+        )
+        result, asked, _ = await self._run(monkeypatch, "click_element", safety=auto)
+        assert asked == [] and result.output == "server says hi"
+
+    async def test_auto_mode_still_asks_when_allowed_paths_cannot_be_enforced(self, monkeypatch):
+        # Like bash: with allowed_paths active and the non-isolating "local"
+        # sandbox, aar cannot verify what a desktop action touches, so it asks.
+        from agent.core.config import SafetyConfig
+
+        auto = SafetyConfig(require_approval_for_writes=False, require_approval_for_execute=False)
+        assert auto.allowed_paths and auto.sandbox.mode == "local"
+        _, asked, _ = await self._run(monkeypatch, "click_element", safety=auto)
+        assert asked == ["windows__click_element"]
+        _, asked, _ = await self._run(monkeypatch, "read_text", safety=auto)
+        assert asked == []
+
+    async def test_read_only_mode_blocks_changes(self, monkeypatch):
+        from agent.core.config import SafetyConfig
+
+        ro = SafetyConfig(read_only=True)
+        result, asked, session = await self._run(monkeypatch, "click_element", safety=ro)
+        assert asked == []
+        assert result.is_error and "blocked by safety policy" in result.output
+        session.call_tool.assert_not_awaited()
+        result, _, _ = await self._run(monkeypatch, "read_text", safety=ro)
+        assert not result.is_error
+
+    async def test_server_error_is_reported_as_failed_call(self, monkeypatch):
+        result, _, _ = await self._run(monkeypatch, "read_text", is_error=True)
+        assert result.is_error
+        assert "MCPToolError: server says hi" in result.output

@@ -34,6 +34,12 @@ against**.
         OS / kernel
 ```
 
+The `powershell` tool takes the same route through the `ToolExecutor` (same
+policy, same approval) but calls `sandbox.execute_program(argv, stdin_data=…)`
+instead: the PowerShell executable is started directly — no `bash -c`, no
+`cmd.exe` — with the script on stdin. Only `local` and `windows` implement
+`execute_program`; see [On Windows](#on-windows-bash-routes-through-wsl-powershell-runs-natively).
+
 Every sandbox mode returns the same `SandboxResult` shape (stdout, stderr,
 exit_code, timed_out), so transports and tools are decoupled from the backend.
 The differences are entirely in **how the subprocess is spawned** and **what
@@ -135,12 +141,14 @@ helper PID to it:
       v
   helper.py  [still at Medium IL]
       |
-      | SetTokenInformation(TokenIntegrityLevel, LOW_RID)
-      | (self-demote to Low IL)
+      | OpenProcessToken + SetTokenInformation(TokenIntegrityLevel, LOW_RID)
+      | (self-demote to Low IL; typed ctypes calls, result checked —
+      |  on failure: exit 1, "could not lower the integrity level", cmd never runs)
       v
   helper.py  [now at Low IL]
       |
       | subprocess.run(["bash", "-c", cmd])
+      | (powershell: helper.py --exec <pwsh argv>, same lowering)
       v
   bash -c cmd           [Low IL — inherits from helper]
       |
@@ -160,7 +168,7 @@ helper PID to it:
 | Memory cap | Job Object `ProcessMemoryLimit` = `windows.max_memory_mb` |
 | Process count cap | Job Object `ActiveProcessLimit` = `windows.max_processes` |
 | Cleanup | `KILL_ON_JOB_CLOSE` — orphans killed when agent exits |
-| Fallback | Low-IL helper fails → Job Object only (warning logged) |
+| Fallback | Helper cannot lower its token → command not run (fails closed). Helper cannot be started → Job Object only (warning logged) |
 
 > **WSL interop:** Both the normal path and the fallback path call `bash -c <cmd>`.
 > On Windows, `bash` is the WSL interop binary, so the shell runs inside the
@@ -272,9 +280,9 @@ Apple's sandbox API is not wired up). `auto` falls back to `local`.
 | Mode | Security rank (Windows) | Writes blocked outside workspace? | Reads blocked? | Memory/process caps | Network restriction | Actual shell on Windows | Recommended for beginners? |
 |---|---|---|---|---|---|---|---|
 | `linux` | 🥇 1 — kernel Landlock | **yes** (kernel-enforced) | no | ulimit (advisory) | no | native Linux shell | ✅ yes (on Linux) |
-| `windows` | 🥈 2 — Low IL + Job Object | mostly (Low IL, Windows ACL) | no | yes (Job Object) | no | WSL interop bash (Low IL token) | ✅ yes (on Windows) |
+| `windows` | 🥈 2 — Low IL + Job Object | mostly (Low IL, Windows ACL) | no | yes (Job Object) | no | WSL interop bash or native PowerShell (Low IL token) | ✅ yes (on Windows) |
 | `wsl` | 🥉 3 — distro isolation only | **no** (`/mnt/` exposes host, runs as root) | no | no | no | `wsl -d aar-sandbox` dedicated distro | ⚠️ only for clean env, not security |
-| `local` | ❌ 4 — no sandbox | no | no | no | no | WSL interop bash (default distro) | ❌ no |
+| `local` | ❌ 4 — no sandbox | no | no | no | no | WSL interop bash (default distro) or native PowerShell | ❌ no |
 
 > **New to Aar? Use `auto` mode** (which maps to `windows` on Windows and
 > `linux` on Linux). It gives the strongest OS-enforced isolation available on
@@ -285,15 +293,22 @@ Apple's sandbox API is not wired up). `auto` falls back to `local`.
 
 ---
 
-## On Windows: all shell modes route through WSL
+## On Windows: bash routes through WSL, powershell runs natively
 
 One important reality on Windows that cuts across all modes:
 
-| Mode | Shell process | Distro |
-|---|---|---|
-| `local` | WSL interop `bash.exe` | your default WSL2 distro |
-| `windows` | WSL interop `bash.exe` (Low IL token) | your default WSL2 distro |
-| `wsl` | `wsl -d aar-sandbox -- sh -c …` | dedicated `aar-sandbox` distro |
+| Mode | `bash` tool process | Distro | `powershell` tool process |
+|---|---|---|---|
+| `local` | WSL interop `bash.exe` | your default WSL2 distro | `pwsh.exe` / `powershell.exe`, `CREATE_NO_WINDOW` |
+| `windows` | WSL interop `bash.exe` (Low IL token) | your default WSL2 distro | `pwsh.exe` / `powershell.exe` via the Low IL helper, in the Job Object |
+| `wsl` | `wsl -d aar-sandbox -- sh -c …` | dedicated `aar-sandbox` distro | not registered (would escape the distro) |
+
+Without WSL (a typical office PC) there is no `bash.exe`; `powershell` is then
+the shell tool — either enabled by a fresh config or registered in place of an
+enabled `bash` (`tools.powershell.fallback_for_bash`). In `windows` mode the
+PowerShell process gets the same Low IL token and Job Object limits as `bash`
+would (`max_processes`, `max_memory_mb` per process); on timeout the job is
+closed and `taskkill /T` takes down the whole tree.
 
 `local` and `windows` use the same WSL interop bash, but `windows` mode
 adds genuine restrictions: Low Integrity Level blocks Windows-host writes to
@@ -332,7 +347,9 @@ because the agent runs as root with full `/mnt/` access.
     undone with `icacls <workspace> /setintegritylevel Medium`.
   - Low IL only restricts Windows-host writes. **WSL-internal paths** inside the
     user's default distro (e.g. `~/.ssh` inside WSL) remain fully writable.
-  - Low-IL fallback path is silent if ctypes helpers fail.
+  - If the helper process cannot be started at all, commands run under the
+    Job Object only (a warning is logged). A helper that starts but cannot
+    lower its token refuses to run the command.
 - `wsl`:
   - `/mnt/` defeats filesystem isolation for anything on the Windows host —
     the agent runs as **root** and can write to any file your Windows user owns,
@@ -372,6 +389,10 @@ execution. If it falls outside the whitelist the call is hard-denied — no
 approval dialog, no sandbox bypass. This works correctly in every mode.
 
 ### Bash tool (`bash`, shell commands)
+
+Everything in this section applies to the `powershell` tool too: it is an
+`EXECUTE` tool with a `command` argument, so the same table decides between
+OS enforcement and forced approval.
 
 The policy engine **cannot inspect which filesystem paths a shell command will
 touch at runtime**. The only protections available are:

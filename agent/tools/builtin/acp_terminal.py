@@ -14,8 +14,10 @@ at session-setup time with the current client connection and session id.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from typing import Any
 
+from agent.tools.builtin import powershell as _ps
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
 
@@ -89,17 +91,89 @@ async def _run_via_client(
     return "".join(parts)
 
 
+_HOST_ENV = (
+    "acp_terminal runs commands in the user's native host environment (with the"
+    " user's PATH, Python, pip, project CLIs)"
+)
+
+
+def _shell_reason(name: str) -> str:
+    if name == "bash":
+        if _ps.is_windows_host():
+            return (
+                "bash routes through WSL (or Git Bash), which has a different filesystem,"
+                " PATH, and installed packages"
+            )
+        return "bash runs in aar's own sandboxed subprocess with a filtered environment"
+    return (
+        "powershell runs in aar's own subprocess with a filtered environment (no"
+        " PowerShell profile, no activated virtualenv)"
+    )
+
+
+def _shell_use_only(name: str) -> str:
+    if name == "bash":
+        if _ps.is_windows_host():
+            return "Use bash only when you explicitly need a Linux/WSL environment."
+        return "Use bash only when acp_terminal is unavailable or fails."
+    return "Use powershell only when you need PowerShell itself (cmdlets, Windows administration)."
+
+
+def acp_terminal_guidelines(shell_tools: Collection[str] | None = None) -> list[str]:
+    """Prompt guidelines for ``acp_terminal``, naming the shell tools it competes with.
+
+    *shell_tools* are the registered local shell tools (``bash``,
+    ``powershell``, both or neither); ``None`` means not known yet and gives
+    wording that holds for either.
+    """
+    use_for = (
+        "Use acp_terminal for: python/pip, project CLIs (pytest, ruff, npm, etc.), and any"
+        " command that needs the project's virtualenv or installed tools."
+    )
+    editor = "When running inside an editor (Zed, VS Code), "
+    if shell_tools is None:
+        return [
+            f"{editor}prefer acp_terminal over the local shell tool (bash or powershell,"
+            f" whichever is available). {_HOST_ENV}, while the local shell tool runs in"
+            " aar's own subprocess with a different environment (on Windows, bash routes"
+            " through WSL).",
+            use_for,
+        ]
+    names = [n for n in ("bash", "powershell") if n in shell_tools]
+    if not names:
+        return [f"{editor}use acp_terminal to run commands: {_HOST_ENV}.", use_for]
+    return [
+        f"{editor}prefer acp_terminal over {' and '.join(names)}. {_HOST_ENV}, while "
+        + "; ".join(_shell_reason(n) for n in names)
+        + ".",
+        " ".join([use_for, *(_shell_use_only(n) for n in names)]),
+    ]
+
+
+def adapt_acp_terminal_tool(registry: ToolRegistry, shell_tools: Collection[str]) -> None:
+    """Re-word a registered ``acp_terminal`` for the shell tools actually registered.
+
+    The ACP transport registers ``acp_terminal`` before the agent registers
+    ``bash`` / ``powershell``, so the agent calls this once it knows which.
+    """
+    spec = registry.get("acp_terminal")
+    if spec is not None:
+        spec.prompt_guidelines = acp_terminal_guidelines(shell_tools)
+
+
 def register_acp_terminal_tool(
     registry: ToolRegistry,
     conn: Any,
     session_id: str,
     default_timeout: float = 60.0,
+    shell_tools: Collection[str] | None = None,
 ) -> None:
     """Register the ``acp_terminal`` tool in *registry*.
 
     The tool runs a shell command through the ACP client's terminal
     service, waits for it to exit (bounded by *default_timeout*), and
-    returns the captured output.
+    returns the captured output.  *shell_tools* words its guidelines (see
+    :func:`acp_terminal_guidelines`).
     """
 
     async def acp_terminal(
@@ -130,17 +204,7 @@ def register_acp_terminal_tool(
             prompt_snippet=(
                 "Run a command in the editor's terminal (native host environment, user's PATH)"
             ),
-            prompt_guidelines=[
-                "When running inside an editor (Zed, VS Code), prefer acp_terminal"
-                " over bash. acp_terminal runs commands in the user's native host"
-                " environment (with the user's PATH, Python, pip, project CLIs),"
-                " while bash routes through WSL which has a different filesystem,"
-                " PATH, and installed packages.",
-                "Use acp_terminal for: python/pip, project CLIs (pytest, ruff, npm,"
-                " etc.), and any command that needs the project's virtualenv or"
-                " installed tools. Use bash only when you explicitly need a"
-                " Linux/WSL environment.",
-            ],
+            prompt_guidelines=acp_terminal_guidelines(shell_tools),
             input_schema={
                 "type": "object",
                 "properties": {

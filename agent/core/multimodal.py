@@ -121,6 +121,87 @@ def file_to_content_block(path: Path) -> ContentBlock:
     return TextBlock(text=f"[File: {path}]\n{content}")
 
 
+# ---------------------------------------------------------------------------
+# Images returned by tools
+# ---------------------------------------------------------------------------
+
+# Formats every vision provider aar talks to accepts (Anthropic, OpenAI,
+# Gemini, Ollama). Anything else stays a text placeholder.
+TOOL_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
+def image_block_from_base64(data: str, mime: str) -> ImageURLBlock:
+    """Wrap base-64 image data in an :class:`ImageURLBlock` (``data:`` URI)."""
+    return ImageURLBlock(image_url=ImageURL(url=f"data:{mime};base64,{data}"))
+
+
+def split_data_uri(url: str) -> tuple[str, str] | None:
+    """Return ``(mime, base64_payload)`` for a ``data:`` URI, else ``None``."""
+    if not url.startswith("data:") or "," not in url:
+        return None
+    meta, payload = url[5:].split(",", 1)
+    if not meta.endswith(";base64"):
+        return None
+    return meta[: -len(";base64")] or "application/octet-stream", payload
+
+
+def base64_size(payload: str) -> int:
+    """Decoded byte size of a base-64 string (without decoding it)."""
+    n = len(payload.rstrip("="))
+    return n * 3 // 4
+
+
+def format_size(nbytes: int) -> str:
+    """Human-readable size: ``"812 B"``, ``"120 KB"``, ``"3.4 MB"``."""
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    if nbytes < 1024 * 1024:
+        return f"{nbytes // 1024} KB"
+    return f"{nbytes / (1024 * 1024):.1f} MB"
+
+
+def check_tool_image(block: ImageURLBlock, max_bytes: int) -> str | None:
+    """Return why a tool image cannot go to a model, or ``None`` if it can.
+
+    Only inline (``data:``) images in :data:`TOOL_IMAGE_MIMES` up to
+    *max_bytes* decoded bytes pass. aar does not re-encode images (that would
+    need an imaging library), so an oversized one is dropped and the tool
+    should be asked for a smaller one.
+    """
+    parts = split_data_uri(block.image_url.url)
+    if parts is None:
+        return "not an inline base64 image"
+    mime, payload = parts
+    if mime not in TOOL_IMAGE_MIMES:
+        return f"unsupported image type {mime}"
+    size = base64_size(payload)
+    if size > max_bytes:
+        return f"{format_size(size)} exceeds tools.max_image_bytes ({format_size(max_bytes)})"
+    return None
+
+
+def tool_images_followup_message(
+    tool_results: list[dict], intro: str = "Images returned by tool call"
+) -> dict | None:
+    """Build an OpenAI-style user message carrying the images of *tool_results*.
+
+    OpenAI Chat Completions (and most OpenAI-compatible servers) accept images
+    only in ``user`` messages, not in ``tool`` messages, so the images ride in
+    one user message placed right after the tool messages of the turn.
+    Returns ``None`` when no tool result has images.
+    """
+    parts: list[dict] = []
+    for tr in tool_results:
+        images = tr.get("images") or []
+        if not images:
+            continue
+        parts.append({"type": "text", "text": f"[{intro} {tr.get('tool_use_id', '')}]"})
+        parts.extend(images)
+    if not parts:
+        return None
+    return {"role": "user", "content": parts}
+
+
 def parse_multimodal_input(user_input: str) -> str | list[ContentBlock]:
     """Parse user input, extracting ``@file`` attachments into content blocks.
 

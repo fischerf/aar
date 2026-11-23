@@ -210,6 +210,10 @@ Enable vision for models with a vision encoder (see [Multimodal input](developme
 ProviderConfig(name="ollama", model="qwen2.5vl:7b", extra={"supports_vision": True})
 ```
 
+Ollama assumes vision unless `"supports_vision": false` is set. Set it for
+text-only models: images that tools return (an MCP `screenshot`) are otherwise
+sent to them too ([MCP images](mcp.md#images)).
+
 Audio note: Gemma 4 supports audio at the model level, but Ollama's API does not yet expose audio input (as of v0.20). Audio blocks attached via `@file` will be dropped with a warning. The framework types are ready for when Ollama adds support.
 
 ## Gemini

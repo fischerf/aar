@@ -64,7 +64,8 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
                 chars += len(str(block.get("input", {})))
             elif btype == "tool_result":
                 chars += len(str(block.get("content", "")))
-            elif btype == "image":
+                chars += 4800 * len(block.get("images") or [])
+            elif btype in ("image", "image_url"):
                 chars += 4800  # ~1 200 tokens per image
     return max(1, chars // 4)
 
@@ -81,7 +82,7 @@ def estimate_event_tokens(event: Event) -> int:
     elif isinstance(event, ToolCall):
         chars = len(event.tool_name) + len(str(event.arguments))
     elif isinstance(event, ToolResult):
-        chars = len(event.output)
+        chars = len(event.output) + 4800 * len(event.images)
     else:
         return 0
     return max(1, chars // 4)

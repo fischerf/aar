@@ -81,6 +81,8 @@ packaging==26.3
 
 # -- Windows --
 pywin32==312
+uiautomation==2.0.29 ; sys_platform == "win32"
+comtypes==1.5.0 ; sys_platform == "win32"
 
 # -- Dev --
 pytest==9.1.1

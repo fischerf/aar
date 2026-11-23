@@ -25,6 +25,121 @@ class PolicyDecision(str, Enum):
     ASK = "ask"  # requires human approval
 
 
+# ---------------------------------------------------------------------------
+# PowerShell / cmd.exe deny patterns (the ``powershell`` tool)
+# ---------------------------------------------------------------------------
+# ``denied_commands`` is matched token by token and case-sensitively, which
+# suits POSIX shells but not PowerShell (case-insensitive verbs, aliases,
+# abbreviated parameters such as ``-r`` for ``-Recurse``). These regexes are
+# the default ``denied_powershell_patterns``: matched case-insensitively
+# against the raw command of the ``powershell`` tool only — ``bash`` keeps its
+# historical deny-list unchanged. They are a best-effort guardrail against
+# well-known destructive shapes, not a sandbox: a command assembled at runtime
+# still gets through, so the approval prompt stays the real boundary.
+
+_Q = "['\"]"  # optional quote around an argument
+_END = r"(?=$|[\s,;|&)])"  # end of an argument
+_STATEMENT = r"[^;|&\n]*"  # rest of the current statement
+_ARG_CHAR = r"[^\\/\s'\";|&,)]"  # one character of a path component
+# ``Remove-Item`` and the aliases / cmd builtins that delete.
+_PS_DELETE = r"(?<![\w-])(?:remove-item|ri|rm|rmdir|rd|del|erase)(?![\w-])"
+# ``-Recurse`` or any prefix of it, ``rm``'s ``-rf`` / ``-fr``, cmd's ``/s``.
+_PS_RECURSE = r"(?:-r(?:e(?:c(?:u(?:r(?:se?)?)?)?)?)?|-(?:rf|fr)[a-z]*|/s)(?![\w-])"
+# A user profile root, or one of its well-known top-level folders.
+_PS_PROFILE = (
+    r"(?:\$env:userprofile|\$home|~|[a-z]:[\\/]users[\\/]" + _ARG_CHAR + r"+)"
+    r"(?:[\\/](?:documents|desktop|downloads|pictures|music|videos|appdata"
+    r"|onedrive" + _ARG_CHAR + r"*))?"
+)
+# A whole argument naming a drive root, a system folder or a user profile.
+_PS_CRITICAL_PATH = (
+    r"(?:^|[\s,=(])" + _Q + "?"
+    r"(?:" + _PS_PROFILE + r"|[a-z]:[\\/](?:windows|users|programdata"
+    r"|program\s?files(?:\s?\(x86\))?)"
+    r"|[a-z]:"
+    r"|\$env:(?:systemdrive|systemroot|windir|homedrive|programfiles|programdata|public"
+    r"|allusersprofile)"
+    r"|[\\/])"
+    r"[\\/]?\*?(?:\.\*)?" + _Q + "?" + _END
+)
+# A registry hive, or a key right below it (HKLM:\SOFTWARE, HKCU\Software\Microsoft).
+_REG_HIVE = (
+    r"(?:registry::)?(?:hklm|hkcu|hkcr|hku|hkcc"
+    r"|hkey_(?:local_machine|current_user|classes_root|users|current_config))"
+)
+_REG_CRITICAL_KEY = (
+    r"(?:^|[\s,=(])" + _Q + "?" + _REG_HIVE + r":?"
+    r"(?:[\\/](?:software[\\/](?:microsoft|classes|policies|wow6432node)"
+    r"|system[\\/]currentcontrolset|" + _ARG_CHAR + r"+))?"
+    r"[\\/]?\*?" + _Q + "?" + _END
+)
+_PS_DOWNLOAD = (
+    r"(?<![\w-])(?:invoke-webrequest|iwr|invoke-restmethod|irm|curl|wget|start-bitstransfer"
+    r"|downloadstring|downloaddata|downloadfile|net\.webclient)(?![\w-])"
+)
+_PS_IEX = r"(?<![\w-])(?:invoke-expression|iex)(?![\w-])"
+
+POWERSHELL_DENIED_COMMAND_PATTERNS: tuple[str, ...] = (
+    # Remove-Item -Recurse C:\ / $env:USERPROFILE / C:\Windows, rd /s /q C:\, rm -r ~
+    # (flag and path are separate lookaheads, so their order does not matter)
+    _PS_DELETE
+    + r"(?="
+    + _STATEMENT
+    + r"\s"
+    + _PS_RECURSE
+    + r")(?="
+    + _STATEMENT
+    + _PS_CRITICAL_PATH
+    + r")",
+    # Get-ChildItem C:\ -Recurse | Remove-Item
+    r"(?<![\w-])(?:get-childitem|gci|dir|ls)(?![\w-])(?="
+    + _STATEMENT
+    + _PS_CRITICAL_PATH
+    + r")[^;\n]*\|\s*(?:remove-item|ri|rm|del|erase)(?![\w-])",
+    # Registry hives: Remove-Item HKLM:\SOFTWARE -Recurse, reg delete HKCU\Software /f
+    _PS_DELETE + r"(?=" + _STATEMENT + _REG_CRITICAL_KEY + r")",
+    r"(?<![\w-])reg(?:\.exe)?\s+delete(?=" + _STATEMENT + _REG_CRITICAL_KEY + r")",
+    # Machine-wide execution policy (``-Scope Process`` / ``CurrentUser`` stay allowed)
+    r"(?<![\w-])set-executionpolicy(?![\w-])(?!"
+    + _STATEMENT
+    + r"\s-s(?:c(?:o(?:pe?)?)?)?(?:\s+|\s*:\s*)"
+    + _Q
+    + r"?(?:process|currentuser)(?![\w-]))",
+    # Disks and volumes
+    (
+        r"(?<![\w-])(?:format-volume|clear-disk|initialize-disk|remove-partition"
+        r"|reset-physicaldisk|diskpart)(?![\w-])"
+    ),
+    r"(?<![\w-])format(?:\.com)?\s+" + _Q + r"?[a-z]:",
+    # Power state (any flag but ``/a`` — abort; ``denied_commands`` lists ``shutdown`` anyway)
+    r"(?<![\w-])(?:stop-computer|restart-computer)(?![\w-])",
+    r"(?<![\w.-])shutdown(?:\.exe)?\s+(?:[^\n;]*\s)?[/-][srpfhg](?![\w-])",
+    # Download-and-execute: irm … | iex, iex (iwr …), (New-Object Net.WebClient).DownloadString
+    _PS_DOWNLOAD + r"[^\n]*\|\s*(?:%\s*\{\s*)?" + _PS_IEX,
+    _PS_IEX + r"[^\n]*" + _PS_DOWNLOAD,
+    # A nested encoded command hides the real one from every check here
+    r"(?<![\w-])(?:powershell|pwsh)(?:\.exe)?(?![\w-])[^\n]*\s-e(?:n[a-z]*|c)?\s+"
+    + _Q
+    + r"?[a-z0-9+/=]{20,}",
+    # Shadow copies, backups, boot configuration
+    (
+        r"(?<![\w-])(?:vssadmin(?:\.exe)?\s+delete\s+shadows|wmic(?:\.exe)?\s+shadowcopy\s+delete"
+        r"|wbadmin(?:\.exe)?\s+delete)"
+    ),
+    r"(?<![\w-])bcdedit(?:\.exe)?\s+/(?:set|delete|deletevalue)(?![\w-])",
+    # Turning Defender off / excluding paths from it
+    r"(?<![\w-])set-mppreference(?![\w-])[^\n;]*\s-disable",
+    r"(?<![\w-])add-mppreference(?![\w-])[^\n;]*\s-exclusion",
+    # Wiping event logs (the Windows ``history -c``)
+    r"(?<![\w-])(?:clear-eventlog|remove-eventlog)(?![\w-])",
+    r"(?<![\w-])wevtutil(?:\.exe)?\s+(?:cl|clear-log)(?![\w-])",
+)
+
+# Tools whose ``command`` is PowerShell: they get ``denied_powershell_patterns``
+# and a tokeniser that reads ``\`` as a path separator, not as an escape.
+POWERSHELL_TOOL_NAMES = frozenset({"powershell"})
+
+
 class PathRule(BaseModel):
     """A rule matching file paths."""
 
@@ -129,6 +244,15 @@ class PolicyConfig(BaseModel):
             # classic fork bomb, with or without whitespace
             r":\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;\s*:",
         ]
+    )
+
+    # Extra regex deny-list for the ``powershell`` tool only (case-insensitive,
+    # raw command): Remove-Item -Recurse C:\, Format-Volume, Stop-Computer,
+    # registry hive deletes, irm … | iex, … — see
+    # POWERSHELL_DENIED_COMMAND_PATTERNS. Applied in addition to
+    # ``denied_commands`` and ``denied_command_patterns``. ``[]`` disables it.
+    denied_powershell_patterns: list[str] = Field(
+        default_factory=lambda: list(POWERSHELL_DENIED_COMMAND_PATTERNS)
     )
 
     # Sandbox mode — used to decide whether bash commands need forced approval
@@ -324,13 +448,17 @@ def _basename(token: str) -> str:
     return posixpath.basename(token.replace("\\", "/"))
 
 
-def _simple_commands(command: str) -> list[list[str]] | None:
+def _simple_commands(command: str, backslash_escapes: bool = True) -> list[list[str]] | None:
     """Split *command* into simple commands on ``; && || | &`` and newlines.
 
     H1 — The old check only ever looked at the first token sequence, so
     ``true; shutdown -h now`` and ``echo x && rm -rf /`` sailed past the
     deny-list. Returns ``None`` when the command cannot be tokenised, which
     the caller treats as "fall back to substring matching".
+
+    ``backslash_escapes=False`` reads ``\\`` as an ordinary character — right
+    for PowerShell, where it separates path components and the escape
+    character is the backtick.
     """
     commands: list[list[str]] = []
     for line in command.splitlines():
@@ -340,6 +468,8 @@ def _simple_commands(command: str) -> list[list[str]] | None:
             lexer = shlex.shlex(line, posix=True, punctuation_chars=_SEPARATOR_CHARS)
             lexer.whitespace_split = True
             lexer.commenters = ""  # '#' is data here, not a comment
+            if not backslash_escapes:
+                lexer.escape = ""
             tokens = list(lexer)
         except ValueError:
             return None
@@ -400,9 +530,9 @@ def _unwrap(tokens: list[str], depth: int = 0) -> list[list[str]]:
     return variants
 
 
-def _candidate_commands(command: str) -> list[list[str]] | None:
+def _candidate_commands(command: str, backslash_escapes: bool = True) -> list[list[str]] | None:
     """Every token list the deny-list should be evaluated against."""
-    simple = _simple_commands(command)
+    simple = _simple_commands(command, backslash_escapes)
     if simple is None:
         return None
     candidates: list[list[str]] = []
@@ -594,6 +724,13 @@ class SafetyPolicy:
             except re.error as exc:
                 logger.warning("Ignoring invalid denied_command_pattern %r: %s", pattern, exc)
 
+        self._compiled_powershell_patterns: list[re.Pattern] = []
+        for pattern in self.config.denied_powershell_patterns:
+            try:
+                self._compiled_powershell_patterns.append(re.compile(pattern, re.IGNORECASE))
+            except re.error as exc:
+                logger.warning("Ignoring invalid denied_powershell_pattern %r: %s", pattern, exc)
+
     def check_tool(self, spec: ToolSpec, arguments: dict[str, Any]) -> PolicyDecision:
         """Check whether a tool call is allowed.
 
@@ -633,7 +770,9 @@ class SafetyPolicy:
         if SideEffect.EXECUTE in spec.side_effects:
             command = arguments.get("command", "")
             if command:
-                decision = self._check_command(command)
+                decision = self._check_command(
+                    command, powershell=spec.name in POWERSHELL_TOOL_NAMES
+                )
                 if decision != PolicyDecision.ALLOW:
                     return decision
 
@@ -809,8 +948,14 @@ class SafetyPolicy:
 
         return PolicyDecision.ALLOW
 
-    def _check_command(self, command: str) -> PolicyDecision:
+    def _check_command(self, command: str, powershell: bool = False) -> PolicyDecision:
         """Check a shell command against command rules.
+
+        *powershell* marks a PowerShell command (the ``powershell`` tool): it
+        is also matched against ``denied_powershell_patterns``, and tokenised
+        with ``\\`` as an ordinary character (a Windows path separator, not a
+        POSIX escape), so ``"C:\\Temp\\"`` does not knock the token check back
+        to raw substring matching.
 
         S3 — The default ``denied_commands`` list is matched by tokenising
         *command* with ``shlex`` instead of doing a naive substring search.
@@ -865,11 +1010,21 @@ class SafetyPolicy:
                 )
                 return PolicyDecision.DENY
 
+        if powershell:
+            for compiled in self._compiled_powershell_patterns:
+                if compiled.search(command):
+                    logger.warning(
+                        "Policy DENY (denied powershell pattern): %s matches %s",
+                        _redact_secrets(command),
+                        compiled.pattern,
+                    )
+                    return PolicyDecision.DENY
+
         # H1 — Evaluate *every* simple command, not just the first, and look
         # through wrappers (``sudo``) and inner shells (``sh -c '…'``).
         # ``None`` means the command didn't tokenise; fall back to substring
         # matching so a malformed command can't bypass the deny-list.
-        candidates = _candidate_commands(command)
+        candidates = _candidate_commands(command, backslash_escapes=not powershell)
 
         for denied in self.config.denied_commands:
             if candidates is None:

@@ -174,6 +174,10 @@ class ToolResult(Event):
     output: str = ""
     is_error: bool = False
     duration_ms: float = 0.0
+    # Images the tool returned (``data:`` URIs). ``output`` always carries a
+    # text placeholder for each, so a model without vision still sees one.
+    # Only the ``tools.keep_recent_images`` most recent results keep their data.
+    images: list[ImageURLBlock] = Field(default_factory=list)
 
 
 class ReasoningBlock(Event):

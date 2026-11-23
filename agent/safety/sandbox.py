@@ -51,6 +51,33 @@ DEFAULT_ALLOWED_ENV_VARS: tuple[str, ...] = (
     "WSLENV",
 )
 
+# Added to the allow-list for host programs run by ``Sandbox.execute_program``
+# (the ``powershell`` tool) when ``restricted_env`` is on: Windows folder and
+# machine names scripts routinely reference (``$env:APPDATA``,
+# ``$env:ProgramFiles``, ``$env:COMPUTERNAME``) — not secrets, and the
+# deny-list still applies. ``PSModulePath`` is deliberately absent: each
+# PowerShell edition computes its own, and pwsh 7's value breaks module
+# loading in Windows PowerShell 5.1. Kept apart from the shared list so the
+# ``bash`` tool's environment is unchanged.
+PROGRAM_ENV_VARS: tuple[str, ...] = (
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "COMPUTERNAME",
+    "USERDOMAIN",
+    "OS",
+)
+
 # H2 — Names stripped from the child environment *even when* the caller opted
 # into inheriting the full parent environment.  Without this, a prompt-injected
 # model can run ``env`` (or ``curl -d @-``) and exfiltrate every provider key
@@ -138,58 +165,112 @@ def _collapse_windows(p) -> str:
 # this helper, so it also runs at Low integrity and inherits the Job Object
 # assigned to the helper's PID.
 _WINDOWS_INTEGRITY_HELPER = """\
-import sys, ctypes, ctypes.wintypes as wt, subprocess
+import sys, ctypes, subprocess
 
-def _set_low_integrity():
+def _lower_integrity_checked():
+    # Lower this process's token to Low integrity; True once it is Low.
+    # Every ctypes signature is declared: without them the GetCurrentProcess
+    # pseudo-handle is truncated to a 32-bit int, OpenProcessToken fails and
+    # the process silently stays at its original level.
+    import ctypes.wintypes as wt
     ADVAPI32 = ctypes.WinDLL("advapi32", use_last_error=True)
     KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    class SID_IDENTIFIER_AUTHORITY(ctypes.Structure):
-        _fields_ = [("Value", ctypes.c_byte * 6)]
+    PSID = ctypes.c_void_p
+    KERNEL32.GetCurrentProcess.restype = wt.HANDLE
+    KERNEL32.GetCurrentProcess.argtypes = []
+    KERNEL32.CloseHandle.argtypes = [wt.HANDLE]
+    ADVAPI32.AllocateAndInitializeSid.argtypes = [ctypes.c_void_p, ctypes.c_ubyte] + [
+        wt.DWORD
+    ] * 8 + [ctypes.POINTER(PSID)]
+    ADVAPI32.AllocateAndInitializeSid.restype = wt.BOOL
+    ADVAPI32.FreeSid.argtypes = [PSID]
+    ADVAPI32.GetLengthSid.argtypes = [PSID]
+    ADVAPI32.GetLengthSid.restype = wt.DWORD
+    ADVAPI32.OpenProcessToken.argtypes = [wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.HANDLE)]
+    ADVAPI32.OpenProcessToken.restype = wt.BOOL
+    ADVAPI32.SetTokenInformation.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
+    ADVAPI32.SetTokenInformation.restype = wt.BOOL
 
     class SID_AND_ATTRIBUTES(ctypes.Structure):
-        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wt.DWORD)]
+        _fields_ = [("Sid", PSID), ("Attributes", wt.DWORD)]
 
     class TOKEN_MANDATORY_LABEL(ctypes.Structure):
         _fields_ = [("Label", SID_AND_ATTRIBUTES)]
 
-    MANDATORY_LABEL_AUTH = SID_IDENTIFIER_AUTHORITY(
-        Value=(ctypes.c_byte * 6)(0, 0, 0, 0, 0, 16)
-    )
-    SECURITY_MANDATORY_LOW_RID = 0x1000
-    SE_GROUP_INTEGRITY = 0x00000020
-    TOKEN_ADJUST_DEFAULT = 0x0080
-    TokenIntegrityLevel = 25
-
-    sid = ctypes.c_void_p()
+    authority = (ctypes.c_ubyte * 6)(0, 0, 0, 0, 0, 16)  # SECURITY_MANDATORY_LABEL_AUTHORITY
+    sid = PSID()
     if not ADVAPI32.AllocateAndInitializeSid(
-        ctypes.byref(MANDATORY_LABEL_AUTH), 1, SECURITY_MANDATORY_LOW_RID,
-        0, 0, 0, 0, 0, 0, 0, ctypes.byref(sid)
+        ctypes.byref(authority), 1, 0x1000, 0, 0, 0, 0, 0, 0, 0, ctypes.byref(sid)
     ):
-        return
+        return False
     try:
         label = TOKEN_MANDATORY_LABEL()
-        label.Label.Sid = sid.value
-        label.Label.Attributes = SE_GROUP_INTEGRITY
+        label.Label.Sid = sid
+        label.Label.Attributes = 0x20  # SE_GROUP_INTEGRITY
         token = wt.HANDLE()
-        if ADVAPI32.OpenProcessToken(
-            KERNEL32.GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, ctypes.byref(token)
+        if not ADVAPI32.OpenProcessToken(
+            KERNEL32.GetCurrentProcess(), 0x0080, ctypes.byref(token)  # TOKEN_ADJUST_DEFAULT
         ):
-            try:
-                ADVAPI32.GetLengthSid.restype = wt.DWORD
-                size = ctypes.sizeof(TOKEN_MANDATORY_LABEL) + ADVAPI32.GetLengthSid(sid)
-                ADVAPI32.SetTokenInformation(token, TokenIntegrityLevel, ctypes.byref(label), size)
-            finally:
-                KERNEL32.CloseHandle(token)
+            return False
+        try:
+            size = ctypes.sizeof(TOKEN_MANDATORY_LABEL) + ADVAPI32.GetLengthSid(sid)
+            return bool(ADVAPI32.SetTokenInformation(token, 25, ctypes.byref(label), size))
+        finally:
+            KERNEL32.CloseHandle(token)
     finally:
         ADVAPI32.FreeSid(sid)
 
-_set_low_integrity()
-_shell = sys.argv[1] if len(sys.argv) > 1 else "bash"
-_cmd = sys.argv[2] if len(sys.argv) > 2 else ""
-result = subprocess.run([_shell, "-c", _cmd])
+def _lower_or_exit():
+    # Fail closed: nothing that asked for Low integrity runs above it.
+    try:
+        lowered = _lower_integrity_checked()
+    except Exception as exc:
+        sys.stderr.write("aar sandbox: could not lower the integrity level (%s)\\n" % exc)
+        sys.exit(1)
+    if not lowered:
+        sys.stderr.write(
+            "aar sandbox: could not lower the integrity level (error %d)\\n"
+            % ctypes.get_last_error()
+        )
+        sys.exit(1)
+
+_lower_or_exit()
+if len(sys.argv) > 2 and sys.argv[1] == "--exec":
+    # Run an argv directly (no shell). CREATE_NO_WINDOW keeps a console
+    # program from opening a window when the helper itself has no console.
+    # The std handles are passed explicitly: without STARTF_USESTDHANDLES a
+    # child created with its own (hidden) console reads and writes that
+    # console instead of the helper's pipes.
+    _std = {}
+    for _name in ("stdin", "stdout", "stderr"):
+        try:
+            _std[_name] = getattr(sys, _name).fileno()
+        except (AttributeError, OSError, ValueError):
+            pass
+    result = subprocess.run(sys.argv[2:], creationflags=0x08000000, **_std)
+else:
+    # The shell path (the bash tool): <shell> -c <command>, inheriting the
+    # helper's handles and console.
+    _shell = sys.argv[1] if len(sys.argv) > 1 else "bash"
+    _cmd = sys.argv[2] if len(sys.argv) > 2 else ""
+    result = subprocess.run([_shell, "-c", _cmd])
 sys.exit(result.returncode)
 """
+
+
+# Modes whose backend implements ``Sandbox.execute_program`` (host programs).
+PROGRAM_EXEC_MODES = frozenset({"local", "windows"})
+
+
+def resolve_sandbox_mode(mode: str) -> str:
+    """Resolve ``auto`` to the concrete mode ``_create_sandbox`` picks."""
+    if mode != "auto":
+        return mode
+    if os.name == "nt":
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "local"
 
 
 class SandboxResult:
@@ -260,6 +341,50 @@ async def _create_subprocess(
     )
 
 
+async def _create_program_subprocess(
+    argv: Sequence[str],
+    cwd: str,
+    env: dict[str, str] | None,
+    with_stdin: bool,
+    **kwargs: Any,
+) -> asyncio.subprocess.Process:
+    """Start *argv* directly — no shell in between.
+
+    Used by :meth:`Sandbox.execute_program` (the ``powershell`` tool).  stdin
+    is a pipe when the caller has a payload for it and the null device
+    otherwise; it is never inherited, because under ``aar acp`` the parent's
+    stdin is the JSON-RPC stream.  On Windows the child gets
+    ``CREATE_NO_WINDOW`` so a console program launched from a GUI parent (the
+    desktop widget) does not flash a console window.  On POSIX it gets its own
+    session so ``_kill_tree`` can signal the whole group, as for the shell path.
+    """
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    else:
+        kwargs.setdefault("start_new_session", True)
+    return await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.PIPE if with_stdin else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        **kwargs,
+    )
+
+
+def _decode_output(data: bytes | None) -> str:
+    """Decode child output as UTF-8, dropping a leading byte-order mark."""
+    if not data:
+        return ""
+    text = data.decode("utf-8", errors="replace")
+    return text.removeprefix("﻿")
+
+
+def _program_start_error(argv: Sequence[str], exc: OSError) -> SandboxResult:
+    return SandboxResult(stderr=f"Could not start {argv[0]!r}: {exc}", exit_code=1)
+
+
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:
     """Kill *proc* and every process it spawned.
 
@@ -292,8 +417,12 @@ async def _run_with_timeout(
     timeout: int | float | None,
     kill_grace: float = 3.0,
     on_timeout: Any = None,
+    input: bytes | None = None,
 ) -> tuple[bytes, bytes, bool]:
     """Await ``proc.communicate()`` with a hard upper bound.
+
+    *input* is written to the child's stdin (which must be a pipe) and stdin
+    is then closed, so the child sees EOF after the payload.
 
     C2 — The naive ``proc.kill(); await proc.communicate()`` recovery hangs
     forever whenever the command backgrounded a child: ``kill()`` only signals
@@ -306,7 +435,7 @@ async def _run_with_timeout(
     Returns ``(stdout, stderr, timed_out)``.
     """
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(input), timeout=timeout)
         return out, err, False
     except asyncio.TimeoutError:
         _kill_tree(proc)
@@ -352,6 +481,12 @@ class _OnceCloser:
 class Sandbox(ABC):
     """Abstract sandbox backend."""
 
+    #: True when :meth:`execute_program` runs a host program (the
+    #: ``powershell`` tool needs it). Backends whose commands run somewhere
+    #: else — a WSL distro, a Landlock + ulimit shell — leave it False, so the
+    #: tool is not registered rather than escaping the sandbox.
+    supports_program_exec: bool = False
+
     @abstractmethod
     async def execute(
         self,
@@ -360,6 +495,27 @@ class Sandbox(ABC):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
     ) -> SandboxResult: ...
+
+    async def execute_program(
+        self,
+        argv: Sequence[str],
+        timeout: int = 30,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        stdin_data: bytes | None = None,
+    ) -> SandboxResult:
+        """Run *argv* directly (no shell), feeding *stdin_data* to its stdin.
+
+        Same timeout, process-tree kill and environment handling as
+        :meth:`execute`.  The default refuses: see ``supports_program_exec``.
+        """
+        return SandboxResult(
+            stderr=(
+                f"{type(self).__name__} cannot run {argv[0]!r}: this sandbox mode only "
+                "runs shell commands."
+            ),
+            exit_code=1,
+        )
 
     async def close(self) -> None:
         """Clean up sandbox resources."""
@@ -413,8 +569,39 @@ class LocalSandbox(Sandbox):
             exit_code=proc.returncode or 0,
         )
 
-    def _build_env(self, extra: dict[str, str] | None) -> dict[str, str] | None:
-        allowed = self.allowed_env_vars if self.restricted_env else None
+    supports_program_exec = True
+
+    async def execute_program(
+        self,
+        argv: Sequence[str],
+        timeout: int = 30,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        stdin_data: bytes | None = None,
+    ) -> SandboxResult:
+        work_dir = cwd or self.default_cwd
+        proc_env = self._build_env(env, PROGRAM_ENV_VARS)
+        try:
+            proc = await _create_program_subprocess(
+                argv, work_dir, proc_env, with_stdin=stdin_data is not None
+            )
+        except OSError as exc:
+            return _program_start_error(argv, exc)
+        stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(
+            proc, timeout, input=stdin_data
+        )
+        if timed_out:
+            return SandboxResult(timed_out=True, exit_code=-1)
+        return SandboxResult(
+            stdout=_decode_output(stdout_bytes),
+            stderr=_decode_output(stderr_bytes),
+            exit_code=proc.returncode or 0,
+        )
+
+    def _build_env(
+        self, extra: dict[str, str] | None, extra_allowed: Sequence[str] = ()
+    ) -> dict[str, str] | None:
+        allowed = [*self.allowed_env_vars, *extra_allowed] if self.restricted_env else None
         base = _select_env(allowed, self.env_denylist_patterns, extra)
         if self.restricted_env:
             # HOME is named differently on Windows; keep the POSIX name populated.
@@ -713,8 +900,11 @@ class WindowsSubprocessSandbox(Sandbox):
     # Environment builder
     # ------------------------------------------------------------------
 
-    def _build_env(self, extra: dict[str, str] | None) -> dict[str, str]:
-        return _select_env(self.allowed_env_vars, self.env_denylist_patterns, extra)
+    def _build_env(
+        self, extra: dict[str, str] | None, extra_allowed: Sequence[str] = ()
+    ) -> dict[str, str]:
+        allowed = [*self.allowed_env_vars, *extra_allowed]
+        return _select_env(allowed, self.env_denylist_patterns, extra)
 
     # ------------------------------------------------------------------
     # Job Object helpers (ctypes kernel32)
@@ -885,7 +1075,12 @@ class WindowsSubprocessSandbox(Sandbox):
         work_dir: str,
         proc_env: dict[str, str],
     ) -> SandboxResult | None:
-        """Run command via the Low Integrity helper. Returns None if unavailable."""
+        """Run command via the Low Integrity helper.
+
+        Returns None only if the helper cannot be started.  A helper that
+        starts but cannot lower its token exits 1 without running *command*;
+        that comes back as a failed result, never as a Job-Object-only rerun.
+        """
         try:
             helper = self._get_helper_path()
             proc = await asyncio.create_subprocess_exec(
@@ -917,6 +1112,69 @@ class WindowsSubprocessSandbox(Sandbox):
         except Exception as exc:
             logger.warning("WindowsSubprocessSandbox: low integrity helper failed: %s", exc)
             return None
+
+    supports_program_exec = True
+
+    async def execute_program(
+        self,
+        argv: Sequence[str],
+        timeout: int = 30,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        stdin_data: bytes | None = None,
+    ) -> SandboxResult:
+        """Run *argv* inside the Job Object, at Low integrity when enabled.
+
+        The Low-integrity path goes through the same helper script as
+        :meth:`execute` (``helper --exec <argv…>``); stdin flows through the
+        helper to the program.  If the helper cannot be started the program
+        runs under the Job Object alone, as :meth:`execute` does.
+        """
+        work_dir = cwd or self.workspace
+        proc_env = self._build_env(env, PROGRAM_ENV_VARS)
+        self._stamp_workspace_integrity()
+        with_stdin = stdin_data is not None
+
+        proc: asyncio.subprocess.Process | None = None
+        if self.use_low_integrity:
+            try:
+                helper = self._get_helper_path()
+                proc = await _create_program_subprocess(
+                    [sys.executable, helper, "--exec", *argv],
+                    work_dir,
+                    proc_env,
+                    with_stdin=with_stdin,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "WindowsSubprocessSandbox: Low Integrity execution unavailable (%s); "
+                    "falling back to Job Object only",
+                    exc,
+                )
+        if proc is None:
+            try:
+                proc = await _create_program_subprocess(
+                    argv, work_dir, proc_env, with_stdin=with_stdin
+                )
+            except OSError as exc:
+                return _program_start_error(argv, exc)
+
+        job = self._assign_job_object(proc.pid)
+        closer = _OnceCloser(lambda: self._close_job(job) if job is not None else None)
+        try:
+            stdout_bytes, stderr_bytes, timed_out = await _run_with_timeout(
+                proc, timeout, on_timeout=closer, input=stdin_data
+            )
+            if timed_out:
+                return SandboxResult(timed_out=True, exit_code=-1)
+        finally:
+            closer()
+
+        return SandboxResult(
+            stdout=_decode_output(stdout_bytes),
+            stderr=_decode_output(stderr_bytes),
+            exit_code=proc.returncode or 0,
+        )
 
     async def close(self) -> None:
         """Clean up the helper script if present."""

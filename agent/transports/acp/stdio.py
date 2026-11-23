@@ -25,6 +25,7 @@ from agent.core.events import (
     ToolResult,
     UserMessage,
 )
+from agent.core.multimodal import split_data_uri
 from agent.core.session import Session
 from agent.core.state import AgentState
 from agent.extensions.api import tool_result_notes
@@ -40,7 +41,7 @@ from .common import (
     _build_mode_state,
     _build_tool_result_content,
     _extract_locations,
-    _extract_text,
+    _prompt_content,
     _load_default_config,
     _map_stop_reason,
     _OLLAMA_REASONING_EFFORTS,
@@ -247,7 +248,7 @@ class AarAcpAgent:
             agent_capabilities=AgentCapabilities(
                 load_session=True,
                 mcp_capabilities=McpCapabilities(http=True, sse=False),
-                prompt_capabilities=PromptCapabilities(embedded_context=True),
+                prompt_capabilities=PromptCapabilities(embedded_context=True, image=True),
                 session_capabilities=SessionCapabilities(**session_caps_kwargs),
             ),
             agent_info=Implementation(name="aar", title="Aar Agent", version="0.4.0"),
@@ -849,6 +850,7 @@ class AarAcpAgent:
             AgentThoughtChunk,
             ContentToolCallContent,
             Cost,
+            ImageContentBlock,
             SessionInfoUpdate,
             TextContentBlock,
             ToolCallLocation,
@@ -858,7 +860,11 @@ class AarAcpAgent:
         )
 
         validate_session_id(session_id)
-        text = _extract_text(prompt)
+        # Images in the prompt go to the model (vision); text alone stays a str.
+        cfg_for_images = self._session_configs.get(session_id, self._config)
+        text, user_content, image_problems = _prompt_content(
+            prompt, max_image_bytes=cfg_for_images.tools.max_image_bytes
+        )
 
         message_id: str | None = kwargs.get("message_id")
         _resp_extra: dict[str, Any] = {}
@@ -927,6 +933,12 @@ class AarAcpAgent:
                 update_tasks.append(task)
 
         _tc_args: dict[str, dict[str, Any]] = {}
+        if image_problems:
+            _push(
+                update_agent_message(
+                    text_block("Image not sent to the model: " + "; ".join(image_problems))
+                )
+            )
 
         def on_event(event: Event) -> None:
             nonlocal streamed_chunks, title_sent, _ctx_window_size
@@ -1008,6 +1020,18 @@ class AarAcpAgent:
                             type="content", content=TextContentBlock(type="text", text=_note)
                         )
                     )
+                # Tool-returned images (e.g. an MCP screenshot) as ACP image blocks.
+                for _img in event.images:
+                    _parsed = split_data_uri(_img.image_url.url)
+                    if _parsed:
+                        _content.append(
+                            ContentToolCallContent(
+                                type="content",
+                                content=ImageContentBlock(
+                                    type="image", mime_type=_parsed[0], data=_parsed[1]
+                                ),
+                            )
+                        )
                 _push(
                     ToolCallProgress(
                         title=event.tool_name,
@@ -1106,7 +1130,7 @@ class AarAcpAgent:
         aar_agent = self._make_aar_agent(session_id=session_id, approval_callback=_approval_cb)
         aar_agent.on_event(on_event)
 
-        run_task = asyncio.create_task(aar_agent.run(text, session, cancel_event=cancel_event))
+        run_task = asyncio.create_task(aar_agent.run(user_content, session, cancel_event=cancel_event))
         self._run_tasks[session_id] = run_task
 
         try:
@@ -1381,23 +1405,20 @@ class AarAcpAgent:
             try:
                 from agent.tools.builtin.filesystem import register_filesystem_tools
                 from agent.tools.builtin.search import register_search_tools
-                from agent.tools.builtin.shell import register_shell_tools
+                from agent.tools.builtin.shell import register_configured_shell_tools
                 from agent.tools.registry import ToolRegistry as TR
 
                 tmp_reg = TR()
                 enabled = set(cfg.tools.enabled_builtins)
                 if enabled & {"read_file", "write_file", "edit_file", "list_directory"}:
                     register_filesystem_tools(tmp_reg)
-                if "bash" in enabled:
-                    register_shell_tools(
-                        tmp_reg,
-                        default_timeout=cfg.tools.bash_default_timeout,
-                        hard_cap=cfg.tools.command_timeout,
-                    )
+                shell_registered = register_configured_shell_tools(
+                    tmp_reg, cfg.tools, cfg.safety.sandbox.mode
+                )
                 if enabled & {"grep", "find_files"}:
                     register_search_tools(tmp_reg)
                 for name in list(tmp_reg.names()):
-                    if name not in enabled:
+                    if name not in enabled and name not in shell_registered:
                         tmp_reg.unregister(name)
                 # Merge — skip any built-in whose name already exists in MCP registry
                 for t in tmp_reg.list_tools():
@@ -1481,7 +1502,9 @@ class AarAcpAgent:
             if not configs:
                 return
 
-            bridge = MCPBridge(configs)
+            # One broken server (e.g. a user-added one) must not take the
+            # others down: skip it and tell the user which one failed.
+            bridge = MCPBridge(configs, skip_failed=True)
             await bridge.__aenter__()
             count = await bridge.register_all(registry)
             self._mcp_bridges[session_id] = bridge
@@ -1489,14 +1512,21 @@ class AarAcpAgent:
             logger.info(
                 "ACP: registered %d MCP tool(s) from %d server(s) for session %s",
                 count,
-                len(configs),
+                len(configs) - len({name for name, _ in bridge.failures}),
                 session_id,
             )
+            if bridge.failures:
+                self._notify_mcp_failure(
+                    session_id,
+                    "; ".join(
+                        f"MCP server '{name}' unavailable ({why})" for name, why in bridge.failures
+                    ),
+                )
         except Exception as exc:
             logger.error("ACP: MCP setup failed for session %s: %s", session_id, exc, exc_info=True)
-            self._notify_mcp_failure(session_id, exc)
+            self._notify_mcp_failure(session_id, f"MCP setup failed for this session: {exc}")
 
-    def _notify_mcp_failure(self, session_id: str, exc: BaseException) -> None:
+    def _notify_mcp_failure(self, session_id: str, msg: str) -> None:
         """Push a visible error to the client so the user sees MCP setup failed."""
         if self._conn is None:
             return
@@ -1504,7 +1534,6 @@ class AarAcpAgent:
             from acp import text_block, update_agent_message
         except ImportError:
             return
-        msg = f"MCP setup failed for this session: {exc}"
         self._spawn(
             self._conn.session_update(
                 session_id=session_id,

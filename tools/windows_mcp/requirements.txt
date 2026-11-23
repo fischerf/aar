@@ -1,0 +1,2 @@
+mcp>=1.28.1,<2.0
+uiautomation>=2.0.20; sys_platform == "win32"

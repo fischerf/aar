@@ -62,6 +62,7 @@ import httpx
 
 from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
+from agent.core.multimodal import tool_images_followup_message
 from agent.providers.base import Provider, ProviderResponse, StreamDelta
 from agent.providers.errors import translate_provider_errors
 
@@ -527,6 +528,11 @@ def _build_messages(
                                 "content": tr.get("content", ""),
                             }
                         )
+                    # Tool messages cannot carry images: send them in a user
+                    # message right after the turn's tool messages.
+                    followup = tool_images_followup_message(tool_results)
+                    if followup:
+                        api_messages.append(followup)
                 else:
                     # Build an OpenAI-compatible content array, preserving
                     # image_url blocks alongside text blocks.

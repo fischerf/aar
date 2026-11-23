@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +34,13 @@ from agent.safety.sandbox import (
 from agent.tools.execution import ToolExecutor
 from agent.tools.registry import ToolRegistry
 from agent.tools.schema import SideEffect, ToolSpec
+
+# LocalSandbox / WindowsSubprocessSandbox run commands through bash; a Windows
+# PC without WSL or Git Bash (e.g. Windows Sandbox) has none.
+needs_bash = pytest.mark.skipif(
+    sys.platform == "win32" and shutil.which("bash") is None,
+    reason="needs bash (not installed on this Windows)",
+)
 
 # ===========================================================================
 # Policy tests
@@ -1206,6 +1216,7 @@ class TestS2AutoApprovePattern:
 class TestLocalSandbox:
     """12.3: timeouts respected."""
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_simple(self):
         sb = LocalSandbox()
@@ -1214,12 +1225,14 @@ class TestLocalSandbox:
         assert result.exit_code == 0
         assert not result.timed_out
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_with_exit_code(self):
         sb = LocalSandbox()
         result = await sb.execute("exit 42")
         assert result.exit_code == 42
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_timeout(self):
         sb = LocalSandbox()
@@ -1227,12 +1240,14 @@ class TestLocalSandbox:
         assert result.timed_out
         assert result.exit_code == -1
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_stderr(self):
         sb = LocalSandbox()
         result = await sb.execute("echo error >&2")
         assert "error" in result.stderr
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_output_property(self):
         sb = LocalSandbox()
@@ -1242,6 +1257,7 @@ class TestLocalSandbox:
         assert "STDERR" in output
         assert "Exit code: 1" in output
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_no_output(self):
         sb = LocalSandbox()
@@ -1290,11 +1306,29 @@ class TestLinuxSandbox:
         fn = sb._make_landlock_preexec(str(tmp_path))
         assert callable(fn)
 
-    def test_make_landlock_preexec_does_not_raise_called_directly(self, tmp_path):
-        """The preexec closure must never raise — it silently falls back."""
+    @pytest.mark.skipif(os.name == "nt", reason="preexec_fn is POSIX-only")
+    def test_make_landlock_preexec_does_not_raise_in_child(self, tmp_path):
+        """The preexec closure must never raise, even with a bad workspace path.
+
+        It runs where the product runs it: in the forked child, as
+        ``preexec_fn``.  Called in the pytest process it would Landlock pytest
+        itself (read + execute only, no writes anywhere) and every later test
+        needing a temp dir would error.
+        """
         sb = LinuxSandbox(workspace=str(tmp_path))
         fn = sb._make_landlock_preexec("/nonexistent_workspace_xyz")
-        fn()  # Should not raise even with a bad workspace path
+        probe = tmp_path / "probe.txt"
+        # A raising preexec_fn would surface here as SubprocessError.
+        result = subprocess.run(
+            ["sh", "-c", f"echo x > '{probe}'"], preexec_fn=fn, capture_output=True
+        )
+        if sb._check_landlock():
+            # No workspace rule could be added: the child may write nowhere.
+            assert result.returncode != 0
+            assert not probe.exists()
+        # The test process itself is not restricted.
+        (tmp_path / "parent.txt").write_text("ok")
+        tempfile.TemporaryDirectory().cleanup()
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(os.name == "nt", reason="LinuxSandbox is Linux-specific")
@@ -1336,7 +1370,7 @@ class TestLinuxSandbox:
         with caplog.at_level(logging.WARNING, logger="agent.safety.sandbox"):
             result = await sb.execute("echo fallback_ok")
 
-        assert "fallback" in caplog.text.lower()
+        assert "falling back" in caplog.text.lower()
         assert "fallback_ok" in result.stdout
 
 
@@ -1403,6 +1437,7 @@ class TestWindowsSubprocessSandbox:
         sb._stamp_workspace_integrity()  # second call is a no-op
         assert sb._workspace_stamped is True
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_simple_no_low_integrity(self, tmp_path):
         """With use_low_integrity=False, execution goes through _execute_with_job_object."""
@@ -1414,12 +1449,14 @@ class TestWindowsSubprocessSandbox:
         assert "windows_ok" in result.stdout
         assert result.exit_code == 0
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_timeout_no_low_integrity(self, tmp_path):
         sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=False)
         result = await sb.execute("sleep 60", timeout=1)
         assert result.timed_out
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_execute_low_integrity_falls_back_on_failure(self, tmp_path, monkeypatch):
         """When the helper script fails, fallback to plain subprocess."""
@@ -1455,6 +1492,231 @@ class TestWindowsSubprocessSandbox:
         if handle is not None:
             sb._close_job(handle)
         assert handle is not None
+
+
+class TestWindowsIntegrityHelper:
+    """The Low-integrity helper fails closed on both of its paths.
+
+    Off Windows the lowering itself cannot succeed, which makes it a
+    deterministic check that the command never runs when lowering fails.
+    """
+
+    def test_helper_has_only_the_typed_lowering(self):
+        from agent.safety.sandbox import _WINDOWS_INTEGRITY_HELPER as src
+
+        # The untyped variant never lowered anything (bash in windows mode).
+        assert "_set_low_integrity" not in src
+        assert src.count("def _lower_integrity_checked") == 1
+        # Lowered once, before either the --exec or the shell path.
+        assert src.index("\n_lower_or_exit()\n") < src.index('sys.argv[1] == "--exec"')
+
+    @pytest.mark.skipif(os.name == "nt", reason="lowering succeeds on Windows; see live tests")
+    @pytest.mark.parametrize("exec_path", [False, True], ids=["shell", "exec"])
+    def test_command_does_not_run_when_lowering_fails(self, tmp_path, exec_path):
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path))
+        marker = tmp_path / "ran.txt"
+        script = f"open({str(marker)!r}, 'w').write('x')"
+        args = ["--exec", sys.executable, "-c", script] if exec_path else [sys.executable, script]
+        try:
+            r = subprocess.run(
+                [sys.executable, sb._get_helper_path(), *args],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            asyncio.run(sb.close())
+        assert r.returncode == 1
+        assert "could not lower the integrity level" in r.stderr
+        assert not marker.exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="lowering succeeds on Windows; see live tests")
+    async def test_execute_fails_closed_instead_of_falling_back(self, tmp_path):
+        """A helper that cannot lower is a failed command, not a Job-Object-only run."""
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path), use_low_integrity=True)
+        try:
+            result = await sb.execute("echo should_not_run > ran.txt", timeout=60)
+        finally:
+            await sb.close()
+        assert result.exit_code == 1
+        assert "could not lower the integrity level" in result.stderr
+        assert "should_not_run" not in result.stdout
+        assert not (tmp_path / "ran.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# Real Windows — Windows Sandbox (AAR_SANDBOX=1) or --live only
+# ---------------------------------------------------------------------------
+
+# Windows Sandbox has neither WSL nor Git; there these tests fetch Git for
+# Windows' PortableGit (MinGit has no bash.exe) once per session and use the
+# MSYS2 bash from its usr\bin.
+_PORTABLE_GIT_URL = (
+    "https://github.com/git-for-windows/git/releases/download/"
+    "v2.56.1.windows.1/PortableGit-2.56.1-64-bit.7z.exe"
+)
+_PORTABLE_GIT_SHA256 = "9dd04a608ceb5f6ab32a73709e0ecb159d211da71b697c45ff81f6dd0c6b49c7"
+
+
+@pytest.fixture
+def windows_live(request):
+    if os.name != "nt":
+        pytest.skip("Windows only")
+    if os.environ.get("AAR_SANDBOX") != "1" and not request.config.getoption("--live"):
+        pytest.skip("changes integrity labels: set AAR_SANDBOX=1 (Windows Sandbox) or pass --live")
+
+
+def _download(url: str, dest) -> None:
+    import ssl
+    import urllib.request
+
+    # A fresh Windows Sandbox has an empty root store; use certifi's bundle.
+    try:
+        import certifi
+
+        cafile = certifi.where()
+    except ImportError:  # pragma: no cover - pip always vendors it
+        from pip._vendor import certifi as _certifi
+
+        cafile = _certifi.where()
+    ctx = ssl.create_default_context(cafile=cafile)
+    with urllib.request.urlopen(url, context=ctx, timeout=300) as resp, open(dest, "wb") as f:
+        while chunk := resp.read(1 << 20):
+            f.write(chunk)
+
+
+@pytest.fixture(scope="session")
+def _bash_bin_dir(tmp_path_factory):
+    """Directory holding a bash.exe for the windows-mode bash path, or None."""
+    import hashlib
+    import shutil
+
+    if os.name != "nt":
+        return None
+    found = shutil.which("bash")
+    if found:
+        return os.path.dirname(found)
+    if os.environ.get("AAR_SANDBOX") != "1":
+        return None
+    # Only inside the disposable Windows Sandbox: download and unpack Git.
+    root = tmp_path_factory.mktemp("portablegit")
+    archive = root / "PortableGit.7z.exe"
+    try:
+        _download(_PORTABLE_GIT_URL, archive)
+    except OSError as exc:
+        pytest.skip(f"could not download PortableGit for a bash.exe: {exc}")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert digest == _PORTABLE_GIT_SHA256, f"PortableGit checksum mismatch: {digest}"
+    target = root / "git"
+    subprocess.run([str(archive), f"-o{target}", "-y"], check=True, timeout=900)
+    bin_dir = target / "usr" / "bin"
+    assert (bin_dir / "bash.exe").is_file(), "PortableGit has no usr/bin/bash.exe"
+    return str(bin_dir)
+
+
+@pytest.fixture
+def git_bash(_bash_bin_dir, monkeypatch):
+    if _bash_bin_dir is None:
+        pytest.skip("no bash.exe on this Windows")
+    monkeypatch.setenv("PATH", _bash_bin_dir + os.pathsep + os.environ.get("PATH", ""))
+    return _bash_bin_dir
+
+
+def _integrity_rid(groups_csv: str) -> str | None:
+    for sid in ("S-1-16-4096", "S-1-16-8192", "S-1-16-12288", "S-1-16-16384"):
+        if f'"{sid}"' in groups_csv:
+            return sid
+    return None
+
+
+def _fwd(path) -> str:
+    return str(path).replace("\\", "/")
+
+
+@pytest.mark.usefixtures("windows_live")
+class TestWindowsLowIntegrityLive:
+    """WindowsSubprocessSandbox really runs the shell at Low integrity."""
+
+    @pytest.fixture
+    def outside(self):
+        path = Path(os.environ["USERPROFILE"]) / f"aar-lowil-bash-probe-{os.getpid()}.txt"
+        yield path
+        if path.exists():
+            path.unlink()
+
+    def test_shell_path_lowers_integrity(self, tmp_path, outside):
+        """The helper's ``<shell> -c <command>`` path (bash's) with python as the shell.
+
+        Needs no bash: it proves the helper branch the bash tool uses.
+        """
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path))
+        sb._stamp_workspace_integrity()
+        code = (
+            "import subprocess\n"
+            "print(subprocess.run(['whoami', '/groups', '/fo', 'csv'],"
+            " capture_output=True, text=True).stdout)\n"
+            f"try:\n    open({str(outside)!r}, 'w').write('x')\nexcept OSError:\n    pass\n"
+            "open('inside.txt', 'w').write('x')\n"
+        )
+        try:
+            r = subprocess.run(
+                [sys.executable, sb._get_helper_path(), sys.executable, code],
+                cwd=str(tmp_path),
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=120,
+            )
+        finally:
+            asyncio.run(sb.close())
+        assert r.returncode == 0, r.stderr
+        assert _integrity_rid(r.stdout) == "S-1-16-4096"
+        assert not outside.exists(), "Low integrity must block writes to %USERPROFILE%"
+        assert (tmp_path / "inside.txt").is_file()
+
+    async def test_bash_runs_at_low_integrity(self, tmp_path, outside, git_bash):
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path))
+        try:
+            # Windows' whoami.exe, not MSYS coreutils' whoami from the same PATH.
+            whoami = _fwd(Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe")
+            groups = await sb.execute(f"MSYS_NO_PATHCONV=1 '{whoami}' /groups /fo csv", timeout=60)
+            assert groups.exit_code == 0, groups.output
+            assert _integrity_rid(groups.stdout) == "S-1-16-4096", groups.output
+
+            r = await sb.execute(f"echo x > '{_fwd(outside)}'", timeout=60)
+            assert r.exit_code != 0
+            assert not outside.exists(), "Low integrity must block writes to %USERPROFILE%"
+
+            # Builtins only, so any bash.exe will do.
+            r = await sb.execute(
+                'echo drinnen > inside.txt && read -r line < inside.txt && echo "$line"; exit 3',
+                timeout=60,
+            )
+            assert r.stdout == "drinnen\n"
+            assert r.exit_code == 3
+            assert (tmp_path / "inside.txt").read_text().strip() == "drinnen"
+        finally:
+            await sb.close()
+
+    async def test_bash_timeout_kills_tree(self, tmp_path, git_bash):
+        sb = WindowsSubprocessSandbox(workspace=str(tmp_path))
+        py = _fwd(sys.executable)
+        late = "import time; time.sleep(6); open(r'{}', 'w').write('late')"
+        background, child = tmp_path / "background.txt", tmp_path / "child.txt"
+        command = (
+            "export MSYS_NO_PATHCONV=1; "
+            f'"{py}" -c "{late.format(background)}" & "{py}" -c "{late.format(child)}"'
+        )
+        try:
+            started = time.monotonic()
+            r = await sb.execute(command, timeout=2)
+            assert r.timed_out
+            assert time.monotonic() - started < 20
+            await asyncio.sleep(9)
+            assert not child.exists(), "child survived the timeout"
+            assert not background.exists(), "background child survived the timeout"
+        finally:
+            await sb.close()
 
 
 # ===========================================================================
@@ -1598,6 +1860,7 @@ class TestC2TimeoutProcessTree:
     """C2: ``proc.kill(); await proc.communicate()`` hangs forever when the
     command backgrounded a child that still holds the output pipe."""
 
+    @needs_bash
     @pytest.mark.asyncio
     async def test_timeout_returns_despite_background_child(self):
         """The classic hang: a backgrounded grandchild inherits stdout."""

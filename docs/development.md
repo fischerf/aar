@@ -109,9 +109,12 @@ Text-only callers are completely unchanged — passing a plain string still work
 | Anthropic | always | — | claude-3+ models; HTTP URLs and base-64 data URIs |
 | OpenAI | auto-detected | — | gpt-4o, gpt-4-vision, o1 and newer |
 | Ollama | default on | **not yet** | Vision works; audio not yet exposed in Ollama's API (as of v0.20) |
+| Gemini | always | — | base-64 data URIs only (sent as `inlineData`) |
 | Generic | auto-detected | — | Any OpenAI-compatible endpoint |
 
-For Ollama, vision defaults to `True`:
+For Ollama, vision defaults to `True`, so set it to `False` for a text-only
+model — otherwise it is also sent images that tools return (an MCP
+`screenshot`, see [MCP images](mcp.md#images)):
 
 ```python
 ProviderConfig(
@@ -120,6 +123,16 @@ ProviderConfig(
     extra={"supports_vision": True},   # default True; set False to opt out
 )
 ```
+
+### Images from tools
+
+A tool can return images next to its text: return
+`agent.tools.schema.ToolOutput(text=..., images=[...])` (the MCP bridge does
+this for `ImageContent`). They land on `ToolResult.images` and reach the model
+only when `provider.supports_vision` is true; otherwise the model gets the
+text, which should name each image, plus a "not shown" note. Placement per
+provider, size limit and history pruning (`tools.keep_recent_images`,
+`tools.max_image_bytes`) are described in [MCP images](mcp.md#images).
 
 > **Audio note:** Gemma 4 supports audio at the model level, but Ollama's `/api/chat` endpoint does not accept audio data as of v0.20. Audio blocks attached via `@file` will be **dropped with a warning**. The framework `AudioBlock` type is kept so pipelines are ready when Ollama adds audio support.
 
