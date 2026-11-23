@@ -5,8 +5,9 @@ import importlib
 import importlib.metadata
 import importlib.util
 import logging
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,24 @@ TrustPrompt = Callable[[Path, "list[ExtensionInfo]"], str]
 
 _DEFAULT_USER_DIR = Path.home() / ".aar" / "extensions"
 _DEFAULT_PROJECT_DIR = Path(".agent") / "extensions"
+
+#: Comma-separated extension names that must not be loaded (adds to the
+#: ``disabled_extensions`` config key). Used by front-ends such as Aar Desktop
+#: to switch installed extensions off without uninstalling them.
+DISABLED_ENV_VAR = "AAR_DISABLED_EXTENSIONS"
+
+
+def normalize_extension_name(name: str) -> str:
+    """``Permission-Gate`` / ``permission_gate`` → ``permission_gate``."""
+    return name.strip().lower().replace("-", "_")
+
+
+def disabled_extension_names(configured: Iterable[str] | None = None) -> set[str]:
+    """Normalised names from *configured* plus ``$AAR_DISABLED_EXTENSIONS``."""
+    names = {normalize_extension_name(n) for n in (configured or ()) if n and n.strip()}
+    env = os.environ.get(DISABLED_ENV_VAR, "")
+    names.update(normalize_extension_name(n) for n in env.split(",") if n.strip())
+    return names
 
 
 @dataclass
@@ -42,6 +61,7 @@ def discover_extensions(
     project_dir: Path | None = None,
     trust_prompt: TrustPrompt | None = None,
     force_trust: bool = False,
+    disabled: Iterable[str] | None = None,
 ) -> list[ExtensionInfo]:
     """Discover extensions from all three tiers.
 
@@ -55,13 +75,17 @@ def discover_extensions(
             project's extensions are skipped.
         force_trust: Bypass the prompt entirely (``--trust-project-extensions``
             or ``$AAR_TRUST_PROJECT_EXTENSIONS``).
+        disabled: Extension names to skip in every tier (``disabled_extensions``
+            config key); ``$AAR_DISABLED_EXTENSIONS`` is always honoured.
     """
     user_dir = user_dir if user_dir is not None else _DEFAULT_USER_DIR
     project_dir = project_dir if project_dir is not None else _DEFAULT_PROJECT_DIR
 
-    entrypoint_exts = _discover_entrypoints()
-    user_exts = _discover_directory(user_dir, "user")
-    project_exts = _discover_directory(project_dir, "project")
+    off = disabled_extension_names(disabled)
+    entrypoint_exts = _without_disabled(_discover_entrypoints(), off)
+    user_exts = _without_disabled(_discover_directory(user_dir, "user"), off)
+    # Filtered before the trust gate: a disabled project extension never prompts.
+    project_exts = _without_disabled(_discover_directory(project_dir, "project"), off)
     project_exts = _gate_project_extensions(
         project_dir, project_exts, trust_prompt=trust_prompt, force_trust=force_trust
     )
@@ -97,6 +121,18 @@ def discover_extensions(
         [f"{e.name} ({e.source})" for e in result],
     )
     return result
+
+
+def _without_disabled(infos: list[ExtensionInfo], off: set[str]) -> list[ExtensionInfo]:
+    if not off:
+        return infos
+    kept = []
+    for info in infos:
+        if normalize_extension_name(info.name) in off:
+            logger.info("Extension %r (%s) is disabled", info.name, info.source)
+        else:
+            kept.append(info)
+    return kept
 
 
 def _gate_project_extensions(
@@ -270,6 +306,7 @@ async def load_all_extensions(
     project_dir: Path | None = None,
     trust_prompt: TrustPrompt | None = None,
     force_trust: bool = False,
+    disabled: Iterable[str] | None = None,
 ) -> list[ExtensionInfo]:
     """Discover and load all extensions, returning info with populated ``.api`` or ``.error``."""
     infos = discover_extensions(
@@ -277,6 +314,7 @@ async def load_all_extensions(
         project_dir=project_dir,
         trust_prompt=trust_prompt,
         force_trust=force_trust,
+        disabled=disabled,
     )
 
     for info in infos:

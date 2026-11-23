@@ -209,6 +209,49 @@ class TestDiscoverExtensions:
 
         assert any(i.name == "ep_ext" and i.source == "entrypoint" for i in infos)
 
+    def test_disabled_extensions_are_skipped(self, tmp_path: Path, monkeypatch) -> None:
+        mock_ep = MagicMock()
+        mock_ep.name = "permission_gate"
+        mock_ep.value = "aar_ext_permission_gate:register"
+        user_dir = tmp_path / "user"
+        user_dir.mkdir()
+        (user_dir / "alpha.py").write_text("def register(api): pass")
+        (user_dir / "beta.py").write_text("def register(api): pass")
+        monkeypatch.setenv("AAR_DISABLED_EXTENSIONS", " Beta ,")
+
+        with patch(
+            "agent.extensions.loader.importlib.metadata.entry_points", return_value=[mock_ep]
+        ):
+            infos = discover_extensions(
+                user_dir=user_dir, project_dir=tmp_path / "p", disabled=["Permission-Gate"]
+            )
+        assert [i.name for i in infos] == ["alpha"]
+
+    def test_disabled_project_extension_does_not_prompt(self, tmp_path: Path) -> None:
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        (proj_dir / "ext.py").write_text("# proj")
+        prompt = MagicMock(return_value="yes")
+
+        with patch("agent.extensions.loader.importlib.metadata.entry_points", return_value=[]):
+            infos = discover_extensions(
+                user_dir=tmp_path / "u", project_dir=proj_dir, trust_prompt=prompt, disabled=["ext"]
+            )
+        assert infos == []
+        prompt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_manager_honours_config(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        user_dir.mkdir()
+        (user_dir / "alpha.py").write_text("def register(api): pass")
+        config = MagicMock()
+        config.disabled_extensions = ["alpha"]
+        mgr = ExtensionManager()
+        with patch("agent.extensions.loader.importlib.metadata.entry_points", return_value=[]):
+            await mgr.initialize(MagicMock(), config, user_dir=user_dir, project_dir=tmp_path / "p")
+        assert mgr.loaded_extensions == []
+
 
 # ---------------------------------------------------------------------------
 # 5. Loader — load_extension

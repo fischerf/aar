@@ -74,6 +74,7 @@ config = AgentConfig(
         truncate_max_chars=500,                    # cap on truncated output length
     ),
     trust_project_extensions=False,                # True executes .agent/extensions/*.py from the CWD without prompting
+    disabled_extensions=[],                        # installed extensions not to load (also $AAR_DISABLED_EXTENSIONS)
     skills_dirs=[],                                # extra directories searched for skill bundles
     skills_enabled=True,                           # set False to disable skill auto-discovery (see docs/development.md)
     max_steps=50,

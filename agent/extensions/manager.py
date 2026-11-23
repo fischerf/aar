@@ -54,6 +54,7 @@ class ExtensionManager:
             project_dir=project_dir,
             trust_prompt=trust_prompt,
             force_trust=force_trust,
+            disabled=getattr(config, "disabled_extensions", None),
         )
         logger.info("Discovered %d extension(s)", len(infos))
 
