@@ -10,6 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 import struct
+import unicodedata
 import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -35,7 +36,8 @@ class WindowInfo:
 
     def line(self) -> str:
         flag = " [minimized]" if self.minimized else ""
-        return f'{self.handle}  {self.process or "?"}  pid={self.pid}  "{self.title}"{flag}'
+        title = _INVISIBLE.sub("", self.title)  # what a model can copy back
+        return f'{self.handle}  {self.process or "?"}  pid={self.pid}  "{title}"{flag}'
 
 
 def parse_handle(text: str) -> int | None:
@@ -56,6 +58,19 @@ def _process_stem(name: str) -> str:
     return name.removesuffix(".exe")
 
 
+# Invisible format characters some apps put into titles (Edge: "Microsoft​ Edge");
+# a model copying the title drops them, so they must not matter for matching.
+_INVISIBLE = re.compile("[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+_DASHES = re.compile("[\u2010-\u2015\u2212]")
+
+
+def title_key(title: str) -> str:
+    """Comparable form of a window title: no invisible characters, one kind of dash,
+    single spaces, case-folded."""
+    s = unicodedata.normalize("NFKC", _INVISIBLE.sub("", title))
+    return " ".join(_DASHES.sub("-", s).split()).casefold()
+
+
 def find_window(windows: list[WindowInfo], query: str) -> WindowInfo:
     """Resolve *query* (handle, title substring or process name) to one window.
 
@@ -69,12 +84,12 @@ def find_window(windows: list[WindowInfo], query: str) -> WindowInfo:
                 return w
         raise WinMcpError(f"No visible window with handle {handle}. Call list_windows.")
 
-    q = str(query).strip().lower()
+    q = title_key(str(query))
     if not q:
         raise WinMcpError("Window must be a handle or part of a window title.")
     stages = (
-        [w for w in windows if w.title.lower() == q],
-        [w for w in windows if q in w.title.lower()],
+        [w for w in windows if title_key(w.title) == q],
+        [w for w in windows if q in title_key(w.title)],
         [w for w in windows if w.process and _process_stem(w.process) == _process_stem(q)],
     )
     for matches in stages:
