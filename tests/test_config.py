@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -120,6 +121,67 @@ class TestBuildSystemPrompt:
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "fakehome"))
         prompt = build_system_prompt()
         assert "Operating system:" in prompt
+
+
+# ---------------------------------------------------------------------------
+# build_system_prompt — rules from an embedding app (AAR_EXTRA_RULES,
+# AAR_NO_GLOBAL_RULES)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPromptAppRules:
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".aar" / "rules.d").mkdir(parents=True)
+        (fake_home / ".aar" / "rules.md").write_text("global coding rule", encoding="utf-8")
+        (fake_home / ".aar" / "rules.d" / "x.md").write_text("global drop-in", encoding="utf-8")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        monkeypatch.delenv("AAR_EXTRA_RULES", raising=False)
+        monkeypatch.delenv("AAR_NO_GLOBAL_RULES", raising=False)
+
+    def test_extra_rules_between_global_and_project(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        (tmp_path / ".agent").mkdir()
+        (tmp_path / ".agent" / "rules.md").write_text("project rule", encoding="utf-8")
+        a, b = tmp_path / "app.md", tmp_path / "user.md"
+        a.write_text("app rule\n", encoding="utf-8")
+        b.write_text("user addition", encoding="utf-8")
+        missing = tmp_path / "missing.md"
+        monkeypatch.setenv("AAR_EXTRA_RULES", os.pathsep.join([str(a), str(missing), "", str(b)]))
+
+        prompt = build_system_prompt()
+        order = [prompt.index(s) for s in ("global coding rule", "app rule", "user addition", "project rule")]
+        assert order == sorted(order)
+        assert "\n---\napp rule\n---\n" in prompt
+
+    def test_no_global_rules(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        app = tmp_path / "app.md"
+        app.write_text("app rule", encoding="utf-8")
+        monkeypatch.setenv("AAR_EXTRA_RULES", str(app))
+        monkeypatch.setenv("AAR_NO_GLOBAL_RULES", "1")
+
+        prompt = build_system_prompt()
+        assert "global coding rule" not in prompt
+        assert "global drop-in" not in prompt
+        assert prompt.endswith("app rule")
+
+    def test_no_global_rules_layer_listed_as_off(self, tmp_path, monkeypatch):
+        from agent.core.config import _collect_layers
+
+        self._home(tmp_path, monkeypatch)
+        monkeypatch.setenv("AAR_NO_GLOBAL_RULES", "true")
+        layers = {layer.label: layer for layer in _collect_layers()}
+        assert not layers["global"].loaded
+        assert "AAR_NO_GLOBAL_RULES" in layers["global"].source
+        assert "global-d" not in layers
+
+    def test_flag_values(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        for value in ("0", "", "no"):
+            monkeypatch.setenv("AAR_NO_GLOBAL_RULES", value)
+            assert "global coding rule" in build_system_prompt()
 
 
 # ---------------------------------------------------------------------------
