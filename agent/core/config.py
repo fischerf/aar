@@ -97,6 +97,16 @@ def _default_system_prompt(
     return "\n".join(lines)
 
 
+#: Extra rules files (os.pathsep-separated) added after the global rules.
+EXTRA_RULES_ENV = "AAR_EXTRA_RULES"
+#: "1" / "true" / "yes": leave out ~/.aar/rules.md and ~/.aar/rules.d/*.md.
+NO_GLOBAL_RULES_ENV = "AAR_NO_GLOBAL_RULES"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class PromptLayer:
     """One contributing layer of the assembled system prompt."""
 
@@ -144,26 +154,42 @@ def _collect_layers(
     global_dir = Path.home() / ".aar"
 
     global_rules = global_dir / "rules.md"
-    layers.append(
-        PromptLayer(
-            "global",
-            str(global_rules),
-            global_rules,
-            global_rules.read_text(encoding="utf-8").strip() if global_rules.is_file() else "",
-            global_rules.is_file(),
+    if _env_flag(NO_GLOBAL_RULES_ENV):
+        # An app embedding aar (e.g. Aar Desktop) brings its own rules; the
+        # user's CLI rules (~/.aar/rules.md, a coding-agent template) don't fit.
+        layers.append(
+            PromptLayer("global", f"{global_rules} (off: {NO_GLOBAL_RULES_ENV})", global_rules, "", False)
         )
-    )
-
-    for extra in sorted((global_dir / "rules.d").glob("*.md")):
+    else:
         layers.append(
             PromptLayer(
-                "global-d",
-                str(extra),
-                extra,
-                extra.read_text(encoding="utf-8").strip(),
-                True,
+                "global",
+                str(global_rules),
+                global_rules,
+                global_rules.read_text(encoding="utf-8").strip() if global_rules.is_file() else "",
+                global_rules.is_file(),
             )
         )
+
+        for extra in sorted((global_dir / "rules.d").glob("*.md")):
+            layers.append(
+                PromptLayer(
+                    "global-d",
+                    str(extra),
+                    extra,
+                    extra.read_text(encoding="utf-8").strip(),
+                    True,
+                )
+            )
+
+    # Rules files handed over by the host application (AAR_EXTRA_RULES, separated
+    # by os.pathsep), between the global and the project rules.
+    for raw in os.environ.get(EXTRA_RULES_ENV, "").split(os.pathsep):
+        if not raw.strip():
+            continue
+        path = Path(raw.strip()).expanduser()
+        text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+        layers.append(PromptLayer("extra", str(path), path, text, bool(text)))
 
     rules_dir = project_rules_dir if project_rules_dir is not None else Path(".agent")
     base = Path.cwd() / rules_dir
@@ -216,8 +242,11 @@ def build_system_prompt(
       3. Skills           — available skill names for on-demand loading
       4. Global           — ~/.aar/rules.md (user-wide preferences)
       5. Global drop-ins  — ~/.aar/rules.d/*.md (sorted; add files here for env-specific rules)
-      6. Project          — <project_rules_dir>/rules.md (project-specific instructions)
-      7. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
+                            (4 + 5 are skipped when $AAR_NO_GLOBAL_RULES is set)
+      6. Extra            — files in $AAR_EXTRA_RULES (os.pathsep-separated; set by
+                            an embedding app such as Aar Desktop)
+      7. Project          — <project_rules_dir>/rules.md (project-specific instructions)
+      8. Project drop-ins — <project_rules_dir>/rules.d/*.md (sorted)
     """
     layers = _collect_layers(
         project_rules_dir=project_rules_dir,
