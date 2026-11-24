@@ -73,6 +73,16 @@ def test_find_window_ambiguous_lists_candidates():
     assert "2 windows match" in str(exc.value) and "300" in str(exc.value)
 
 
+def test_find_window_ignores_invisible_characters_and_dash_kinds():
+    # Edge puts a zero-width space into its title; models type it without.
+    edge = WindowInfo(500, "Neuer Tab - Profil 1 – Microsoft​ Edge", "msedge.exe", 5)
+    windows = [*WINDOWS, edge]
+    assert find_window(windows, "Neuer Tab - Profil 1 – Microsoft Edge").handle == 500
+    assert find_window(windows, "Neuer Tab - Profil 1 - Microsoft Edge").handle == 500
+    assert find_window(windows, "microsoft  edge").handle == 500
+    assert "​" not in edge.line() and "Microsoft Edge" in edge.line()
+
+
 def test_find_window_missing():
     with pytest.raises(WinMcpError, match="list_windows"):
         find_window(WINDOWS, "Paint")

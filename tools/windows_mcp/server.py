@@ -214,6 +214,18 @@ Area = Annotated[
 Fraction = Annotated[float, Field(description="0 = left/top edge .. 1 = right/bottom edge")]
 
 
+def _whole_window(element: str | None) -> str:
+    """Positions without an element are fractions of the whole window, toolbars
+    included - a common reason why drawing "does nothing" on the picture."""
+    if element:
+        return ""
+    return (
+        " Note: without element the positions were fractions of the whole window"
+        " (menus and toolbars included). To draw on a canvas or picture, pass its"
+        " element id from get_ui_tree."
+    )
+
+
 @mcp.tool(annotations=_change("Click at a position"))
 @_quiet
 def click_at(
@@ -225,7 +237,7 @@ def click_at(
 ) -> str:
     """Click at a position inside an element or the window, for places without their own
     control: a spot on a canvas (e.g. with a fill tool), a map, a slider track."""
-    return uia.click_at(uia.window(window).handle, x, y, element, action)
+    return uia.click_at(uia.window(window).handle, x, y, element, action) + _whole_window(element)
 
 
 @mcp.tool(annotations=_change("Drag the mouse"))
@@ -246,7 +258,7 @@ def drag(
 ) -> str:
     """Press the mouse button, move through the points and release: draw on a canvas,
     move a slider, drag and drop."""
-    return uia.drag(uia.window(window).handle, points, element, button)
+    return uia.drag(uia.window(window).handle, points, element, button) + _whole_window(element)
 
 
 @mcp.tool(annotations=_read("Read text from a window"))
