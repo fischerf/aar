@@ -25,6 +25,12 @@ _PREMATURE_END_FOLLOWUP = (
     "Do NOT repeat the same fix — try something materially different."
 )
 
+_STOPPED_THINKING_FOLLOWUP = (
+    "You stopped in the middle of your reasoning without answering and without "
+    "calling a tool. Continue now: call the tool you planned to use, or give the "
+    "user your answer."
+)
+
 # Local shell tools whose environment-shaped failures suggest acp_terminal.
 _SHELL_TOOLS: frozenset[str] = frozenset({"bash", "powershell"})
 
@@ -161,12 +167,16 @@ class LoopGuardrails:
     # Premature end_turn recovery
     # ------------------------------------------------------------------
 
-    def should_continue_after_premature_end(self, session: Session, response_content: str) -> bool:
+    def should_continue_after_premature_end(
+        self, session: Session, response_content: str, reasoning: str = ""
+    ) -> bool:
         """Return *True* if the loop should retry after an empty/minimal end_turn.
 
         Detects when the model stops with empty or very short content while
-        recent tool results contain errors or test failures.  This prevents
-        the agent from silently giving up mid-task.
+        recent tool results contain errors or test failures, or while it was
+        still reasoning (small local models sometimes end the turn mid-thought,
+        e.g. "I'll write the file first…", with no answer and no tool call).
+        This prevents the agent from silently giving up mid-task.
 
         Each call increments the recovery counter.  Once the configured
         limit (default 2) is reached, returns *False*.
@@ -179,16 +189,21 @@ class LoopGuardrails:
         if len(response_content.strip()) > 0:
             return False
 
-        # Check if recent tool results contain failure indicators
-        if not self._has_recent_failures(session):
+        # Recent tool failures, or the model stopped while still thinking.
+        if not self._has_recent_failures(session) and not reasoning.strip():
             return False
 
         state["premature_end_recovery_count"] += 1
         return True
 
-    def premature_end_followup(self) -> str:
-        """Return the continuation prompt injected after a premature end_turn."""
-        return _PREMATURE_END_FOLLOWUP
+    def premature_end_followup(self, after_failures: bool = True) -> str:
+        """Return the continuation prompt injected after a premature end_turn
+        (``after_failures=False``: the model stopped mid-reasoning)."""
+        return _PREMATURE_END_FOLLOWUP if after_failures else _STOPPED_THINKING_FOLLOWUP
+
+    def has_recent_failures(self, session: Session) -> bool:
+        """Do the last tool results show errors or test failures?"""
+        return self._has_recent_failures(session)
 
     @staticmethod
     def _has_recent_failures(session: Session) -> bool:

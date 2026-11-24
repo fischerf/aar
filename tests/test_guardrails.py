@@ -337,6 +337,26 @@ class TestPrematureEndRecovery:
 
         assert guardrails.should_continue_after_premature_end(session, "") is False
 
+    def test_triggers_when_stopped_mid_reasoning(self) -> None:
+        """No answer, no tool call, but the model was still thinking (small local
+        models): continue even without tool failures."""
+        guardrails = LoopGuardrails(GuardrailsConfig(max_premature_end_recoveries=2))
+        session = _make_session_clean()
+
+        assert guardrails.should_continue_after_premature_end(
+            session, "", "Ich werde die Einladung in einer .txt-Datei erst"
+        ) is True
+        assert guardrails.has_recent_failures(session) is False
+        msg = guardrails.premature_end_followup(after_failures=False)
+        assert "call the tool" in msg and msg != guardrails.premature_end_followup()
+
+    def test_reasoning_does_not_override_an_answer(self) -> None:
+        guardrails = LoopGuardrails(GuardrailsConfig(max_premature_end_recoveries=2))
+        session = _make_session_clean()
+
+        assert guardrails.should_continue_after_premature_end(session, "Fertig.", "thinking") is False
+        assert guardrails.should_continue_after_premature_end(session, "", "   ") is False
+
     def test_does_not_trigger_with_any_content(self) -> None:
         """End_turn with ANY content does NOT trigger even with failures."""
         guardrails = LoopGuardrails(GuardrailsConfig(max_premature_end_recoveries=2))

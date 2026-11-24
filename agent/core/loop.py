@@ -456,8 +456,9 @@ async def run_loop(
                 )
                 continue
 
+            reasoning = "".join(rb.content for rb in response.reasoning)
             if stop == StopReason.END_TURN and guardrails.should_continue_after_premature_end(
-                session, response.content
+                session, response.content, reasoning
             ):
                 log.info(
                     "Premature end_turn detected at step %d — injecting continuation",
@@ -467,7 +468,7 @@ async def run_loop(
                 append_internal_user_message(
                     session,
                     on_event,
-                    guardrails.premature_end_followup(),
+                    guardrails.premature_end_followup(guardrails.has_recent_failures(session)),
                     reason="premature_end_recovery",
                 )
                 continue
