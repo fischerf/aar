@@ -13,6 +13,7 @@ from agent.core.config import ProviderConfig
 from agent.core.events import ProviderMeta, StopReason, ToolCall
 from agent.core.multimodal import tool_images_followup_message
 from agent.providers.base import FRAMEWORK_EXTRA_KEYS, Provider, ProviderResponse, StreamDelta
+from agent.providers._text_tool_calls import may_be_text_tool_call, parse_text_tool_calls
 from agent.providers.errors import translate_provider_errors
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,22 @@ class OllamaProvider(Provider):
 
             content, reasoning_blocks = extract_all(content)
 
+        # A tool call the model wrote as text (Mistral without [TOOL_CALLS]).
+        if not tool_calls and tools and self.supports_tools:
+            text_calls = parse_text_tool_calls(content, _tool_names(tools))
+            if text_calls:
+                for i, tc in enumerate(text_calls):
+                    fn = tc["function"]
+                    tool_calls.append(
+                        ToolCall(
+                            tool_name=fn["name"],
+                            tool_call_id=f"ollama_tc_{call_uid}_{i}",
+                            arguments=fn["arguments"],
+                        )
+                    )
+                content = ""
+                stop_reason = _map_stop_reason(done_reason, True)
+
         # Usage metadata
         usage: dict[str, int] = {}
         if "prompt_eval_count" in data:
@@ -255,6 +272,24 @@ class OllamaProvider(Provider):
                 )
             return out
 
+        # Mistral models sometimes write a tool call as text (without the
+        # [TOOL_CALLS] token Ollama parses). Hold the start of the answer back
+        # while it could still be such a call and release it as soon as it is not.
+        tool_names = _tool_names(tools) if tools and self.supports_tools else set()
+        holding = bool(tool_names)
+        held = ""
+
+        def _finish_held(tail: str) -> str:
+            """End holding: a text tool call becomes a real one, else the text is returned."""
+            nonlocal held, holding
+            text_out, held, holding = held + tail, "", False
+            if not tool_acc:
+                text_calls = parse_text_tool_calls(text_out, tool_names)
+                if text_calls:
+                    tool_acc.extend(text_calls)
+                    return ""
+            return text_out
+
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
             if resp.status_code != 200:
                 # Read the body so error messages are informative, then raise.
@@ -292,6 +327,13 @@ class OllamaProvider(Provider):
 
                 is_done = data.get("done", False)
 
+                if text and holding:
+                    held += text
+                    if may_be_text_tool_call(held, tool_names):
+                        text = ""
+                    else:
+                        text, held, holding = held, "", False
+
                 if text or reasoning:
                     yield StreamDelta(
                         text=text,
@@ -301,6 +343,8 @@ class OllamaProvider(Provider):
                 if is_done:
                     # Flush any partial-opener buffer
                     clean, leftover_reasoning = router.flush()
+                    if holding:
+                        clean = _finish_held(clean)
                     if clean or leftover_reasoning:
                         yield StreamDelta(text=clean, reasoning_delta=leftover_reasoning)
 
@@ -334,6 +378,8 @@ class OllamaProvider(Provider):
         # so they aren't lost. Exceptions propagate to the caller untouched. (#6)
         if not emitted_done:
             clean, leftover_reasoning = router.flush()
+            if holding:
+                clean = _finish_held(clean)
             if clean or leftover_reasoning:
                 yield StreamDelta(text=clean, reasoning_delta=leftover_reasoning)
             for delta_out in _emit_tool_calls():
@@ -474,6 +520,10 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return ollama_tools
+
+
+def _tool_names(tools: list[dict[str, Any]] | None) -> set[str]:
+    return {t["name"] for t in tools or [] if t.get("name")}
 
 
 def _map_stop_reason(done_reason: str, has_tool_calls: bool) -> str:
