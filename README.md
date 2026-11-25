@@ -30,7 +30,7 @@
 
 A lean, provider-agnostic agent framework with a thin core loop, typed event model, sandboxed tool execution, pluggable transports, and an extension API.
 
-🇪🇺 **Made in the EU, open source, no telemetry.** aar collects no usage data. With a local model via Ollama, your
+**Made in the EU, open source, no telemetry.** aar collects no usage data. With a local model via Ollama, your
 prompts, files and sessions never leave your machine, which makes GDPR-compliant use easy. With a cloud provider,
 only what you send to that provider leaves it.
 
