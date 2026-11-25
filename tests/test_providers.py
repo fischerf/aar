@@ -544,6 +544,111 @@ class TestOllamaNormalization:
 
 
 class TestGeminiHttpCompatibility:
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": {"path": {"type": "string", "minLength": 1}},
+                "type": "object",
+                "properties": {
+                    "path": {"$ref": "#/$defs/path"},
+                    "$schema": {"type": "string"},
+                    "options": {
+                        "anyOf": [{"type": "null"}, {"type": "object"}],
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            {"type": "object", "properties": {}},
+        ],
+    )
+    def test_http_tools_preserve_json_schema(self, schema):
+        from copy import deepcopy
+
+        from agent.providers.gemini import _convert_tools_http
+
+        tools = [{"name": "read_file", "description": "Read a file", "input_schema": schema}]
+        original = deepcopy(tools)
+        declarations = _convert_tools_http(tools)
+
+        assert declarations == [
+            {"name": "read_file", "description": "Read a file", "parametersJsonSchema": schema}
+        ]
+        assert tools == original
+
+    def test_http_tool_without_schema_uses_empty_object(self):
+        from agent.providers.gemini import _convert_tools_http
+
+        assert _convert_tools_http([{"name": "ping"}]) == [
+            {
+                "name": "ping",
+                "description": "",
+                "parametersJsonSchema": {"type": "object", "properties": {}},
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_http_requests_send_json_schema_field(self, streaming):
+        import json
+
+        import httpx
+
+        from agent.providers.gemini import GeminiProvider
+
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": False,
+        }
+        requests = []
+
+        def handle(request):
+            requests.append(request)
+            payload = json.loads(request.content)
+            declaration = payload["tools"][0]["functionDeclarations"][0]
+            assert declaration["parametersJsonSchema"] == schema
+            assert "parameters" not in declaration
+            response = {
+                "candidates": [
+                    {"content": {"parts": [{"text": "OK"}]}, "finishReason": "STOP"}
+                ]
+            }
+            if streaming:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    text="data: " + json.dumps(response) + "\n\n",
+                )
+            return httpx.Response(200, json=response)
+
+        provider = GeminiProvider(
+            ProviderConfig(
+                name="gemini",
+                model="gemini-3.5-flash",
+                api_key="test-key",
+                base_url="https://example.test/gemini/gemini-3.5-flash",
+            )
+        )
+        await provider._http_client.aclose()
+        provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        try:
+            messages = [{"role": "user", "content": "Hi"}]
+            tools = [{"name": "read_file", "input_schema": schema}]
+            if streaming:
+                deltas = [delta async for delta in provider.stream(messages, tools)]
+                assert "".join(delta.text for delta in deltas) == "OK"
+            else:
+                assert (await provider.complete(messages, tools)).content == "OK"
+            assert len(requests) == 1
+            suffix = ":streamGenerateContentSse" if streaming else ":generateContent"
+            assert str(requests[0].url).endswith(suffix)
+        finally:
+            await provider.close()
+
     def test_thought_signature_survives_tool_round_trip(self):
         from agent.core.session import Session
         from agent.providers.gemini import _build_contents, _parse_http_response

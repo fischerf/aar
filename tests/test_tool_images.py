@@ -316,20 +316,23 @@ class TestOllama:
 
 
 class TestGemini:
-    def test_inline_data_after_function_response_http(self):
+    def test_inline_data_inside_function_response_http(self):
         from agent.providers.gemini import _build_contents
 
         contents = _build_contents(_tool_turn())
+        assert contents[-1]["role"] == "user"
         parts = contents[-1]["parts"]
-        assert "functionResponse" in parts[0]
-        assert parts[0]["functionResponse"]["name"] == "screenshot"
-        assert parts[1] == {"inlineData": {"mimeType": "image/png", "data": PNG_B64}}
+        assert len(parts) == 1
+        response = parts[0]["functionResponse"]
+        assert response["name"] == "screenshot"
+        assert response["response"]["content"].startswith("[image: image/png")
+        assert response["parts"] == [{"inlineData": {"mimeType": "image/png", "data": PNG_B64}}]
 
     def test_inline_data_is_bytes_in_sdk_mode(self):
         from agent.providers.gemini import _build_contents
 
         parts = _build_contents(_tool_turn(), sdk_mode=True)[-1]["parts"]
-        assert parts[1]["inlineData"]["data"] == PNG_BYTES
+        assert parts[0]["functionResponse"]["parts"][0]["inlineData"]["data"] == PNG_BYTES
 
     def test_sdk_accepts_parts(self):
         pytest.importorskip("google.genai")
@@ -338,8 +341,131 @@ class TestGemini:
         from agent.providers.gemini import _build_contents
 
         content = types.Content.model_validate(_build_contents(_tool_turn(), sdk_mode=True)[-1])
-        assert content.parts[1].inline_data.data == PNG_BYTES
-        assert content.parts[1].inline_data.mime_type == "image/png"
+        response = content.parts[0].function_response
+        assert response.parts[0].inline_data.data == PNG_BYTES
+        assert response.parts[0].inline_data.mime_type == "image/png"
+
+    @pytest.mark.parametrize("sdk_mode", [False, True])
+    def test_parallel_results_keep_images_with_their_function(self, sdk_mode):
+        from copy import deepcopy
+
+        from agent.providers.gemini import _build_contents
+
+        messages = events_to_messages(
+            [
+                UserMessage(content="Inspect two images"),
+                ToolCall(tool_name="first", tool_call_id="tc1", arguments={}),
+                ToolCall(tool_name="second", tool_call_id="tc2", arguments={}),
+                AssistantMessage(content=""),
+                ToolResult(tool_call_id="tc1", tool_name="first", output="first", images=[_img()]),
+                ToolResult(
+                    tool_call_id="tc2",
+                    tool_name="second",
+                    output="second",
+                    images=[_img(mime="image/jpeg"), _img()],
+                ),
+            ]
+        )
+        original = deepcopy(messages)
+        contents = _build_contents(messages, sdk_mode=sdk_mode)
+        parts = contents[-1]["parts"]
+        assert contents[-1]["role"] == "user"
+        assert len(parts) == 2
+        responses = [part["functionResponse"] for part in parts]
+        assert [response["name"] for response in responses] == ["first", "second"]
+        assert [len(response["parts"]) for response in responses] == [1, 2]
+        assert responses[1]["parts"][0]["inlineData"]["mimeType"] == "image/jpeg"
+        expected = PNG_BYTES if sdk_mode else PNG_B64
+        assert responses[0]["parts"][0]["inlineData"]["data"] == expected
+        assert messages == original
+
+    @pytest.mark.parametrize("sdk_mode", [False, True])
+    def test_legacy_models_retain_sibling_image_encoding(self, sdk_mode):
+        from agent.providers.gemini import _build_contents
+
+        contents = _build_contents(
+            _tool_turn(), sdk_mode=sdk_mode, multimodal_function_responses=False
+        )
+        parts = contents[-1]["parts"]
+        assert contents[-1]["role"] == "user"
+        assert "parts" not in parts[0]["functionResponse"]
+        expected = PNG_BYTES if sdk_mode else PNG_B64
+        assert parts[1] == {"inlineData": {"mimeType": "image/png", "data": expected}}
+
+    def test_text_only_result_has_no_multimodal_parts(self):
+        from agent.providers.gemini import _build_contents
+
+        response = _build_contents(_tool_turn([]))[-1]["parts"][0]["functionResponse"]
+        assert "parts" not in response
+        assert response["name"] == "screenshot"
+        assert response["response"]["content"].startswith("[image: image/png")
+
+    def test_unsupported_image_leaves_text_response_intact(self):
+        from agent.providers.gemini import _build_contents
+
+        messages = _tool_turn()
+        messages[-1]["content"][0]["images"] = [
+            {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}}
+        ]
+        response = _build_contents(messages)[-1]["parts"][0]["functionResponse"]
+        assert "parts" not in response
+        assert response["response"]["content"].startswith("[image: image/png")
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"])
+    async def test_http_request_encodes_tool_images_for_model(self, streaming, model):
+        import json
+
+        import httpx
+
+        from agent.providers.gemini import GeminiProvider
+
+        requests = []
+
+        def handle(request):
+            requests.append(request)
+            contents = json.loads(request.content)["contents"]
+            assert contents[-1]["role"] == "user"
+            parts = contents[-1]["parts"]
+            response = parts[0]["functionResponse"]
+            assert response["name"] == "screenshot"
+            image = {"inlineData": {"mimeType": "image/png", "data": PNG_B64}}
+            if model.startswith("gemini-3"):
+                assert len(parts) == 1
+                assert response["parts"] == [image]
+            else:
+                assert "parts" not in response
+                assert parts[1:] == [image]
+            body = {
+                "candidates": [{"content": {"parts": [{"text": "OK"}]}, "finishReason": "STOP"}]
+            }
+            if streaming:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    text="data: " + json.dumps(body) + "\n\n",
+                )
+            return httpx.Response(200, json=body)
+
+        provider = GeminiProvider(
+            ProviderConfig(
+                name="gemini",
+                model=model,
+                api_key="test-key",
+                base_url="https://example.test/gemini/gemini-3.5-flash",
+            )
+        )
+        await provider._http_client.aclose()
+        provider._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        try:
+            if streaming:
+                deltas = [delta async for delta in provider.stream(_tool_turn())]
+                assert "".join(delta.text for delta in deltas) == "OK"
+            else:
+                assert (await provider.complete(_tool_turn())).content == "OK"
+            assert len(requests) == 1
+        finally:
+            await provider.close()
 
     def test_user_image_attachment_reaches_gemini(self):
         from agent.providers.gemini import _build_contents

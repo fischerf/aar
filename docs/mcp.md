@@ -264,7 +264,7 @@ not accept images]`. How the image travels depends on the provider:
 | Provider | Where the image goes |
 |---|---|
 | Anthropic | `image` blocks inside the `tool_result` |
-| Gemini | `inlineData` parts after the `functionResponse` parts of the same turn |
+| Gemini | `inlineData` nested in each `functionResponse.parts` (Gemini 3+); older models retain sibling image parts |
 | OpenAI, generic | a `user` message right after the turn's `tool` messages (Chat Completions allows images only in user messages) |
 | Ollama | a `user` message with an `images` list right after the `tool` messages |
 

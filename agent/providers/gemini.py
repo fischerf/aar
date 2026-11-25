@@ -59,6 +59,7 @@ import base64
 import json
 import logging
 import os
+import re
 import uuid
 from typing import Any, AsyncIterator
 
@@ -126,6 +127,12 @@ class GeminiProvider(Provider):
         # to suppress thoughts (saves output tokens at the cost of visibility).
         self._include_thoughts: bool = bool(
             config.extra.get("include_thoughts", self._thinking_budget != 0)
+        )
+
+        # Multimodal function responses were introduced with Gemini 3.
+        model_version = re.match(r"gemini-(\d+)", model_lower.rsplit("/", 1)[-1])
+        self._multimodal_function_responses = bool(
+            model_version and int(model_version.group(1)) >= 3
         )
 
         # ── Mode selection ────────────────────────────────────────────────────────────
@@ -249,7 +256,11 @@ class GeminiProvider(Provider):
         tools: list[dict[str, Any]] | None,
         system: str,
     ) -> ProviderResponse:
-        contents = _build_contents(messages, sdk_mode=True)
+        contents = _build_contents(
+            messages,
+            sdk_mode=True,
+            multimodal_function_responses=self._multimodal_function_responses,
+        )
         cfg = self._build_sdk_config(system, tools)
 
         response = await self._sdk_client.aio.models.generate_content(
@@ -265,7 +276,11 @@ class GeminiProvider(Provider):
         tools: list[dict[str, Any]] | None,
         system: str,
     ) -> AsyncIterator[StreamDelta]:
-        contents = _build_contents(messages, sdk_mode=True)
+        contents = _build_contents(
+            messages,
+            sdk_mode=True,
+            multimodal_function_responses=self._multimodal_function_responses,
+        )
         cfg = self._build_sdk_config(system, tools)
 
         tool_acc: list[dict[str, Any]] = []
@@ -534,7 +549,9 @@ class GeminiProvider(Provider):
         system: str,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "contents": _build_contents(messages),
+            "contents": _build_contents(
+                messages, multimodal_function_responses=self._multimodal_function_responses
+            ),
         }
 
         if system:
@@ -629,7 +646,10 @@ def _image_part(block: dict[str, Any], *, sdk_mode: bool = False) -> dict[str, A
 
 
 def _build_contents(
-    messages: list[dict[str, Any]], *, sdk_mode: bool = False
+    messages: list[dict[str, Any]],
+    *,
+    sdk_mode: bool = False,
+    multimodal_function_responses: bool = True,
 ) -> list[dict[str, Any]]:
     """Convert internal Anthropic-style messages to Gemini ``contents`` format.
 
@@ -638,6 +658,9 @@ def _build_contents(
     Gemini uses ``parts`` instead of ``content``, and tool interactions are
     represented as ``functionCall`` / ``functionResponse`` parts rather than
     OpenAI-style ``tool_calls`` / ``role=tool`` messages.
+
+    Gemini 3+ tool images are nested in ``functionResponse.parts``. Older
+    models retain the legacy sibling image layout when the flag is false.
 
     A forward-scan mapping of ``tool_use_id → function_name`` is maintained so
     that ``tool_result`` blocks can be emitted as ``functionResponse`` parts
@@ -665,6 +688,7 @@ def _build_contents(
         tool_results = [b for b in content if b.get("type") == "tool_result"]
         if tool_results and role == "user":
             parts: list[dict[str, Any]] = []
+            trailing_images: list[dict[str, Any]] = []
             for tr in tool_results:
                 tid = tr.get("tool_use_id", "")
                 # Look up the original function name registered during the
@@ -672,21 +696,24 @@ def _build_contents(
                 fname = _tool_id_to_name.get(tid, tid)
                 result = tr.get("content", "")
                 response_data: Any = {"content": result} if isinstance(result, str) else result
-                parts.append(
-                    {
-                        "functionResponse": {
-                            "name": fname,
-                            "response": response_data,
-                        }
-                    }
-                )
-            # Tool-returned images follow the function responses as inline
-            # data parts of the same user turn.
-            for tr in tool_results:
+                function_response: dict[str, Any] = {
+                    "name": fname,
+                    "response": response_data,
+                }
+                # Tool images belong to their function response. Sibling inlineData
+                # parts can make Gemini reject the turn as ending with a model.
+                image_parts = []
                 for img in tr.get("images") or []:
                     image_part = _image_part(img, sdk_mode=sdk_mode)
                     if image_part:
-                        parts.append(image_part)
+                        image_parts.append(image_part)
+                if image_parts and multimodal_function_responses:
+                    function_response["parts"] = image_parts
+                else:
+                    # Gemini 2.x does not support multimodal function responses.
+                    trailing_images.extend(image_parts)
+                parts.append({"functionResponse": function_response})
+            parts.extend(trailing_images)
             if parts:
                 contents.append({"role": "user", "parts": parts})
             continue
@@ -736,12 +763,16 @@ def _convert_tools_sdk(tools: list[dict[str, Any]]):
 
 
 def _convert_tools_http(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert internal tool schemas to Gemini ``functionDeclarations`` dicts."""
+    """Convert tools using the JSON Schema field, matching SDK mode.
+
+    ``parameters`` accepts only Gemini Schema fields, not full MCP JSON
+    Schema (e.g. ``$schema`` and ``$defs``).
+    """
     return [
         {
             "name": t["name"],
             "description": t.get("description", ""),
-            "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+            "parametersJsonSchema": t.get("input_schema", {"type": "object", "properties": {}}),
         }
         for t in tools
     ]
